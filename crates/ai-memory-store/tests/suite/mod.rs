@@ -20,6 +20,7 @@ mod pinned_pages;
 mod project_authz;
 mod reclaim_ledger_versions;
 mod related_walk;
+mod retrieval_entity_project_name;
 mod retrieval_superseded;
 mod retrieval_tuning_streams;
 mod session_ids_touching_scope;

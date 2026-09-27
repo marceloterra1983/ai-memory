@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Scoped retrieval excludes the exact scoped project name from entity matches,
+  preventing the scope label from adding an RRF vote to unrelated pages.
+  (local fixbrainrank patch; no upstream issue opened)
+
 ## [2.5.2] - 2026-10-01
 
 ### Added

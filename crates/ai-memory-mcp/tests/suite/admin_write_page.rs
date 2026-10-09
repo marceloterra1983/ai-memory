@@ -13,9 +13,11 @@ use serde_json::json;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-async fn make_state(tmp: &TempDir) -> AdminState {
+pub(super) async fn make_state(tmp: &TempDir) -> AdminState {
     let store = Store::open(tmp.path()).unwrap();
-    let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+    let wiki = Wiki::new(tmp.path(), store.writer.clone())
+        .unwrap()
+        .with_store_reader(store.reader.clone());
     let db_path = store.db_path().to_path_buf();
     AdminState {
         ingest_metrics: std::sync::Arc::new(ai_memory_core::IngestMetrics::default()),

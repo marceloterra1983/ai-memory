@@ -203,6 +203,69 @@ pub fn upsert_page(conn: &mut Connection, page: &NewPage) -> StoreResult<PageId>
     Ok(result_id)
 }
 
+pub(crate) fn upsert_page_metadata_if_latest(
+    conn: &mut Connection,
+    page: &NewPage,
+    expected_latest_id: PageId,
+    expected_body_sha256: [u8; 32],
+) -> StoreResult<Option<PageId>> {
+    let tx = conn.transaction()?;
+    type MetadataHead = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+    let current: Option<MetadataHead> = tx
+        .query_row(
+            "SELECT id, body_sha256, author_id FROM pages WHERE workspace_id=?1 \
+         AND project_id=?2 AND path=?3 AND is_latest=1",
+            params![
+                page.workspace_id.as_bytes(),
+                page.project_id.as_bytes(),
+                page.path.as_str()
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, hash, author)) = current else {
+        return Ok(None);
+    };
+    let incoming_hash: [u8; 32] = Sha256::digest(page.body.as_bytes()).into();
+    if id != expected_latest_id.as_bytes()
+        || hash != expected_body_sha256
+        || incoming_hash != expected_body_sha256
+    {
+        return Ok(None);
+    }
+    let mut page = page.clone();
+    page.author_id = author
+        .map(|id| ai_memory_core::UserId::from_slice(&id))
+        .transpose()?;
+    let result = upsert_page_in_tx(&tx, &page, Timestamp::now().as_microsecond())?;
+    // Preserve indexed TTL even when a legacy document has no frontmatter key.
+    tx.execute(
+        "UPDATE pages SET expires_at=(SELECT expires_at FROM pages WHERE id=?2) WHERE id=?1",
+        params![result.as_bytes(), expected_latest_id.as_bytes()],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO page_evidence(page_id,source_kind,source_id,created_at) \
+         SELECT ?1,source_kind,source_id,created_at FROM page_evidence WHERE page_id=?2",
+        params![result.as_bytes(), expected_latest_id.as_bytes()],
+    )?;
+    // The CAS proves the body is identical. Keep its vectors eligible on the new
+    // head without invoking a provider for a metadata-only change.
+    tx.execute(
+        "INSERT OR IGNORE INTO page_embeddings(page_id,vector,provider,model,dim,created_at) \
+         SELECT ?1,vector,provider,model,dim,created_at FROM page_embeddings WHERE page_id=?2",
+        params![result.as_bytes(), expected_latest_id.as_bytes()],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO page_abstract_embeddings(page_id,vector,provider,model,dim,created_at) \
+         SELECT ?1,vector,provider,model,dim,created_at FROM page_abstract_embeddings WHERE page_id=?2 \
+         AND (SELECT json_extract(frontmatter_json,'$.abstract') FROM pages WHERE id=?1) \
+         IS (SELECT json_extract(frontmatter_json,'$.abstract') FROM pages WHERE id=?2)",
+        params![result.as_bytes(), expected_latest_id.as_bytes()],
+    )?;
+    tx.commit()?;
+    Ok(Some(result))
+}
+
 /// Resolve a workspace by name, creating it if missing. Atomic.
 pub fn get_or_create_workspace(
     conn: &mut Connection,
@@ -1670,6 +1733,13 @@ fn replace_links_in_tx(
             continue;
         }
         let to_page_id = latest_page_id_for_link(tx, page, link)?;
+        // A typed claim needs an exact existing target. Keep unresolved
+        // declarations in source frontmatter for curation, rather than
+        // inventing a forward edge that could later bind to unrelated facts.
+        // Plain body references intentionally retain their forward-link form.
+        if link.relation.is_some() && to_page_id.is_none() {
+            continue;
+        }
         let to_page_blob = to_page_id.as_ref().map(|id| &id.as_bytes()[..]);
         tx.execute(
             "INSERT INTO links \

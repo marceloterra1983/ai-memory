@@ -701,6 +701,7 @@ pub fn admin_router_with_sweep_tuning(
         .route("/admin/rename-workspace", post(handle_rename_workspace))
         .route("/admin/merge-workspace", post(handle_merge_workspace))
         .route("/admin/write-page", post(handle_write_page))
+        .route("/admin/curate-relations", post(handle_curate_relations))
         .route("/admin/delete-page", post(handle_delete_page));
     let users = Router::new()
         .route(
@@ -7660,6 +7661,54 @@ async fn handle_merge_workspace(
 // ---------------------------------------------------------------------
 // write-page
 // ---------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurateRelationsAdminRequest {
+    workspace: String,
+    project: String,
+    path: String,
+    expected_head_id: ai_memory_core::PageId,
+    expected_body_sha256: String,
+    #[serde(default = "curation_dry_run_default")]
+    dry_run: bool,
+}
+
+fn curation_dry_run_default() -> bool {
+    true
+}
+
+async fn handle_curate_relations(
+    State(state): State<Arc<AdminState>>,
+    level_ext: Option<axum::Extension<ai_memory_core::AuthLevel>>,
+    actor_ext: Option<axum::Extension<ai_memory_core::ActorContext>>,
+    Json(req): Json<CurateRelationsAdminRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    require_root(level_ext.map_or(ai_memory_core::AuthLevel::Anonymous, |v| v.0))?;
+    let (ws, proj) = lookup_ws_proj_no_create(&state, &req.workspace, &req.project).await?;
+    let path = PagePath::new(req.path).map_err(|_| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error":"invalid page path"})),
+        )
+    })?;
+    let hash = hex_to_sha256(&req.expected_body_sha256).map_err(|_| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error":"expected_body_sha256 must be 64 hex digits"})),
+        )
+    })?;
+    let result = state.wiki.curate_relations(ai_memory_wiki::RelationCurationRequest {
+        workspace_id:ws,project_id:proj,path,expected_head_id:req.expected_head_id,
+        expected_body_sha256:hash,dry_run:req.dry_run,
+        actor:actor_ext.map_or_else(ai_memory_core::ActorContext::anonymous,|v|v.0),
+    }).await.map_err(|e| match e {
+        WikiError::StalePageHead => (StatusCode::CONFLICT,Json(serde_json::json!({"error":"page head or body hash changed; rerun the dry-run"}))),
+        WikiError::ProtectedPageContent => (StatusCode::UNPROCESSABLE_ENTITY,Json(serde_json::json!({"error":"admission or sanitization would change protected content"}))),
+        _ => internal_err("relation curation failed; no content included in diagnostics"),
+    })?;
+    Ok((StatusCode::OK, Json(result)))
+}
 
 /// JSON request body for `POST /admin/write-page`.
 #[derive(Deserialize)]

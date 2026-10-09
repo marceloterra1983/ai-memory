@@ -132,6 +132,12 @@ pub(crate) enum WriteCmd {
         page: NewPage,
         reply: oneshot::Sender<StoreResult<PageId>>,
     },
+    UpsertPageMetadataIfLatest {
+        page: NewPage,
+        expected_latest_id: PageId,
+        expected_body_sha256: [u8; 32],
+        reply: oneshot::Sender<StoreResult<Option<PageId>>>,
+    },
     UpsertPageBatch {
         pages: Vec<NewPage>,
         reply: oneshot::Sender<StoreResult<Vec<PageId>>>,
@@ -1417,7 +1423,8 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
-    /// Mark a claimed SessionEnd consolidation job complete.
+    /// Mark a claimed SessionEnd consolidation job complete and link its owned
+    /// latest session anchor. A completion without one retains a reason.
     pub async fn complete_session_consolidation(
         &self,
         job: SessionConsolidationJob,
@@ -1457,9 +1464,10 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
-    /// Reconcile a session's durable consolidation job row to `completed` after
-    /// a manual `memory_consolidate` produced the page out-of-band. Never
-    /// touches a `running` lease. Returns the number of rows updated.
+    /// Reconcile the latest owned session anchor and durable job state after
+    /// consolidation. Never touches a `running` lease or the session's end
+    /// time/observations. A completion without an anchor retains a reason;
+    /// returns the number of job rows updated, even if only the link changed.
     pub async fn reconcile_session_consolidation_completed(
         &self,
         session_id: SessionId,
@@ -2420,6 +2428,29 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Supersede a metadata-only update if the scoped head and body hash match.
+    /// Preserves the predecessor's attribution and evidence in the same transaction.
+    /// A stale head, foreign id, or changed body returns `None` without writing.
+    ///
+    /// # Errors
+    /// Propagates writer or SQL errors.
+    pub async fn upsert_page_metadata_if_latest(
+        &self,
+        page: NewPage,
+        expected_latest_id: PageId,
+        expected_body_sha256: [u8; 32],
+    ) -> StoreResult<Option<PageId>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::UpsertPageMetadataIfLatest {
+            page,
+            expected_latest_id,
+            expected_body_sha256,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Delete every version of a page (by path) from the index. The wiki file
     /// removal is the caller's concern; this drops the derived rows so the
     /// page stops appearing in search/recent (the watcher does NOT reconcile
@@ -3330,6 +3361,20 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::UpsertPage { page, reply } => {
                 let result = ops::upsert_page(&mut conn, &page);
                 send_or_warn(reply, result, "upsert_page");
+            }
+            WriteCmd::UpsertPageMetadataIfLatest {
+                page,
+                expected_latest_id,
+                expected_body_sha256,
+                reply,
+            } => {
+                let result = ops::upsert_page_metadata_if_latest(
+                    &mut conn,
+                    &page,
+                    expected_latest_id,
+                    expected_body_sha256,
+                );
+                send_or_warn(reply, result, "upsert_page_metadata_if_latest");
             }
             WriteCmd::DeletePage {
                 workspace_id,

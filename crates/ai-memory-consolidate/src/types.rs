@@ -45,7 +45,7 @@ pub struct ConsolidatedPage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 // Keep implementation history out of the model's input budget.
 #[schemars(
-    description = "Typed edges to existing wiki pages. Declare only relations supported by the session's evidence; empty arrays are the normal case."
+    description = "Typed edges to existing wiki pages, using exact .md paths, optionally [workspace/]project:path.md. Never supply titles or absence markers (None, Nenhuma, N/A); use empty arrays when no exact target is known. Declare only evidence-backed relations."
 )]
 pub struct Relations {
     /// Wiki paths this page describes a cause of.

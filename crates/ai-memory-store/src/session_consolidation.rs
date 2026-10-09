@@ -199,7 +199,8 @@ pub fn claim_next(
 /// Mark a claimed job complete. A stale claim cannot complete a newer lease.
 pub fn complete(conn: &mut Connection, job: &SessionConsolidationJob) -> StoreResult<()> {
     let now = Timestamp::now().as_microsecond();
-    let changed = conn.execute(
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
         "UPDATE session_consolidation_jobs \
          SET state = 'completed', completed_at = ?1, claim_id = NULL, last_error = NULL \
          WHERE session_id = ?2 AND generation = ?3 \
@@ -211,7 +212,15 @@ pub fn complete(conn: &mut Connection, job: &SessionConsolidationJob) -> StoreRe
             job.claim_id.as_bytes(),
         ],
     )?;
-    require_claim_update(changed)
+    require_claim_update(changed)?;
+    let reason = reconcile_session_summary(&tx, job.session_id)?;
+    tx.execute(
+        "UPDATE session_consolidation_jobs SET last_error = ?1 \
+         WHERE session_id = ?2 AND generation = ?3",
+        params![reason, job.session_id.as_bytes(), generation_i64(job)],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Record a provider failure and either schedule another attempt or terminate.
@@ -280,8 +289,8 @@ pub fn release(conn: &mut Connection, job: &SessionConsolidationJob) -> StoreRes
     require_claim_update(changed)
 }
 
-/// Reconcile the durable job row after a manual `memory_consolidate` produced
-/// the page out-of-band from the automatic SessionEnd worker.
+/// Reconcile the summary link and job rows after sync/manual consolidation,
+/// out-of-band from the automatic SessionEnd worker.
 ///
 /// A manual consolidate writes the page directly through the consolidator and
 /// never touches this queue, so the session's job row can sit in a terminal
@@ -292,24 +301,75 @@ pub fn release(conn: &mut Connection, job: &SessionConsolidationJob) -> StoreRes
 /// It deliberately never touches a `running` row: that state is an active
 /// worker lease, and stomping it would violate the single-writer/collaboration
 /// invariants (a live automatic attempt must finish and settle its own row
-/// through the claim-guarded `complete`/`fail`). `completed` rows are already
-/// consistent and left untouched. Unlike `complete`/`fail`, this is not
+/// through the claim-guarded `complete`/`fail`). Already `completed` rows only
+/// update when the no-page diagnostic changes. Unlike `complete`/`fail`, this is not
 /// claim-guarded: it is a session-scoped reconcile, not a lease transition.
 ///
-/// Returns the number of job rows updated (0 when there was no job, or the only
-/// row was already `completed` or `running`).
+/// Also links the latest owned session anchor, without ending the session or
+/// changing its observations. A completed attempt without an anchor retains
+/// a bounded `no_session_page` reason in `last_error` rather than claiming a
+/// write. Returns the number of job rows updated; a link may be repaired even
+/// when there is no job or the worker still owns a running lease.
 pub fn reconcile_session_consolidation_completed(
     conn: &mut Connection,
     session_id: SessionId,
 ) -> StoreResult<usize> {
     let now = Timestamp::now().as_microsecond();
-    let changed = conn.execute(
+    let tx = conn.transaction()?;
+    let reason = reconcile_session_summary(&tx, session_id)?;
+    let changed = tx.execute(
         "UPDATE session_consolidation_jobs \
-         SET state = 'completed', completed_at = ?1, claim_id = NULL, last_error = NULL \
-         WHERE session_id = ?2 AND state IN ('failed', 'pending', 'superseded')",
-        params![now, session_id.as_bytes()],
+         SET state = 'completed', completed_at = ?1, claim_id = NULL, last_error = ?3 \
+         WHERE session_id = ?2 \
+           AND (state IN ('failed', 'pending', 'superseded') \
+                OR (state = 'completed' AND last_error IS NOT ?3))",
+        params![now, session_id.as_bytes(), reason],
     )?;
+    tx.commit()?;
     Ok(changed)
+}
+
+fn reconcile_session_summary(
+    conn: &Connection,
+    session_id: SessionId,
+) -> StoreResult<Option<&'static str>> {
+    // Match the consolidator's target: majority observation scope, newest on
+    // ties, then the immutable session scope. A same-path page elsewhere, or
+    // a manual replacement owned by another session, is never borrowed.
+    let page: Option<Vec<u8>> = conn
+        .query_row(
+            "WITH observed AS ( \
+             SELECT workspace_id, project_id FROM observations WHERE session_id = ?1 \
+             GROUP BY workspace_id, project_id \
+             ORDER BY COUNT(*) DESC, MAX(created_at) DESC LIMIT 1 \
+         ), target AS ( \
+             SELECT workspace_id, project_id FROM observed \
+             UNION ALL \
+             SELECT workspace_id, project_id FROM sessions WHERE id = ?1 \
+               AND NOT EXISTS (SELECT 1 FROM observed) \
+         ) \
+         SELECT p.id FROM pages p JOIN target t \
+           ON p.workspace_id = t.workspace_id AND p.project_id = t.project_id \
+         WHERE p.path = ?2 AND p.is_latest = 1 \
+           AND json_extract(p.frontmatter_json, '$.session_id') = ?3",
+            params![
+                session_id.as_bytes(),
+                format!("sessions/{session_id}.md"),
+                session_id.to_string()
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(page) = page else {
+        return Ok(Some(
+            "no_session_page: completed without an owned latest session anchor",
+        ));
+    };
+    conn.execute(
+        "UPDATE sessions SET summary_page_id = ?1 WHERE id = ?2",
+        params![page, session_id.as_bytes()],
+    )?;
+    Ok(None)
 }
 
 fn require_claim_update(changed: usize) -> StoreResult<()> {
@@ -408,6 +468,44 @@ mod tests {
             ))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_without_a_session_anchor_has_an_observable_reason() {
+        let (_tmp, store, workspace_id, project_id, session_id) = ended_session().await;
+        store
+            .writer
+            .enqueue_session_consolidation(workspace_id, project_id, session_id)
+            .await
+            .unwrap();
+        let now = Timestamp::now().as_microsecond();
+        let job = store
+            .writer
+            .claim_session_consolidation(now, now - 1)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .writer
+            .complete_session_consolidation(job)
+            .await
+            .unwrap();
+        let db = rusqlite::Connection::open(store.db_path()).unwrap();
+        let (state, reason, summary): (String, Option<String>, Option<Vec<u8>>) = db
+            .query_row(
+                "SELECT j.state, j.last_error, s.summary_page_id \
+             FROM session_consolidation_jobs j JOIN sessions s ON s.id = j.session_id \
+             WHERE s.id = ?1",
+                [session_id.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "completed");
+        assert!(
+            reason.is_some_and(|reason| reason.contains("no_session_page")),
+            "no page is an observable no-op, never a claimed write"
+        );
+        assert_eq!(summary, None);
     }
 
     #[tokio::test]
@@ -668,6 +766,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated, 1, "the failed job row must be reconciled");
+        let db = rusqlite::Connection::open(store.db_path()).unwrap();
+        let reason: Option<String> = db
+            .query_row(
+                "SELECT last_error FROM session_consolidation_jobs WHERE session_id = ?1",
+                [session_id.as_bytes()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(reason.is_some_and(|reason| reason.contains("no_session_page")));
         assert!(
             store
                 .writer

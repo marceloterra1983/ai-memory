@@ -492,6 +492,7 @@ diagram, crate breakdown, schema notes, and invariants.
 | [`docs/companion-crates.md`](docs/companion-crates.md) | Optional companion projects: the [importer](companions/ai-memory-importer) and [external lifecycle relay](companions/ai-memory-relay). |
 | [`docs/external-lifecycle.md`](docs/external-lifecycle.md) | External lifecycle producers: per-execution native capture suppression, preserved handoffs, batch ingestion and stable retry identity. |
 | [`docs/auto-improvement-loop.md`](docs/auto-improvement-loop.md) | Auto-improvement design notes: scheduled review, auto-approval default, manual review opt-in, pending proposal storage, and curator work. |
+| [`local-maintenance-quality/README.md`](local-maintenance-quality/README.md) | Restricted local relation curation and reproducible synthetic integration/recall laboratory. |
 
 ## License
 

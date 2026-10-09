@@ -22,6 +22,9 @@ use crate::git::{Checkpoint, GitAdapter};
 use crate::markdown::{Markdown, derive_title, emit, parse};
 use crate::watcher::is_pending_path;
 
+mod curation;
+pub use curation::{RelationCurationRequest, RelationCurationResult};
+
 /// Store deletion and best-effort file cleanup from [`Wiki::purge_session`].
 #[derive(Debug, Clone)]
 pub struct PurgeSessionOutcome {
@@ -2751,18 +2754,8 @@ impl Wiki {
             // writer's and leave disk disagreeing with the DB `latest` row
             // (#607). Different paths still proceed concurrently.
             let _page_guard = self.lock_page(workspace_id, project_id, &path).await;
-            self.ensure_project_workspace(workspace_id, project_id)
-                .await?;
-            let abs = self.abs_path(workspace_id, project_id, &path);
-            if let Some(parent) = abs.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let installed =
-                replace_file_with_rollback_snapshot(&self.git, &abs, emitted.as_bytes())?;
-
-            match self
-                .writer
-                .upsert_page(NewPage {
+            self.persist_page_locked(
+                NewPage {
                     workspace_id,
                     project_id,
                     path,
@@ -2776,15 +2769,11 @@ impl Wiki {
                     expires_at,
                     entities,
                     evidence,
-                })
-                .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    rollback_or_inconsistent(&self.git, std::slice::from_ref(&installed), &e)?;
-                    return Err(e.into());
-                }
-            }
+                },
+                emitted.as_bytes(),
+                None,
+            )
+            .await?
         };
         // Embed if configured. We do this on the caller's task so the
         // tool reply still happens "indexes commit in the same
@@ -2805,6 +2794,41 @@ impl Wiki {
             );
         }
         Ok(page_id)
+    }
+
+    async fn persist_page_locked(
+        &self,
+        page: NewPage,
+        emitted: &[u8],
+        expected: Option<(PageId, [u8; 32])>,
+    ) -> WikiResult<PageId> {
+        self.ensure_project_workspace(page.workspace_id, page.project_id)
+            .await?;
+        let abs = self.abs_path(page.workspace_id, page.project_id, &page.path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let installed = replace_file_with_rollback_snapshot(&self.git, &abs, emitted)?;
+        let result = match expected {
+            Some((id, hash)) => {
+                self.writer
+                    .upsert_page_metadata_if_latest(page, id, hash)
+                    .await
+            }
+            None => self.writer.upsert_page(page).await.map(Some),
+        };
+        match result {
+            Ok(Some(id)) => Ok(id),
+            Ok(None) => {
+                let e = WikiError::StalePageHead;
+                rollback_or_inconsistent(&self.git, std::slice::from_ref(&installed), &e)?;
+                Err(e)
+            }
+            Err(e) => {
+                rollback_or_inconsistent(&self.git, std::slice::from_ref(&installed), &e)?;
+                Err(e.into())
+            }
+        }
     }
 
     /// Embed `body` (and its L0 `abstract:` line, if present) into

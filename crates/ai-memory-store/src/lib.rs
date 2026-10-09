@@ -7827,6 +7827,11 @@ mod tests {
             .get_or_create_project(ws, "s", None)
             .await
             .unwrap();
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "notes/b.md", "typed target"))
+            .await
+            .unwrap();
         let mut page = sample_page(ws, proj, "notes/a.md", "body");
         page.links = vec![
             ai_memory_core::LinkTarget {

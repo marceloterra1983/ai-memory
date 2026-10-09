@@ -438,3 +438,42 @@ async fn conditional_persistence_rolls_back_installed_metadata_when_writer_cas_r
         Some(latest)
     );
 }
+
+#[tokio::test]
+async fn curation_preserves_a_live_md_sentinel_target() {
+    let f = fixture("Synthetic facts.\r\n").await;
+    // A real page named `none.md` in the same scope.
+    f.wiki
+        .write_page(WritePageRequest {
+            workspace_id: f.ws,
+            project_id: f.proj,
+            path: PagePath::new("none.md").unwrap(),
+            frontmatter: serde_json::json!({}),
+            body: "A legitimate absence-named page.".into(),
+            tier: Tier::Semantic,
+            pinned: false,
+            title: None,
+            admission_ctx: None,
+            author_id: None,
+            actor: ActorContext::anonymous(),
+            evidence: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let receipt = f.wiki.curate_relations(f.request(false)).await.unwrap();
+    assert!(receipt.applied);
+    assert_eq!(
+        receipt.removed, 3,
+        "bare markers removed; the live none.md declaration stays"
+    );
+    let md = f.wiki.read_page(f.ws, f.proj, &f.path).unwrap();
+    assert_eq!(
+        md.frontmatter["relations"]["contradicts"],
+        serde_json::json!(["Free title", "none.md"])
+    );
+    assert_eq!(md.frontmatter["relations"]["fixes"], serde_json::json!([]));
+    assert_eq!(
+        md.frontmatter["relations"]["references"],
+        serde_json::json!([])
+    );
+}

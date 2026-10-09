@@ -3,3 +3,5 @@
 //! no extra binary; a new file must be declared below.
 
 mod admission;
+mod dream_cas;
+mod dream_cas_red;

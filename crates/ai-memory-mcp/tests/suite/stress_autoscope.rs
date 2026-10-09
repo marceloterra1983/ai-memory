@@ -147,6 +147,7 @@ impl Harness {
         let project_cache: ai_memory_hooks::ProjectCache =
             Arc::new(tokio::sync::Mutex::new(ProjectCacheStore::default()));
         let hooks = hook_router(HookState {
+            activity_clock: ai_memory_consolidate::ActivityClock::default(),
             ingest_metrics: std::sync::Arc::new(ai_memory_core::IngestMetrics::default()),
             workspace_id: ws,
             project_id: baked_proj,

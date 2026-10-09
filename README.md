@@ -65,13 +65,14 @@ ai-memory is what's on the other side of those walls.
   rewrite or drop content (compaction, dedup, per-tier curves) stay off by
   default until you turn them on.
 
-- **And it can dream, if you let it.** Point it at an LLM and an opt-in
-  background pass will, while you're idle, rewrite whole clusters of cold
-  notes into single coherent pages — cancelling the moment you come back to
-  work. It never deletes a source (the pre-merge versions stay reachable),
-  it's off by default, and it's gated on a recall eval before it could ever
-  become default behavior. The zero-LLM path above is what runs unless you
-  ask for more.
+- **And it can dream, if you let it.** The [local dream pass](docs/dream-local.md)
+  plans with `dream --workspace W --project P` and only applies with `--apply`.
+  Its opt-in native scheduler uses exact allowlisted scopes and one global
+  cluster allowance. Local semantic gates, bounded inputs, activity cancellation
+  and atomic source checks protect the merge; original versions and a git
+  checkpoint remain recoverable. It is off by default. New embeddings require
+  the explicit scoped `embed` command, and a known-answer pilot must validate
+  factual preservation and recall before activation.
 
 - **It tells you the truth about itself.** One self-contained binary.
   Purge commands that say exactly what "deleted" means. A measured write

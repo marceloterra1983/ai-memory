@@ -15,8 +15,8 @@
 //!
 //! B3:
 //! 5. **Default OFF ⇒ never runs.**
-//! 6. **Cancel-on-activity** stops the pass at a cluster boundary: the in-flight
-//!    cluster completes, every later cluster is left untouched.
+//! 6. **Cancel-on-activity** refuses the in-flight draft before apply and
+//!    prevents every later request and write.
 //!
 //! B4 surprisal ordering is unit-tested in `src/dream.rs` (pure function).
 
@@ -47,6 +47,9 @@ struct FakeMergeLlm {
     calls: Arc<AtomicUsize>,
     saw_schema_field: Arc<AtomicUsize>,
     cancel_after_first: Option<DreamCancel>,
+    response_override: Option<serde_json::Value>,
+    edit: Option<(Wiki, WorkspaceId, ProjectId)>,
+    stall: bool,
 }
 
 impl FakeMergeLlm {
@@ -55,6 +58,9 @@ impl FakeMergeLlm {
             calls: Arc::new(AtomicUsize::new(0)),
             saw_schema_field: Arc::new(AtomicUsize::new(0)),
             cancel_after_first: None,
+            response_override: None,
+            edit: None,
+            stall: false,
         }
     }
 }
@@ -94,8 +100,35 @@ impl LlmProvider for FakeMergeLlm {
         let calls = self.calls.clone();
         let saw_schema = self.saw_schema_field.clone();
         let cancel = self.cancel_after_first.clone();
+        let response = self.response_override.clone();
+        let edit = self.edit.clone();
+        let stall = self.stall;
         Box::pin(async move {
             let n = calls.fetch_add(1, Ordering::SeqCst);
+            if stall {
+                std::future::pending::<()>().await;
+            }
+            if let Some((wiki, workspace_id, project_id)) = edit {
+                wiki.write_page(WritePageRequest {
+                    workspace_id,
+                    project_id,
+                    path: PagePath::new("sessions/a.md").unwrap(),
+                    frontmatter: serde_json::json!({"title":"concurrent fact"}),
+                    body: "Concurrent operator: preserve this new exception.".into(),
+                    tier: Tier::Episodic,
+                    pinned: false,
+                    title: None,
+                    admission_ctx: None,
+                    author_id: None,
+                    actor: ActorContext::anonymous(),
+                    evidence: Vec::new(),
+                })
+                .await
+                .unwrap();
+            }
+            if let Some(response) = response {
+                return Ok(response);
+            }
             // Invariant #7: the merge must be a JSON-schema structured call, and
             // the schema must be the DreamMergedPage contract.
             if serde_json::to_string(&schema)
@@ -104,8 +137,8 @@ impl LlmProvider for FakeMergeLlm {
             {
                 saw_schema.fetch_add(1, Ordering::SeqCst);
             }
-            // B3 cancel-on-activity: after the first cluster is merged, the
-            // operator "returns" — the pass must stop before the next cluster.
+            // The operator returns during the admitted draft request, before
+            // the support gate or any source rewrite.
             if n == 0
                 && let Some(cancel) = cancel
             {
@@ -247,7 +280,7 @@ fn evidence_for(fx: &Fixture, page_id: PageId) -> Vec<(String, String)> {
     rows.map(Result::unwrap).collect()
 }
 
-fn dream_on() -> DreamConfig {
+pub(crate) fn dream_on() -> DreamConfig {
     DreamConfig {
         enabled: true,
         embedding: Some(EmbeddingCoord {
@@ -257,9 +290,11 @@ fn dream_on() -> DreamConfig {
         }),
         min_pts: 0,
         max_eps: 0.0,
-        max_clusters_per_run: 0,
+        max_clusters_per_run: 2,
         min_cold_pages: 0,
         idle_window_secs: 0,
+        semantic_gate: Some(Arc::new(AcceptingGate)),
+        deadline: None,
     }
 }
 
@@ -470,9 +505,8 @@ async fn default_off_never_runs() {
     assert_eq!(superseded_row_count(&fx), before, "no writes when OFF");
 }
 
-/// B3: cancel-on-activity. Two independent cold clusters; the operator "returns"
-/// after the first is merged. The pass must stop at the cluster boundary — the
-/// second cluster is left entirely untouched.
+/// B3: two independent cold clusters; activity during the first admitted
+/// completion must refuse its apply and prevent every subsequent request.
 #[tokio::test]
 async fn cancel_stops_before_next_cluster() {
     let fx = seed_fixture(true).await;
@@ -511,8 +545,8 @@ async fn cancel_stops_before_next_cluster() {
 
     assert_eq!(report.clusters_considered, 2, "two clusters found");
     assert_eq!(
-        report.clusters_merged, 1,
-        "exactly the in-flight cluster merged before the stop: {report:?}"
+        report.clusters_merged, 0,
+        "activity during inference must prevent apply: {report:?}"
     );
     assert!(report.cancelled, "the pass reports it stopped early");
     assert_eq!(report.skipped, 0);
@@ -521,12 +555,427 @@ async fn cancel_stops_before_next_cluster() {
         1,
         "the LLM was called once only"
     );
-    // Blast radius: exactly one cluster was written — its survivor rewrite and
-    // its one loser stub each supersede a prior version (2 rows). Had the second
-    // cluster also merged, there would be 4. The second cluster is untouched.
+    // Neither cluster may supersede a source after activity cancels the pass.
     assert_eq!(
         superseded_row_count(&fx),
-        2,
-        "only the first cluster was written (survivor + 1 loser); the rest is untouched"
+        0,
+        "cancellation prevents all writes including the in-flight cluster"
     );
+}
+
+#[tokio::test]
+async fn oversized_member_refuses_inference_without_truncation() {
+    let fx = seed_fixture(true).await;
+    let long = format!(
+        "{}\nEXCEPTION AT END: never merge away this fact.",
+        DUP_A.repeat(40)
+    );
+    assert!(long.len() > 6000);
+    write(&fx, "sessions/a.md", &long).await;
+    write(&fx, "sessions/b.md", &long.replace("ops.rs", "reader.rs")).await;
+    write(&fx, "sessions/far.md", K8S_A).await;
+    for p in ["sessions/a.md", "sessions/b.md", "sessions/far.md"] {
+        backdate_latest(&fx, p, COLD_DAYS);
+    }
+    let llm = FakeMergeLlm::new();
+    let result = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        Some(&llm),
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &dream_on(),
+        &DreamCancel::new(),
+        false,
+    )
+    .await;
+    assert_eq!(
+        llm.calls.load(Ordering::SeqCst),
+        0,
+        "no request may contain a truncated source"
+    );
+    assert_eq!(superseded_row_count(&fx), 0, "no source may be changed");
+    assert!(result.is_err() || result.unwrap().skipped > 0);
+}
+
+#[tokio::test]
+async fn dry_run_without_provider_still_plans() {
+    let fx = seed_fixture(true).await;
+    write(&fx, "sessions/a.md", DUP_A).await;
+    write(&fx, "sessions/b.md", DUP_B).await;
+    write(&fx, "sessions/far.md", K8S_A).await;
+    for p in ["sessions/a.md", "sessions/b.md", "sessions/far.md"] {
+        backdate_latest(&fx, p, COLD_DAYS);
+    }
+    let report = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        None,
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &dream_on(),
+        &DreamCancel::new(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(report.dry_run);
+    assert_eq!(report.merges.len(), 1);
+    assert_eq!(superseded_row_count(&fx), 0);
+}
+
+#[tokio::test]
+async fn cluster_above_two_members_is_refused_without_sampling() {
+    let fx = seed_fixture(true).await;
+    for p in ["sessions/a.md", "sessions/b.md", "sessions/c.md"] {
+        write(&fx, p, DUP_A).await;
+        backdate_latest(&fx, p, COLD_DAYS);
+    }
+    write(&fx, "sessions/far.md", K8S_A).await;
+    backdate_latest(&fx, "sessions/far.md", COLD_DAYS);
+    let llm = FakeMergeLlm::new();
+    let report = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        Some(&llm),
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &dream_on(),
+        &DreamCancel::new(),
+        false,
+    )
+    .await;
+    assert_eq!(llm.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(superseded_row_count(&fx), 0);
+    assert!(report.is_err() || report.unwrap().skipped > 0);
+}
+
+/// Mechanics-only double. This does not certify semantic quality; real gates
+/// are exercised with known-answer local pilot cases separately.
+#[derive(Debug)]
+struct AcceptingGate;
+
+impl ai_memory_consolidate::dream_semantics::DreamSemanticGate for AcceptingGate {
+    fn cluster_suitability<'a>(
+        &'a self,
+        _sources: &'a [ai_memory_consolidate::dream_semantics::DreamSemanticSource],
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ai_memory_consolidate::dream_semantics::ClusterSuitability,
+                        ai_memory_consolidate::dream_semantics::DreamSemanticError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(ai_memory_consolidate::dream_semantics::ClusterSuitability::Approved) })
+    }
+    fn draft_support<'a>(
+        &'a self,
+        _sources: &'a [ai_memory_consolidate::dream_semantics::DreamSemanticSource],
+        _draft: &'a str,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ai_memory_consolidate::dream_semantics::DraftSupport,
+                        ai_memory_consolidate::dream_semantics::DreamSemanticError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(ai_memory_consolidate::dream_semantics::DraftSupport::Approved) })
+    }
+}
+
+async fn seed_cluster() -> Fixture {
+    let fx = seed_fixture(true).await;
+    write(&fx, "sessions/a.md", DUP_A).await;
+    write(&fx, "sessions/b.md", DUP_B).await;
+    write(&fx, "sessions/far.md", K8S_A).await;
+    for p in ["sessions/a.md", "sessions/b.md", "sessions/far.md"] {
+        backdate_latest(&fx, p, COLD_DAYS);
+    }
+    fx
+}
+
+#[tokio::test]
+async fn editing_a_source_during_inference_refuses_the_entire_batch() {
+    let fx = seed_cluster().await;
+    let mut llm = FakeMergeLlm::new();
+    llm.edit = Some((fx.wiki.clone(), fx.ws, fx.proj));
+    let report = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        Some(&llm),
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &dream_on(),
+        &DreamCancel::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.clusters_merged, 0);
+    assert_eq!(report.skipped, 1);
+    assert_eq!(
+        latest_body(&fx, "sessions/a.md"),
+        "Concurrent operator: preserve this new exception."
+    );
+    assert!(latest_body(&fx, "sessions/b.md").contains("unique culprit"));
+    assert_eq!(
+        superseded_row_count(&fx),
+        1,
+        "only the competing edit creates a version"
+    );
+}
+
+#[tokio::test]
+async fn invalid_empty_and_oversized_outputs_never_apply() {
+    for output in [
+        serde_json::json!({"title":"ok", "body_markdown":""}),
+        serde_json::json!({"title":"ok", "body_markdown":"claim", "unexpected":true}),
+        serde_json::json!({"title":"ok", "body_markdown":"x".repeat(4001)}),
+    ] {
+        let fx = seed_cluster().await;
+        let mut llm = FakeMergeLlm::new();
+        llm.response_override = Some(output);
+        let report = run_dream_pass(
+            &fx.store.reader,
+            &fx.wiki,
+            Some(&llm),
+            fx.ws,
+            fx.proj,
+            &DecayParams::default(),
+            0.0,
+            &dream_on(),
+            &DreamCancel::new(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.clusters_merged, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(superseded_row_count(&fx), 0);
+    }
+}
+
+#[tokio::test]
+async fn semantic_gate_is_required_before_any_merge_request() {
+    let fx = seed_cluster().await;
+    let llm = FakeMergeLlm::new();
+    let mut cfg = dream_on();
+    cfg.semantic_gate = None;
+    let report = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        Some(&llm),
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &cfg,
+        &DreamCancel::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.clusters_merged, 0);
+    assert_eq!(report.inference_requests, 0);
+    assert_eq!(superseded_row_count(&fx), 0);
+    assert_eq!(report.merges[0].reason, "semantic_gate_missing");
+}
+
+#[tokio::test]
+async fn round_deadline_bounds_a_stalled_completion_without_write() {
+    let fx = seed_cluster().await;
+    let mut llm = FakeMergeLlm::new();
+    llm.stall = true;
+    let mut cfg = dream_on();
+    cfg.deadline = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    let report = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        Some(&llm),
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &cfg,
+        &DreamCancel::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.clusters_merged, 0);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(superseded_row_count(&fx), 0);
+}
+
+#[tokio::test]
+async fn cancelled_before_start_admits_no_inference_and_no_write() {
+    let fx = seed_cluster().await;
+    let llm = FakeMergeLlm::new();
+    let cancel = DreamCancel::new();
+    cancel.cancel();
+    let report = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        Some(&llm),
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &dream_on(),
+        &cancel,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(report.cancelled);
+    assert_eq!(report.inference_requests, 0);
+    assert_eq!(superseded_row_count(&fx), 0);
+}
+
+#[tokio::test]
+async fn sixty_four_cold_candidates_are_allowed_but_cap_plus_one_refuses_before_vectors() {
+    let fx = seed_fixture(false).await;
+    for index in 0..64 {
+        let path = format!("sessions/cold-{index}.md");
+        write(&fx, &path, "Synthetic cold source.").await;
+        backdate_latest(&fx, &path, COLD_DAYS);
+    }
+    let control = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        None,
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &dream_on(),
+        &DreamCancel::new(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(control.cold_pages, 64);
+    write(&fx, "sessions/overflow.md", "Synthetic overflow source.").await;
+    backdate_latest(&fx, "sessions/overflow.md", COLD_DAYS);
+    let refused = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        None,
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &dream_on(),
+        &DreamCancel::new(),
+        true,
+    )
+    .await;
+    assert!(matches!(
+        refused,
+        Err(ai_memory_consolidate::DreamError::Limit("cold_candidates"))
+    ));
+    assert_eq!(superseded_row_count(&fx), 0);
+}
+
+#[tokio::test]
+async fn manual_scoped_backfill_replaces_embeddings_for_every_new_dream_head() {
+    let fx = seed_cluster().await;
+    let llm = FakeMergeLlm::new();
+    let report = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        Some(&llm),
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &dream_on(),
+        &DreamCancel::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.clusters_merged, 1);
+    let merge = &report.merges[0];
+    assert_eq!(
+        merge.sources.len(),
+        2,
+        "survivor and loser both have provenance"
+    );
+    assert_eq!(merge.embedding_required_ids.len(), 2);
+    let embedder: Arc<dyn Embedder> = Arc::new(SyntheticEmbedder::new(DIM));
+    let before = fx
+        .store
+        .reader
+        .embedded_page_ids(
+            fx.ws,
+            fx.proj,
+            embedder.provider().into(),
+            embedder.model_identity(),
+            embedder.dim(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        merge
+            .embedding_required_ids
+            .iter()
+            .all(|id| !before.contains(id))
+    );
+    let counts = ai_memory_consolidate::run_embedding_backfill(
+        &fx.store.reader,
+        &fx.store.writer,
+        &fx.wiki,
+        &embedder,
+        fx.ws,
+        fx.proj,
+        ai_memory_consolidate::EmbedBackfillOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(counts.embedded, 2);
+    let after = fx
+        .store
+        .reader
+        .embedded_page_ids(
+            fx.ws,
+            fx.proj,
+            embedder.provider().into(),
+            embedder.model_identity(),
+            embedder.dim(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        merge
+            .embedding_required_ids
+            .iter()
+            .all(|id| after.contains(id))
+    );
+    for source in &merge.sources {
+        let evidence = evidence_for(&fx, merge.new_survivor_id.unwrap());
+        assert!(
+            evidence
+                .iter()
+                .any(|(_, value)| value.contains(&source.id.to_string())
+                    && value.contains(&source.body_sha256))
+        );
+    }
 }

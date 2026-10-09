@@ -1726,6 +1726,13 @@ impl AiMemoryServer {
         self.activity_clock.clone()
     }
 
+    /// Share live activity with embedding work initialized before this server.
+    #[must_use]
+    pub fn with_activity_clock(mut self, clock: ai_memory_consolidate::ActivityClock) -> Self {
+        self.activity_clock = clock;
+        self
+    }
+
     /// Declare that a trusted proxy may assert end-user identities — mirror of
     /// `AuthState::with_trusted_proxy_bearer`, which owns the credential.
     ///
@@ -5386,6 +5393,8 @@ fn hex_to_sha256(hex: &str) -> Result<[u8; 32], String> {
 #[tool_handler]
 impl ServerHandler for AiMemoryServer {
     fn get_info(&self) -> ServerInfo {
+        self.activity_clock
+            .mark(jiff::Timestamp::now().as_microsecond());
         // `Implementation::from_build_env()` reads CARGO_PKG_NAME/VERSION
         // from *rmcp's* compilation unit, not ours. Patch the fields
         // post-construction so the wire protocol surfaces "ai-memory".
@@ -5410,6 +5419,9 @@ impl ServerHandler for AiMemoryServer {
         // rmcp moves params._meta into RequestContext before dispatch.
         attach_native_session(&mut context.extensions, &context.meta);
         self.record_client_activity(&request.name, &context);
+        let _active = self
+            .activity_clock
+            .begin(jiff::Timestamp::now().as_microsecond());
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
     }
@@ -5421,6 +5433,9 @@ impl ServerHandler for AiMemoryServer {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        let _active = self
+            .activity_clock
+            .begin(jiff::Timestamp::now().as_microsecond());
         let tools = self.tool_router.list_all();
         // rmcp injects `http::request::Parts` into request extensions in
         // both stateless and stateful modes, so the flavor marker is

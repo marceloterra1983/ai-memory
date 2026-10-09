@@ -17,6 +17,8 @@ pub mod compaction;
 pub mod consolidator;
 pub mod curator;
 pub mod dream;
+pub mod dream_activity;
+pub mod dream_semantics;
 pub mod embed;
 pub mod entropy_filter;
 pub mod experience;

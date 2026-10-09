@@ -1,52 +1,25 @@
-//! B2/B3/B4 — the opt-in LLM "dream" pass (docs/design-memory-aging.md §B2–B4).
+//! Bounded, local cross-session dream consolidation.
 //!
-//! Where A3 ([`crate::sweep`]) collapses near-duplicate cold clusters
-//! *extractively* (zero-LLM, keep-token union), the dream pass hands each cold
-//! cluster to an LLM to be rewritten into ONE coherent page — the merge A3
-//! cannot do because prose coherence is not extractive. It reuses A3's clustering
-//! math ([`adaptive_eps`]/[`dbscan`]) over the *same* bounded cold set the forget
-//! sweep materialises ([`crate::sweep::materialize_cold_set`], invariant #2).
+//! Planning uses bounded metadata and matching vectors without inference or
+//! writes. Apply requires two local semantic decisions, a nonempty structured
+//! draft, and all-source CAS under the wiki mutation locks and writer
+//! transaction. Source versions remain reachable through supersession and a
+//! real premerge git checkpoint. No source is promoted out of episodic tier.
 //!
-//! Design guarantees, each traced to the design doc's failure modes:
-//!
-//! - **Opt-in, OFF by default, R2-gated.** The pass runs only when
-//!   [`DreamConfig::enabled`] is set AND a provider is passed AND an embedding
-//!   coordinate is configured. A provider-less (zero-LLM) store is a clean no-op —
-//!   the A3 path already owns that store (invariants #13, #16).
-//! - **Never deletes a source.** The survivor is rewritten and every merged-away
-//!   member is *superseded* with a merge-note stub pointing at it; the full
-//!   pre-merge body stays reachable via the supersession chain + git
-//!   (invariant #16). `page_evidence` (`reconsolidation` + `b2_dream:<id>`)
-//!   records which members fed the merge — the guard against a hallucinated
-//!   merge.
-//! - **`dry_run` first.** A dry run returns the plan (which clusters *would*
-//!   merge) and calls neither the LLM nor `apply_batch`, exactly like the
-//!   consolidator's dry run.
-//! - **Gated apply.** Each survivor rewrite runs `preflight_admission`
-//!   (`AdmissionOp::Consolidate`) before the LLM and writes through
-//!   `Wiki::apply_batch` (single-writer actor, invariant #2).
-//! - **JSON-schema structured output only** (invariant #7): [`DreamMergedPage`].
-//! - **Bounded + cancellable** (invariant #5 spirit): at most
-//!   [`DreamConfig::max_clusters_per_run`] clusters per run, and a cheap
-//!   [`DreamCancel`] flag is checked between clusters so a returning operator
-//!   stops the pass immediately (B3 cancel-on-activity).
-//! - **Observable.** Every run returns a [`DreamReport`] — no silent window (the
-//!   documented B3 failure mode).
-//!
-//! B4 (surprisal-first ordering) is pure: clusters are processed most-novel
-//! first, novelty being a cluster's embedding distance to the nearest EXISTING
-//! (non-cold, latest) page. Worst case is a suboptimal *order* of bounded work,
-//! never wrong output.
+//! The native scheduler and manual admin driver share a serialized runtime,
+//! exact scope allowlist, global cluster allowance and 300-second deadline.
+//! Cancellation is checked before each request and inside apply; an admitted
+//! backend request may finish even after the client stops awaiting it. New head
+//! embeddings are restored by the existing explicit scoped embed command.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use ai_memory_core::{
     ActorContext, PageEvidence, PageEvidenceKind, PageId, ProjectId, Tier, WorkspaceId,
 };
 use ai_memory_llm::{ChatMessage, ChatRequest, LlmProvider, Role, complete_structured};
-use ai_memory_store::{DecayParams, ReaderPool};
-use ai_memory_wiki::{AdmissionContext, AdmissionOp, Wiki, WritePageRequest};
+use ai_memory_store::{DecayParams, DreamHead, ReaderPool};
+use ai_memory_wiki::{AdmissionContext, AdmissionOp, DreamSource, Wiki, WritePageRequest};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -54,13 +27,13 @@ use thiserror::Error;
 use crate::cold_cluster::{adaptive_eps, cosine_distance, dbscan};
 use crate::sweep::{
     ColdEntry, DEFAULT_DEDUP_MAX_EPS, DEFAULT_DEDUP_MIN_PTS, EmbeddingCoord, SweepError,
-    frontmatter_object, materialize_cold_set,
+    cold_entry_for, frontmatter_object,
 };
 
 /// Default ceiling on clusters rewritten in one dream run (invariant #5:
 /// bounded, no unbounded fan-out). A returning operator also cancels the pass;
 /// this bounds the run even on a fully idle box.
-pub const DEFAULT_DREAM_MAX_CLUSTERS_PER_RUN: usize = 8;
+pub const DEFAULT_DREAM_MAX_CLUSTERS_PER_RUN: usize = 1;
 /// Default minimum cold-page count before a dream run does any work — the
 /// "enough events accumulated" gate (B3). Below this a run is a clean no-op.
 pub const DEFAULT_DREAM_MIN_COLD_PAGES: usize = 2;
@@ -70,68 +43,22 @@ pub const DEFAULT_DREAM_MIN_COLD_PAGES: usize = 2;
 pub const DEFAULT_DREAM_IDLE_WINDOW_SECS: u64 = 300;
 /// Output-token allowance for one merge completion.
 const DREAM_MAX_TOKENS: u32 = 4_000;
-/// Per-member body character cap in the merge prompt (bounds prompt size).
-const DREAM_MAX_MEMBER_CHARS: usize = 6_000;
+/// Fixed safety ceilings; exceeding a ceiling refuses work rather than sampling.
+pub const DREAM_MAX_HEADS: usize = 4_096;
+/// Maximum cold candidates, checked before loading vectors or clustering.
+pub const DREAM_MAX_COLD: usize = 64;
+/// Maximum members of a selected cluster.
+pub const DREAM_MAX_MEMBERS: usize = 2;
+/// Maximum source body bytes; sources are never truncated.
+pub const DREAM_MAX_MEMBER_BYTES: usize = 6_000;
+/// Conservative input estimate: one UTF-8 byte per token, including schema.
+pub const DREAM_MAX_INPUT_TOKENS: usize = 8_192;
+/// Maximum duration of each admitted inference request.
+pub const DREAM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// Maximum duration of a round, including all requests and gates.
+pub const DREAM_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// A cheap, cloneable cancellation flag checked between clusters (B3
-/// cancel-on-activity, invariant #5). A full `CancellationToken` is overkill:
-/// the pass only ever polls this at cluster boundaries, so a relaxed
-/// `AtomicBool` is enough and needs no async machinery.
-#[derive(Clone, Default)]
-pub struct DreamCancel(Arc<AtomicBool>);
-
-impl DreamCancel {
-    /// A fresh, un-cancelled token.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Request cancellation. The running pass stops before its next cluster.
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-
-    /// Whether cancellation has been requested.
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-/// Shared "last client activity" clock (microseconds since epoch). The MCP
-/// server bumps it on every tool call; the dream scheduler reads it to detect
-/// idle ([`dream_idle_ready`]) and to cancel a running pass the moment the
-/// operator returns. Consolidation must never contend with live work (B3).
-#[derive(Clone)]
-pub struct ActivityClock(Arc<AtomicI64>);
-
-impl ActivityClock {
-    /// A clock seeded to `now_us` (so a just-started server is not instantly
-    /// "idle since epoch").
-    #[must_use]
-    pub fn new(now_us: i64) -> Self {
-        Self(Arc::new(AtomicI64::new(now_us)))
-    }
-
-    /// Record that a client was active at `now_us`. Monotonic: an out-of-order
-    /// older stamp never rewinds the clock.
-    pub fn mark(&self, now_us: i64) {
-        self.0.fetch_max(now_us, Ordering::Relaxed);
-    }
-
-    /// The most recent activity instant seen, in microseconds since epoch.
-    #[must_use]
-    pub fn last_activity_us(&self) -> i64 {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-impl Default for ActivityClock {
-    fn default() -> Self {
-        Self::new(0)
-    }
-}
+pub use crate::dream_activity::{ActivityClock, DreamCancel};
 
 /// Opt-in configuration for the B2/B3/B4 dream pass.
 ///
@@ -161,6 +88,10 @@ pub struct DreamConfig {
     /// Idle window (seconds) the scheduler requires before starting a run (B3).
     /// `0` ⇒ [`DEFAULT_DREAM_IDLE_WINDOW_SECS`]. Consumed by [`dream_idle_ready`].
     pub idle_window_secs: u64,
+    /// Required local semantic gate on apply; absent means fail closed.
+    pub semantic_gate: Option<Arc<dyn crate::dream_semantics::DreamSemanticGate>>,
+    /// Shared round deadline when the driver processes multiple scopes.
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Default for DreamConfig {
@@ -173,6 +104,8 @@ impl Default for DreamConfig {
             max_clusters_per_run: 0,
             min_cold_pages: 0,
             idle_window_secs: 0,
+            semantic_gate: None,
+            deadline: None,
         }
     }
 }
@@ -194,7 +127,9 @@ impl DreamConfig {
         }
     }
 
-    fn effective_max_clusters(&self) -> usize {
+    /// Effective maximum selected clusters in one driver round.
+    #[must_use]
+    pub fn effective_max_clusters(&self) -> usize {
         if self.max_clusters_per_run == 0 {
             DEFAULT_DREAM_MAX_CLUSTERS_PER_RUN
         } else {
@@ -256,6 +191,35 @@ pub struct DreamMerge {
     /// Identifier of the new merged survivor version once the rewrite lands.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_survivor_id: Option<PageId>,
+    /// Every original source, including the survivor, used by this plan.
+    pub sources: Vec<DreamProvenance>,
+    /// Stable digest of the ordered source identities and content hashes.
+    pub digest: String,
+    /// Conservative merge input tokens: one complete UTF-8 wire byte per token.
+    pub input_token_estimate: usize,
+    /// Terminal outcome without provider text or memory content.
+    pub reason: String,
+    /// Premerge git revision usable by scoped restore-page.
+    pub checkpoint: Option<String>,
+    /// New heads requiring the existing explicit scoped embed operation.
+    pub embedding_required_ids: Vec<PageId>,
+}
+
+/// Content-free provenance. Native version identity is id plus updated_at.
+#[derive(Debug, Clone, Serialize)]
+pub struct DreamProvenance {
+    /// Original page id.
+    pub id: PageId,
+    /// Canonical path within this run's explicit scope.
+    pub path: String,
+    /// Native version timestamp, in microseconds.
+    pub updated_at_us: i64,
+    /// SHA256 of the complete original body.
+    pub body_sha256: String,
+    /// SHA256 of the complete original wiki file.
+    pub file_sha256: String,
+    /// Digest of every indexed eligibility input checked in the writer CAS.
+    pub eligibility_sha256: String,
 }
 
 /// Outcome of one dream run. Reported in every mode so a bad or empty run is
@@ -270,10 +234,24 @@ pub struct DreamReport {
     pub dry_run: bool,
     /// Provider name, or `"none"` on a no-op.
     pub provider: String,
+    /// Explicit draft model; aliases are not resolved by inference.
+    pub model: String,
+    /// Matching embedding provider/model/dimension used by this run.
+    pub embedding: Option<(String, String, u32)>,
     /// Cold pages materialised for this scope (the bounded work set).
     pub cold_pages: usize,
     /// Multi-member cold clusters found (the candidate merges).
     pub clusters_considered: usize,
+    /// Selected clusters consuming the driver's global allowance, including skips.
+    pub clusters_selected: usize,
+    /// Attempted provider/gate calls, including refusals before HTTP admission.
+    pub inference_requests: usize,
+    /// Actual HTTP requests for dedicated local clients; unavailable for other providers.
+    pub http_requests: Option<usize>,
+    /// Independent semantic questions attempted (one suitability, three support/preservation).
+    pub semantic_questions: usize,
+    /// Terminal status without body or backend error text.
+    pub reason: String,
     /// Clusters actually rewritten and applied this run.
     pub clusters_merged: usize,
     /// Survivor pages rewritten (== `clusters_merged` on a clean run).
@@ -312,6 +290,9 @@ pub enum DreamError {
     /// Underlying store error.
     #[error(transparent)]
     Store(#[from] ai_memory_store::StoreError),
+    /// A deterministic safety bound refused the whole scope before inference.
+    #[error("dream safety limit: {0}")]
+    Limit(&'static str),
 }
 
 /// Whether the dream scheduler may START a run now: the pass is enabled and the
@@ -350,23 +331,20 @@ fn cluster_surprisal(members: &[Vec<f32>], existing: &[Vec<f32>]) -> f32 {
         .fold(0.0_f32, f32::max)
 }
 
-/// A selected cluster ready for (or planned for) merging.
+/// A selected cluster and the exact files captured before inference.
 struct PlannedCluster {
     survivor: ColdEntry,
     losers: Vec<ColdEntry>,
     surprisal: f32,
+    sources: Vec<DreamSource>,
 }
 
-/// Run one dream pass over a scope. See the module docs for the guarantees.
-///
-/// `llm == None`, `!cfg.enabled`, or `cfg.embedding == None` each make this a
-/// clean no-op (a `disabled` report, never an error). A merge cluster whose
-/// admission is rejected, whose pages cannot be read, whose completion fails, or
-/// whose batch fails is skipped (counted in `skipped`), not fatal.
+/// Run one bounded dream pass, with no-create scope resolution supplied by its
+/// driver. Dry-run performs reads only. Apply requires the semantic gate, then
+/// a checkpoint and all-source CAS in the existing wiki/writer path.
 ///
 /// # Errors
-/// Propagates only cold-set materialisation and store errors ([`DreamError`]);
-/// per-cluster provider/apply failures are reported, not returned.
+/// Returns bounded-reader, policy, or safety-limit failures before inference.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_dream_pass(
     reader: &ReaderPool,
@@ -380,299 +358,486 @@ pub async fn run_dream_pass(
     cancel: &DreamCancel,
     dry_run: bool,
 ) -> Result<DreamReport, DreamError> {
-    // OFF-by-default no-op guards (invariants #13, #16). A provider-less or
-    // flag-off store never dreams; the A3 extractive path already owns it.
-    if !cfg.enabled {
+    if !cfg.enabled || cfg.embedding.is_none() || (!dry_run && llm.is_none()) {
         return Ok(DreamReport::disabled("none"));
     }
-    let Some(coord) = cfg.embedding.clone() else {
-        return Ok(DreamReport::disabled("none"));
-    };
-    let Some(llm) = llm else {
-        return Ok(DreamReport::disabled("none"));
-    };
-    let provider = llm.name().to_string();
-
-    // Same bounded cold set the forget sweep would evict (invariant #2).
-    let cold =
-        materialize_cold_set(reader, workspace_id, project_id, params, breadth_weight).await?;
+    let requests_before = network_request_count(llm, cfg);
+    let started = std::time::Instant::now();
+    let deadline = cfg
+        .deadline
+        .unwrap_or(started + DREAM_RUN_TIMEOUT)
+        .min(started + DREAM_RUN_TIMEOUT);
     let mut report = DreamReport {
-        provider: provider.clone(),
+        provider: llm.map_or("none", |provider| provider.name()).to_string(),
+        model: llm.map_or("none", |provider| provider.model()).to_string(),
+        embedding: cfg
+            .embedding
+            .as_ref()
+            .map(|coord| (coord.provider.clone(), coord.model.clone(), coord.dim)),
         dry_run,
-        cold_pages: cold.len(),
+        reason: "noop".into(),
+        http_requests: if dry_run {
+            Some(0)
+        } else {
+            requests_before.map(|_| 0)
+        },
         ..DreamReport::default()
     };
-    if cold.len() < cfg.effective_min_cold_pages() {
+    if stopped(cancel, deadline) {
+        report.cancelled = true;
+        report.reason = "cancelled_or_deadline".into();
         return Ok(report);
     }
-
-    // Only pages that are cold and not already a compacted/merged residue are
-    // eligible — a terminal residue is never re-merged.
-    let mut eligible: std::collections::HashMap<PageId, ColdEntry> =
-        std::collections::HashMap::new();
-    for entry in cold {
-        if entry.compacted_at_us.is_none() {
-            eligible.insert(entry.id, entry);
+    if !breadth_weight.is_finite() || breadth_weight < 0.0 {
+        return Err(SweepError::InvalidBreadthWeight.into());
+    }
+    let Some(heads) = await_read(
+        reader.dream_heads_bounded(workspace_id, project_id, DREAM_MAX_HEADS),
+        cancel,
+        deadline,
+    )
+    .await
+    else {
+        report.cancelled = true;
+        report.reason = "cancelled_or_deadline".into();
+        return Ok(report);
+    };
+    let heads = heads?;
+    let now_us = jiff::Timestamp::now().as_microsecond();
+    let breadth = heads
+        .iter()
+        .map(|h| (h.candidate.id, h.access_breadth))
+        .collect();
+    let mut eligible = std::collections::HashMap::<PageId, ColdEntry>::new();
+    let mut source_heads = std::collections::HashMap::<PageId, DreamHead>::new();
+    for head in heads {
+        let candidate = &head.candidate;
+        if candidate.compacted_at_us.is_some()
+            || candidate
+                .expires_at_us
+                .is_some_and(|expires| expires <= now_us)
+        {
+            continue;
+        }
+        if let Some(cold) = cold_entry_for(candidate, &breadth, breadth_weight, params, now_us) {
+            if head.body_bytes > DREAM_MAX_MEMBER_BYTES {
+                return Err(DreamError::Limit("source_body_bytes"));
+            }
+            eligible.insert(cold.id, cold);
+            source_heads.insert(candidate.id, head);
+            if eligible.len() > DREAM_MAX_COLD {
+                return Err(DreamError::Limit("cold_candidates"));
+            }
         }
     }
-    if eligible.len() < cfg.effective_min_pts() {
+    report.cold_pages = eligible.len();
+    if eligible.len() < cfg.effective_min_cold_pages() || eligible.len() < cfg.effective_min_pts() {
         return Ok(report);
     }
-
-    // Load ALL latest-page embeddings once. The cold subset feeds clustering;
-    // the complement (existing, non-cold, latest pages) feeds B4 surprisal.
-    let embeddings = reader
-        .load_embeddings(
+    let Some(coord) = cfg.embedding.clone() else {
+        return Ok(report);
+    };
+    let Some(embeddings) = await_read(
+        reader.load_embeddings_bounded(
             workspace_id,
             project_id,
             coord.provider,
             coord.model,
             coord.dim,
-        )
-        .await?;
-    let mut cold_ids: Vec<PageId> = Vec::new();
-    let mut cold_vectors: Vec<Vec<f32>> = Vec::new();
-    let mut existing_vectors: Vec<Vec<f32>> = Vec::new();
-    for e in &embeddings {
-        if eligible.contains_key(&e.id) {
-            cold_ids.push(e.id);
-            cold_vectors.push(e.vector.clone());
-        } else {
-            existing_vectors.push(e.vector.clone());
-        }
-    }
-    if cold_vectors.len() < cfg.effective_min_pts() {
-        return Ok(report);
-    }
-
-    let min_pts = cfg.effective_min_pts();
-    let Some(eps) = adaptive_eps(&cold_vectors, min_pts, cfg.effective_max_eps()) else {
+            DREAM_MAX_HEADS,
+        ),
+        cancel,
+        deadline,
+    )
+    .await
+    else {
+        report.cancelled = true;
+        report.reason = "cancelled_or_deadline".into();
         return Ok(report);
     };
-    let clusters = dbscan(&cold_vectors, eps, min_pts);
-
-    // Build the planned clusters, each with its B4 surprisal.
-    let mut planned: Vec<PlannedCluster> = Vec::new();
-    for cluster in clusters {
+    let embeddings = embeddings?;
+    let mut cold_ids = Vec::new();
+    let mut cold_vectors = Vec::new();
+    let mut existing_vectors = Vec::new();
+    for embedding in embeddings {
+        if eligible.contains_key(&embedding.id) {
+            cold_ids.push(embedding.id);
+            cold_vectors.push(embedding.vector);
+        } else {
+            existing_vectors.push(embedding.vector);
+        }
+    }
+    if stopped(cancel, deadline) {
+        report.cancelled = true;
+        report.reason = "cancelled_or_deadline".into();
+        return Ok(report);
+    }
+    let Some(eps) = adaptive_eps(
+        &cold_vectors,
+        cfg.effective_min_pts(),
+        cfg.effective_max_eps(),
+    ) else {
+        return Ok(report);
+    };
+    let mut planned = Vec::new();
+    for cluster in dbscan(&cold_vectors, eps, cfg.effective_min_pts()) {
         if cluster.len() < 2 {
             continue;
         }
-        let mut members: Vec<ColdEntry> = Vec::new();
-        let mut member_vectors: Vec<Vec<f32>> = Vec::new();
-        for &idx in &cluster {
-            if let Some(entry) = eligible.remove(&cold_ids[idx]) {
-                members.push(entry);
-                member_vectors.push(cold_vectors[idx].clone());
-            }
+        report.clusters_considered += 1;
+        if cluster.len() > DREAM_MAX_MEMBERS {
+            return Err(DreamError::Limit("cluster_members"));
         }
+        let mut members: Vec<_> = cluster
+            .iter()
+            .filter_map(|i| eligible.remove(&cold_ids[*i]))
+            .collect();
+        let vectors: Vec<_> = cluster.iter().map(|i| cold_vectors[*i].clone()).collect();
+        members.sort_by(|a, b| {
+            b.retention
+                .total_cmp(&a.retention)
+                .then_with(|| a.path.as_str().cmp(b.path.as_str()))
+        });
         if members.len() < 2 {
             continue;
         }
-        let surprisal = cluster_surprisal(&member_vectors, &existing_vectors);
-        // Survivor = highest-retention member (ties broken by first index).
-        let survivor_pos = members
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| {
-                a.retention
-                    .partial_cmp(&b.retention)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let survivor = members.remove(survivor_pos);
-        planned.push(PlannedCluster {
+        let survivor = members.remove(0);
+        let captured: Vec<_> = std::iter::once(&survivor)
+            .chain(members.iter())
+            .filter_map(|member| source_heads.remove(&member.id))
+            .collect();
+        let Some(sources) = await_read(
+            wiki.snapshot_dream_sources(captured, DREAM_MAX_MEMBER_BYTES),
+            cancel,
+            deadline,
+        )
+        .await
+        else {
+            report.cancelled = true;
+            report.reason = "cancelled_or_deadline".into();
+            return Ok(report);
+        };
+        let sources = match sources {
+            Ok(sources) => sources,
+            Err(_) => {
+                report.skipped += 1;
+                continue;
+            }
+        };
+        if sources.len() != 1 + members.len() {
+            report.skipped += 1;
+            continue;
+        }
+        let plan = PlannedCluster {
             survivor,
             losers: members,
-            surprisal,
-        });
+            surprisal: cluster_surprisal(&vectors, &existing_vectors),
+            sources,
+        };
+        if build_merge_request(&semantic_sources(&plan)).is_err() {
+            return Err(DreamError::Limit("input_tokens_conservative_bytes"));
+        }
+        planned.push(plan);
     }
-
-    report.clusters_considered = planned.len();
-
-    // B4: most-novel first. Pure ordering — worst case a suboptimal order of
-    // bounded work.
     planned.sort_by(|a, b| {
         b.surprisal
-            .partial_cmp(&a.surprisal)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.surprisal)
+            .then_with(|| a.survivor.path.as_str().cmp(b.survivor.path.as_str()))
     });
     planned.truncate(cfg.effective_max_clusters());
-
-    // A dry run returns the plan and touches nothing (no LLM, no write).
-    if dry_run {
-        report.merges = planned
-            .iter()
-            .map(|p| DreamMerge {
-                survivor: p.survivor.path.as_str().to_string(),
-                survivor_id: p.survivor.id,
-                merged: p
-                    .losers
-                    .iter()
-                    .map(|l| l.path.as_str().to_string())
-                    .collect(),
-                surprisal: f64::from(p.surprisal),
-                applied: false,
-                new_survivor_id: None,
-            })
-            .collect();
-        return Ok(report);
-    }
-
+    report.clusters_selected = planned.len();
     for plan in planned {
-        // B3 cancel-on-activity: stop before starting the next cluster the
-        // moment the operator returns. Checked at the boundary so an in-flight
-        // cluster always completes cleanly (never a half-applied batch).
-        if cancel.is_cancelled() {
+        let mut merge = merge_report(&plan);
+        if stopped(cancel, deadline) {
             report.cancelled = true;
+            merge.reason = "cancelled_or_deadline".into();
+            report.merges.push(merge);
             break;
         }
-        match merge_one_cluster(wiki, llm, workspace_id, project_id, &plan).await {
-            MergeOutcome::Applied {
-                new_survivor_id,
-                superseded,
-            } => {
-                report.clusters_merged += 1;
-                report.pages_rewritten += 1;
-                report.pages_superseded += superseded;
-                report.merges.push(DreamMerge {
-                    survivor: plan.survivor.path.as_str().to_string(),
-                    survivor_id: plan.survivor.id,
-                    merged: plan
-                        .losers
-                        .iter()
-                        .map(|l| l.path.as_str().to_string())
-                        .collect(),
-                    surprisal: f64::from(plan.surprisal),
-                    applied: true,
-                    new_survivor_id: Some(new_survivor_id),
-                });
-            }
-            MergeOutcome::Skipped => report.skipped += 1,
+        if dry_run {
+            merge.reason = "planned_requires_semantic_gate".into();
+        } else if let Some(llm) = llm {
+            merge_one_cluster(
+                wiki,
+                llm,
+                workspace_id,
+                project_id,
+                &plan,
+                cfg,
+                cancel,
+                deadline,
+                &mut report,
+                &mut merge,
+            )
+            .await;
+        }
+        report.cancelled |= stopped(cancel, deadline);
+        report.merges.push(merge);
+        if report.cancelled {
+            break;
         }
     }
-
+    if !dry_run {
+        report.http_requests = requests_before
+            .zip(network_request_count(llm, cfg))
+            .map(|(before, after)| after.saturating_sub(before));
+    }
+    report.reason = if report.cancelled {
+        "cancelled_or_deadline"
+    } else if report.clusters_merged > 0 {
+        "applied_embedding_required"
+    } else if report.skipped > 0 {
+        "skipped"
+    } else if report.clusters_selected > 0 {
+        "planned"
+    } else {
+        "noop"
+    }
+    .into();
     Ok(report)
 }
 
-enum MergeOutcome {
-    Applied {
-        new_survivor_id: PageId,
-        superseded: usize,
-    },
-    Skipped,
+fn network_request_count(
+    llm: Option<&(dyn LlmProvider + 'static)>,
+    cfg: &DreamConfig,
+) -> Option<usize> {
+    Some(
+        llm?.request_count()?
+            .saturating_add(cfg.semantic_gate.as_ref()?.request_count()?),
+    )
 }
 
-/// Merge one selected cluster: preflight admission → LLM rewrite → `apply_batch`
-/// (survivor rewrite + loser merge-note supersessions). Any failure at any step
-/// skips the cluster without touching a source.
+fn stopped(cancel: &DreamCancel, deadline: std::time::Instant) -> bool {
+    cancel.is_cancelled() || std::time::Instant::now() >= deadline
+}
+
+// Read-only stages can be abandoned while waiting for a pool or wiki lock.
+// Apply deliberately does not use this helper: installed files need draining.
+async fn await_read<T>(
+    read: impl std::future::Future<Output = T>,
+    cancel: &DreamCancel,
+    deadline: std::time::Instant,
+) -> Option<T> {
+    tokio::pin!(read);
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(50));
+    loop {
+        if stopped(cancel, deadline) {
+            return None;
+        }
+        tokio::select! {
+            result = &mut read => return Some(result),
+            _ = tokio::time::sleep_until(deadline.into()) => return None,
+            _ = poll.tick() => {}
+        }
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn merge_report(plan: &PlannedCluster) -> DreamMerge {
+    use sha2::{Digest, Sha256};
+    let sources: Vec<_> = plan
+        .sources
+        .iter()
+        .map(|source| DreamProvenance {
+            id: source.head.candidate.id,
+            path: source.head.candidate.path.as_str().to_string(),
+            updated_at_us: source.head.candidate.updated_at_us,
+            body_sha256: hex_digest(&source.head.body_sha256),
+            file_sha256: hex_digest(&source.file_sha256),
+            eligibility_sha256: hex_digest(&source.head.eligibility_sha256),
+        })
+        .collect();
+    let mut hash = Sha256::new();
+    for source in &sources {
+        hash.update(source.id.as_bytes());
+        hash.update(source.updated_at_us.to_le_bytes());
+        hash.update(source.body_sha256.as_bytes());
+        hash.update(source.file_sha256.as_bytes());
+        hash.update(source.eligibility_sha256.as_bytes());
+    }
+    DreamMerge {
+        survivor: plan.survivor.path.as_str().to_string(),
+        survivor_id: plan.survivor.id,
+        merged: plan
+            .losers
+            .iter()
+            .map(|l| l.path.as_str().to_string())
+            .collect(),
+        surprisal: f64::from(plan.surprisal),
+        applied: false,
+        new_survivor_id: None,
+        sources,
+        digest: hex_digest(&hash.finalize()),
+        input_token_estimate: build_merge_request(&semantic_sources(plan))
+            .ok()
+            .map_or(0, |request| conservative_merge_input(&request)),
+        reason: "skipped".into(),
+        checkpoint: None,
+        embedding_required_ids: Vec::new(),
+    }
+}
+
+fn semantic_sources(plan: &PlannedCluster) -> Vec<crate::dream_semantics::DreamSemanticSource> {
+    plan.sources
+        .iter()
+        .map(|s| crate::dream_semantics::DreamSemanticSource {
+            path: s.head.candidate.path.as_str().to_string(),
+            body: s.markdown.body.clone(),
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn merge_one_cluster(
     wiki: &Wiki,
     llm: &(dyn LlmProvider + 'static),
     workspace_id: WorkspaceId,
     project_id: ProjectId,
     plan: &PlannedCluster,
-) -> MergeOutcome {
-    let survivor = &plan.survivor;
+    cfg: &DreamConfig,
+    cancel: &DreamCancel,
+    deadline: std::time::Instant,
+    report: &mut DreamReport,
+    merge: &mut DreamMerge,
+) {
+    let Some(gate) = cfg.semantic_gate.as_ref() else {
+        merge.reason = "semantic_gate_missing".into();
+        report.skipped += 1;
+        return;
+    };
     let actor = ActorContext::anonymous();
-
-    // Gated apply, part 1: run admission BEFORE the LLM so a rejected scope
-    // fails fast without spending a completion (mirrors the consolidator).
-    if let Err(error) = wiki
-        .preflight_admission(
-            workspace_id,
-            project_id,
-            &survivor.path,
-            AdmissionOp::Consolidate,
-            actor.clone(),
-        )
-        .await
+    let preflight_cancel = cancel.clone();
+    let preflight_refuse: Arc<dyn Fn() -> bool + Send + Sync> =
+        Arc::new(move || stopped(&preflight_cancel, deadline));
+    for source in &plan.sources {
+        if stopped(cancel, deadline) {
+            report.cancelled = true;
+            return;
+        }
+        let timeout = DREAM_REQUEST_TIMEOUT
+            .min(deadline.saturating_duration_since(std::time::Instant::now()));
+        if !matches!(
+            tokio::time::timeout(
+                timeout,
+                wiki.preflight_dream_admission(
+                    workspace_id,
+                    project_id,
+                    &source.head.candidate.path,
+                    actor.clone(),
+                    preflight_refuse.clone()
+                )
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            merge.reason = "admission_refused_or_timeout".into();
+            report.skipped += 1;
+            return;
+        }
+    }
+    let sources = semantic_sources(plan);
+    if stopped(cancel, deadline) {
+        report.cancelled = true;
+        return;
+    }
+    report.inference_requests += 1;
+    let timeout =
+        DREAM_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now()));
+    report.semantic_questions += 1;
+    match tokio::time::timeout(timeout, gate.cluster_suitability(&sources)).await {
+        Ok(Ok(decision)) if decision.is_accepted() => {}
+        _ => {
+            merge.reason = "cluster_gate_refused_or_failed".into();
+            report.skipped += 1;
+            return;
+        }
+    }
+    if stopped(cancel, deadline) {
+        report.cancelled = true;
+        return;
+    }
+    let Ok(request) = build_merge_request(&sources) else {
+        merge.reason = "input_budget".into();
+        report.skipped += 1;
+        return;
+    };
+    report.inference_requests += 1;
+    let timeout =
+        DREAM_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now()));
+    let merged: DreamMergedPage =
+        match tokio::time::timeout(timeout, complete_structured(llm, request)).await {
+            Ok(Ok(page)) => page,
+            _ => {
+                merge.reason = "completion_failed_or_timeout".into();
+                report.skipped += 1;
+                return;
+            }
+        };
+    if stopped(cancel, deadline) {
+        report.cancelled = true;
+        return;
+    }
+    if merged.title.trim().is_empty()
+        || merged.body_markdown.trim().is_empty()
+        || merged
+            .title
+            .len()
+            .saturating_add(merged.body_markdown.len())
+            > DREAM_MAX_TOKENS as usize
     {
-        tracing::warn!(path = %survivor.path.as_str(), %error, "dream pass: admission rejected survivor rewrite; skipping cluster");
-        return MergeOutcome::Skipped;
+        merge.reason = "empty_or_over_budget_output".into();
+        report.skipped += 1;
+        return;
     }
-
-    // Read the survivor + every loser body for the merge prompt.
-    let survivor_md = match wiki.read_page(workspace_id, project_id, &survivor.path) {
-        Ok(md) => md,
-        Err(error) => {
-            tracing::warn!(path = %survivor.path.as_str(), %error, "dream pass: could not read survivor; skipping cluster");
-            return MergeOutcome::Skipped;
-        }
-    };
-    let mut member_bodies: Vec<(String, String)> =
-        vec![(survivor.path.as_str().to_string(), survivor_md.body.clone())];
-    // Read each loser exactly once, keeping its frontmatter for the stub.
-    let mut loser_mds: Vec<ai_memory_wiki::Markdown> = Vec::with_capacity(plan.losers.len());
-    for loser in &plan.losers {
-        match wiki.read_page(workspace_id, project_id, &loser.path) {
-            Ok(md) => {
-                member_bodies.push((loser.path.as_str().to_string(), md.body.clone()));
-                loser_mds.push(md);
-            }
-            Err(error) => {
-                tracing::warn!(path = %loser.path.as_str(), %error, "dream pass: could not read cluster member; skipping cluster");
-                return MergeOutcome::Skipped;
-            }
-        }
-    }
-
-    // JSON-schema structured merge (invariant #7). A failed completion skips.
-    let request = build_merge_request(&member_bodies);
-    let merged: DreamMergedPage = match complete_structured(llm, request).await {
-        Ok(page) => page,
-        Err(error) => {
-            tracing::warn!(path = %survivor.path.as_str(), %error, "dream pass: LLM merge failed; skipping cluster (retried next run)");
-            return MergeOutcome::Skipped;
-        }
-    };
-
-    // Build the survivor rewrite + loser merge-note stubs.
-    let loser_paths: Vec<String> = plan
-        .losers
-        .iter()
-        .map(|l| l.path.as_str().to_string())
-        .collect();
-    let mut evidence: Vec<PageEvidence> = Vec::new();
-    let mut requests: Vec<WritePageRequest> = Vec::new();
-
-    let mut survivor_fm = frontmatter_object(&survivor_md.frontmatter);
-    survivor_fm.insert(
-        "merged_from".to_string(),
-        serde_json::Value::Array(
-            loser_paths
-                .iter()
-                .map(|p| serde_json::Value::String(p.clone()))
-                .collect(),
+    report.inference_requests += 1;
+    let timeout =
+        DREAM_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now()));
+    report.semantic_questions += 1 + sources.len();
+    match tokio::time::timeout(
+        timeout,
+        gate.draft_support(
+            &sources,
+            &format!("# {}\n\n{}", merged.title, merged.body_markdown),
         ),
+    )
+    .await
+    {
+        Ok(Ok(decision)) if decision.is_accepted() => {}
+        _ => {
+            merge.reason = "draft_gate_refused_or_failed".into();
+            report.skipped += 1;
+            return;
+        }
+    }
+    if stopped(cancel, deadline) {
+        report.cancelled = true;
+        return;
+    }
+    let mut requests = Vec::new();
+    let mut fm = frontmatter_object(&plan.sources[0].markdown.frontmatter);
+    fm.insert(
+        "merged_from".into(),
+        serde_json::json!(merge.sources.iter().map(|s| &s.path).collect::<Vec<_>>()),
     );
-    if !merged.title.trim().is_empty() {
-        survivor_fm.insert(
-            "title".to_string(),
-            serde_json::Value::String(merged.title.clone()),
-        );
-    }
-    let mut survivor_body = merged.body_markdown.clone();
-    survivor_body.push_str(&format!(
-        "\n\n_Merged {} near-duplicate cold page(s) by the LLM dream pass (B2): {}. \
-         Each source's full pre-merge body is retained in git history and the \
-         supersession chain, and can be recovered with `restore-page`._\n",
-        loser_paths.len(),
-        loser_paths.join(", ")
-    ));
-    // Provenance: which members fed this merge (the hallucinated-merge guard).
-    for loser in &plan.losers {
-        evidence.push(PageEvidence {
+    fm.insert("title".into(), serde_json::json!(merged.title));
+    fm.insert("dream_sources".into(), serde_json::json!(merge.sources));
+    let evidence: Vec<_> = merge
+        .sources
+        .iter()
+        .map(|s| PageEvidence {
             kind: PageEvidenceKind::Reconsolidation,
-            source_id: format!("b2_dream:{}", loser.id),
-        });
-    }
+            source_id: format!("b2_dream:{}:{}:{}", s.id, s.updated_at_us, s.body_sha256),
+        })
+        .collect();
     requests.push(WritePageRequest {
         workspace_id,
         project_id,
-        path: survivor.path.clone(),
-        frontmatter: serde_json::Value::Object(survivor_fm),
-        body: survivor_body,
+        path: plan.survivor.path.clone(),
+        frontmatter: serde_json::Value::Object(fm),
+        body: merged.body_markdown,
         tier: Tier::Episodic,
         pinned: false,
         title: None,
@@ -683,54 +848,46 @@ async fn merge_one_cluster(
         }),
         author_id: None,
         actor: actor.clone(),
-        evidence,
+        evidence: evidence.clone(),
     });
-
-    // Loser stubs: superseded, pointing at the survivor, marked terminal so the
-    // decay/dream passes never re-process them; full body stays reachable (#16).
-    for (loser, loser_md) in plan.losers.iter().zip(loser_mds.iter()) {
-        let stub_body = format!(
-            "This page was merged into [[{}]] by the LLM dream pass (B2).\n\n\
-             _Its full pre-merge body is retained in git history and the supersession \
-             chain, and can be recovered with `restore-page`._\n",
-            survivor.path.as_str()
-        );
-        let mut stub_fm = frontmatter_object(&loser_md.frontmatter);
-        stub_fm.insert("compacted".to_string(), serde_json::Value::Bool(true));
-        stub_fm.insert(
-            "merged_into".to_string(),
-            serde_json::Value::String(survivor.path.as_str().to_string()),
+    for (loser, source) in plan.losers.iter().zip(plan.sources.iter().skip(1)) {
+        let mut fm = frontmatter_object(&source.markdown.frontmatter);
+        fm.insert("compacted".into(), serde_json::json!(true));
+        fm.insert(
+            "merged_into".into(),
+            serde_json::json!(plan.survivor.path.as_str()),
         );
         requests.push(WritePageRequest {
-            workspace_id,
-            project_id,
-            path: loser.path.clone(),
-            frontmatter: serde_json::Value::Object(stub_fm),
-            body: stub_body,
-            tier: Tier::Episodic,
-            pinned: false,
-            title: None,
-            admission_ctx: None,
-            author_id: None,
-            actor: actor.clone(),
-            evidence: Vec::new(),
+            workspace_id, project_id, path: loser.path.clone(),
+            frontmatter: serde_json::Value::Object(fm),
+            body: format!("This page was merged into [[{}]] by the local dream pass.\n\nThe full source version remains in the supersession chain and premerge git checkpoint.\n", plan.survivor.path.as_str()),
+            tier: Tier::Episodic, pinned: false, title: None,
+            admission_ctx: Some(AdmissionContext { op: AdmissionOp::Consolidate, actor: actor.clone(), ..Default::default() }),
+            author_id: None, actor: actor.clone(), evidence: evidence.clone(),
         });
     }
-
-    // Gated apply, part 2: one batched write through the single-writer actor
-    // (invariant #2). Survivor is request 0.
-    let superseded = plan.losers.len();
-    match wiki.apply_batch(requests).await {
-        Ok(new_ids) => match new_ids.first().copied() {
-            Some(new_survivor_id) => MergeOutcome::Applied {
-                new_survivor_id,
-                superseded,
-            },
-            None => MergeOutcome::Skipped,
-        },
-        Err(error) => {
-            tracing::warn!(path = %survivor.path.as_str(), %error, "dream pass: apply_batch failed; skipping cluster (retried next run)");
-            MergeOutcome::Skipped
+    let token = cancel.clone();
+    let refuse: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || stopped(&token, deadline));
+    match wiki
+        .apply_dream_batch(requests, &plan.sources, refuse)
+        .await
+    {
+        Ok(result) => {
+            if let Some(id) = result.ids.first().copied() {
+                merge.new_survivor_id = Some(id);
+                merge.applied = true;
+                merge.checkpoint = Some(result.checkpoint);
+                merge.embedding_required_ids = result.ids;
+                merge.reason = "applied_sources_retained_embedding_required".into();
+                report.clusters_merged += 1;
+                report.pages_rewritten += 1;
+                report.pages_superseded += plan.losers.len();
+            }
+        }
+        Err(_) => {
+            merge.reason = "cas_admission_checkpoint_or_apply_refused".into();
+            report.skipped += 1;
+            report.cancelled |= stopped(cancel, deadline);
         }
     }
 }
@@ -750,34 +907,108 @@ Hard rules:
 - Do NOT invent, infer, or add any fact that is not present in at least one of the provided pages. If two pages conflict, keep both and say they conflict.
 - Prefer clear prose over a bag of fragments; deduplicate repeated statements."#;
 
-fn build_merge_request(member_bodies: &[(String, String)]) -> ChatRequest {
-    let mut prompt = String::from("Merge these near-duplicate memory pages into one.\n\n");
-    for (path, body) in member_bodies {
-        let mut body = body.clone();
-        if body.len() > DREAM_MAX_MEMBER_CHARS {
-            let mut end = DREAM_MAX_MEMBER_CHARS;
-            while !body.is_char_boundary(end) {
-                end -= 1;
-            }
-            body.truncate(end);
-            body.push_str("\n[truncated]");
+fn build_merge_request(
+    sources: &[crate::dream_semantics::DreamSemanticSource],
+) -> Result<ChatRequest, DreamError> {
+    let mut prompt = String::from(
+        "Merge these source pages, preserving every fact, exception and both sides of conflicts.\n\n",
+    );
+    for source in sources {
+        if source.body.len() > DREAM_MAX_MEMBER_BYTES {
+            return Err(DreamError::Limit("source_body_bytes"));
         }
-        prompt.push_str(&format!("### Page: {path}\n\n{body}\n\n"));
+        prompt.push_str(&format!("### Page: {}\n\n{}\n\n", source.path, source.body));
     }
-    ChatRequest {
-        system: Some(DREAM_SYSTEM_PROMPT.to_string()),
+    let request = ChatRequest {
+        system: Some(DREAM_SYSTEM_PROMPT.into()),
         messages: vec![ChatMessage {
             role: Role::User,
             content: prompt,
         }],
         max_tokens: DREAM_MAX_TOKENS,
         temperature: Some(0.1),
+    };
+    if conservative_merge_input(&request) > DREAM_MAX_INPUT_TOKENS {
+        return Err(DreamError::Limit("input_tokens_conservative_wire_bytes"));
     }
+    Ok(request)
+}
+
+// Counts escaping and schema/envelope overhead. The model reserve matches the
+// driver's validated maximum. The local transport also checks the exact wire
+// for each merge and semantic request before sending it.
+fn conservative_merge_input(request: &ChatRequest) -> usize {
+    let mut messages = Vec::new();
+    if let Some(system) = &request.system {
+        messages.push(serde_json::json!({"role":"system","content":system}));
+    }
+    messages.extend(request.messages.iter().map(
+        |message| serde_json::json!({"role":message.role.as_str(),"content":message.content}),
+    ));
+    let wire = serde_json::json!({"model":"x".repeat(200),"messages":messages,"max_tokens":request.max_tokens,
+        "temperature":0.1,"response_format":{"type":"json_schema","json_schema":{"name":"dream_merge","strict":true,
+        "schema":schemars::schema_for!(DreamMergedPage)}}});
+    serde_json::to_vec(&wire).map_or(usize::MAX, |bytes| bytes.len().saturating_add(64))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn readonly_lock_wait_obeys_round_deadline_and_cancel_with_live_control() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let held = lock.lock().await;
+        let cancel = DreamCancel::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(10);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            await_read(lock.lock(), &cancel, deadline),
+        )
+        .await
+        .expect("read-only lock acquisition must terminate within the round deadline");
+        assert!(result.is_none());
+
+        let cancelled = DreamCancel::new();
+        cancelled.cancel();
+        assert!(
+            await_read(
+                lock.lock(),
+                &cancelled,
+                std::time::Instant::now() + DREAM_RUN_TIMEOUT,
+            )
+            .await
+            .is_none()
+        );
+        drop(held);
+        assert!(
+            await_read(
+                lock.lock(),
+                &cancel,
+                std::time::Instant::now() + DREAM_RUN_TIMEOUT,
+            )
+            .await
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn encoded_input_budget_counts_escaping_before_admitting_a_plan() {
+        let sources = vec![
+            crate::dream_semantics::DreamSemanticSource {
+                path: "a.md".into(),
+                body: "\"".repeat(3000),
+            },
+            crate::dream_semantics::DreamSemanticSource {
+                path: "b.md".into(),
+                body: "\"".repeat(3000),
+            },
+        ];
+        assert!(
+            build_merge_request(&sources).is_err(),
+            "wire escaping must fit the input ceiling"
+        );
+    }
 
     #[test]
     fn disabled_config_is_never_idle_ready() {

@@ -80,6 +80,40 @@ impl Wiki {
         }
         let original = markdown.clone();
         drop(_guard);
+        // Bare markers are unconditional absence. The `.md` sentinel forms
+        // (`none.md`, `nenhuma.md`, `n/a.md`) can name a live page in this
+        // scope, so resolve their existence once before deciding removal.
+        let mut md_candidates: Vec<String> = Vec::new();
+        if let Some(relations) = markdown
+            .frontmatter
+            .get("relations")
+            .and_then(serde_json::Value::as_object)
+        {
+            for key in ["causes", "fixes", "contradicts", "references"] {
+                if let Some(items) = relations.get(key).and_then(serde_json::Value::as_array) {
+                    for v in items {
+                        if let Some(s) = v.as_str() {
+                            let s = s.trim();
+                            if ai_memory_core::relation_target_is_sentinel_path(s)
+                                && !md_candidates.iter().any(|c| c == s)
+                            {
+                                md_candidates.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut live_md_sentinels: Vec<String> = Vec::new();
+        for target in &md_candidates {
+            if reader
+                .latest_page_id_by_ids(req.workspace_id, req.project_id, target.clone())
+                .await?
+                .is_some()
+            {
+                live_md_sentinels.push(target.clone());
+            }
+        }
         let mut removed = 0;
         if let Some(relations) = markdown
             .frontmatter
@@ -93,8 +127,19 @@ impl Wiki {
                 {
                     let old = items.len();
                     items.retain(|v| {
-                        !v.as_str()
-                            .is_some_and(ai_memory_core::relation_target_is_sentinel)
+                        let Some(s) = v.as_str() else {
+                            return true;
+                        };
+                        if ai_memory_core::relation_target_is_bare_sentinel(s) {
+                            return false;
+                        }
+                        let s = s.trim();
+                        if ai_memory_core::relation_target_is_sentinel_path(s)
+                            && !live_md_sentinels.iter().any(|live| live.as_str() == s)
+                        {
+                            return false;
+                        }
+                        true
                     });
                     removed += old - items.len();
                 }

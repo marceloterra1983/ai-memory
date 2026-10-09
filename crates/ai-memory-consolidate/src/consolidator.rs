@@ -63,6 +63,22 @@ impl From<serde_json::Error> for ConsolidatorError {
     }
 }
 
+impl ConsolidatorError {
+    /// Diagnostic for logs and durable job state. Provider responses
+    /// and JSON values may contain private content and are never included.
+    #[must_use]
+    pub fn diagnostic(&self) -> String {
+        match self {
+            Self::Llm(error) => match error.http_status() {
+                Some(status) => format!("llm:{} status={status}", error.class()),
+                None => format!("llm:{}", error.class()),
+            },
+            Self::Serde(_) => "serde".into(),
+            _ => self.to_string(),
+        }
+    }
+}
+
 /// Result alias used by the consolidator.
 pub type ConsolidatorResult<T> = Result<T, ConsolidatorError>;
 
@@ -99,7 +115,8 @@ where
                 warn!(
                     attempt,
                     max = CONSOLIDATION_LLM_MAX_ATTEMPTS,
-                    error = %e,
+                    error_class = e.class(),
+                    status = e.http_status(),
                     "consolidation hit a transient LLM error; retrying shortly",
                 );
                 tokio::time::sleep(retry_delay).await;
@@ -320,6 +337,7 @@ impl Consolidator {
             page = %id,
             "session consolidated via LLM",
         );
+        self.reconcile_session_state(session_id).await;
         Ok(ConsolidationOutcome {
             path,
             dry_run: false,
@@ -328,6 +346,19 @@ impl Consolidator {
             page_id: Some(id),
             tags: page.tags,
         })
+    }
+
+    async fn reconcile_session_state(&self, session_id: SessionId) {
+        // Sync checkpoints and manual calls may have no queue row. The same
+        // writer transition still repairs their summary link, while leaving
+        // an automatic worker's active lease intact.
+        if let Err(error) = self
+            .writer
+            .reconcile_session_consolidation_completed(session_id)
+            .await
+        {
+            warn!(%session_id, %error, "failed to reconcile session state after consolidation");
+        }
     }
 
     /// Borrow the underlying writer (used by the MCP tool to ack the
@@ -783,6 +814,7 @@ impl Consolidator {
         }
 
         let ids = self.wiki.apply_batch(requests).await?;
+        self.reconcile_session_state(session_id).await;
         let rationale_short = batch.rationale.chars().take(60).collect::<String>();
         let _ = self
             .wiki
@@ -1121,7 +1153,7 @@ fn build_batch_request_with_slots(
          - \"kind\"            (string)  required — one of: decision | gotcha | rule | fact\n\
          - \"tags\"            (array of string)  required — may be empty `[]`, but the key must be present\n\
          - \"entities\"        (array of string)  required — may be empty `[]`, but the key must be present; see below\n\
-         - \"relations\"       (object) optional — keys: \"causes\", \"fixes\", \"contradicts\"; each contains an array of existing wiki paths. Declare only evidence-backed edges; empty arrays are normal.\n\
+         - \"relations\"       (object) optional — keys: \"causes\", \"fixes\", \"contradicts\"; each contains exact existing .md wiki paths, optionally [workspace/]project:path.md. Never titles or absence markers (None, Nenhuma, N/A). Do not infer paths; use empty arrays when no exact target is known. Declare only evidence-backed edges.\n\
          - \"slot_kind\"       (string) optional — ONLY for `_slots/*`; one of \"state\" or \"invariant\"; this is the SLOT WRITE REGIME, NOT a tier value\n\
          - \"summary\"         (string) optional — ONE line of plain prose describing the page, shown beside its title. Headings, `- **key:** value` bullets, list items, and repeated titles are discarded. Omit rather than guess.\n\
          Use only the keys listed above. No `body`, no `content`. Field names \
@@ -2774,7 +2806,9 @@ mod tests {
             .unwrap();
         let path = PagePath::new("notes/linker-investigation.md").unwrap();
         let relations = serde_json::json!({
-            "causes": [target], "fixes": [target], "contradicts": [target]
+            "causes": [target, "None"],
+            "fixes": [target, "A free title"],
+            "contradicts": [target, "Nenhuma.md", "gotchas/not-existing.md"]
         });
         let mut response = batch_targeting(path.as_str(), "The session investigated the linker.");
         response["updates"][0]["relations"] = relations.clone();
@@ -2798,8 +2832,9 @@ mod tests {
 
         let stored = wiki.read_page(ws, proj, &path).unwrap();
         assert_eq!(stored.frontmatter["relations"], relations);
+        assert_eq!(stored.body, "The session investigated the linker.");
         let db = rusqlite::Connection::open(store.db_path()).unwrap();
-        let rows: Vec<(String, Vec<u8>)> = db
+        let rows: Vec<(String, Option<Vec<u8>>)> = db
             .prepare(
                 "SELECT link_type, to_page_id FROM links WHERE from_page_id = ?1 \
                  ORDER BY link_type",
@@ -2815,7 +2850,7 @@ mod tests {
             rows,
             ["causes", "contradicts", "fixes"]
                 .into_iter()
-                .map(|kind| (kind.to_string(), target_id.as_bytes().to_vec()))
+                .map(|kind| (kind.to_string(), Some(target_id.as_bytes().to_vec())))
                 .collect::<Vec<_>>()
         );
     }
@@ -3545,7 +3580,7 @@ mod tests {
         let path = PagePath::new(format!("sessions/{session}.md")).unwrap();
 
         for actor in [actor_named("alice"), actor_named("bob")] {
-            Consolidator::new(
+            let outcome = Consolidator::new(
                 store.reader.clone(),
                 store.writer.clone(),
                 wiki.clone(),
@@ -3563,6 +3598,15 @@ mod tests {
                 stored.frontmatter["agent"], "claude-code",
                 "origin comes from sessions.agent_kind, never the requesting actor"
             );
+            let db = rusqlite::Connection::open(store.db_path()).unwrap();
+            let summary: Option<Vec<u8>> = db
+                .query_row(
+                    "SELECT summary_page_id FROM sessions WHERE id = ?1",
+                    [session.as_bytes()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(summary, outcome.page_id.map(|id| id.as_bytes().to_vec()));
         }
     }
 
@@ -3608,6 +3652,73 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(rows, vec![("session".to_string(), session.to_string())]);
+    }
+
+    /// An empty provider batch records the absent anchor without rewriting the
+    /// captured observations or ending the session again.
+    #[tokio::test]
+    async fn empty_batch_records_no_page_without_rewriting_session_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, wiki, session, ws, proj) = batch_fixture(tmp.path()).await;
+        store.writer.end_session(session, None).await.unwrap();
+        store
+            .writer
+            .enqueue_session_consolidation(ws, proj, session)
+            .await
+            .unwrap();
+        let db = rusqlite::Connection::open(store.db_path()).unwrap();
+        let snapshot = || -> (Option<i64>, Option<i64>, String) {
+            db.query_row(
+                "SELECT ended_at, ended_observation_count, \
+                (SELECT json_group_array(json_object('id', hex(id), 'title', title, 'body', body, \
+                 'kind', kind, 'workspace', hex(workspace_id), 'project', hex(project_id), \
+                 'created_at', created_at)) FROM observations WHERE session_id = ?1) \
+                 FROM sessions WHERE id = ?1",
+                [session.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+        let before = snapshot();
+        let outcomes = Consolidator::new(
+            store.reader.clone(),
+            store.writer.clone(),
+            wiki,
+            Arc::new(ScriptedLlm(
+                serde_json::json!({"rationale": "No additional facts.", "updates": []}),
+            )),
+            ws,
+            proj,
+        )
+        .consolidate_session_multi(
+            session,
+            false,
+            ai_memory_core::ActorContext::anonymous(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(outcomes.is_empty());
+        let (state, reason, summary): (String, Option<String>, Option<Vec<u8>>) = db
+            .query_row(
+                "SELECT j.state, j.last_error, s.summary_page_id FROM sessions s \
+                JOIN session_consolidation_jobs j ON j.session_id = s.id WHERE s.id = ?1",
+                [session.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "completed");
+        assert!(
+            reason.is_some_and(|reason| reason.contains("no_session_page")),
+            "a no-op must not masquerade as a written summary"
+        );
+        assert_eq!(summary, None);
+        assert_eq!(
+            snapshot(),
+            before,
+            "summary reconciliation never changes end time or observations"
+        );
     }
 
     /// The multi-page provider path uses the same provenance contract for its
@@ -3669,6 +3780,22 @@ mod tests {
             .unwrap();
         assert!(concept.frontmatter.get("agent").is_none());
         assert!(concept.frontmatter.get("session_id").is_none());
+
+        let summary: Option<Vec<u8>> = rusqlite::Connection::open(store.db_path())
+            .unwrap()
+            .query_row(
+                "SELECT summary_page_id FROM sessions WHERE id = ?1",
+                [session.as_bytes()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let anchor_id = outcomes
+            .iter()
+            .find(|outcome| outcome.path.as_str() == format!("sessions/{session}.md"))
+            .unwrap()
+            .page_id
+            .unwrap();
+        assert_eq!(summary, Some(anchor_id.as_bytes().to_vec()));
 
         // P2 (docs/design-hindsight-borrowings.md §3): unlike the anchor-only
         // `session_id`/`agent` frontmatter stamp above, EVERY page a batch

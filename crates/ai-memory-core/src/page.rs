@@ -50,12 +50,13 @@ pub struct NewPage {
     pub frontmatter_json: serde_json::Value,
     /// `true` to mark the page as user-pinned (never decay).
     pub pinned: bool,
-    /// Outgoing links discovered in the page body.
+    /// Outgoing body references and typed frontmatter relations.
     ///
     /// The store resolves these against the latest page rows in the target
     /// project (the source's own project for bare links, or the named
-    /// project for a cross-project `[[project:path]]` link) and keeps
-    /// unresolved forward links as `to_page_id = NULL`.
+    /// project for a cross-project `[[project:path]]` link). Unresolved
+    /// body references remain forward links with `to_page_id = NULL`;
+    /// typed relations are indexed only when the exact target exists.
     pub links: Vec<LinkTarget>,
     /// Multi-user attribution: the registered user (v0.8 `users` table)
     /// that made this write, when resolved by the auth middleware.
@@ -326,6 +327,17 @@ impl Relation {
 
     /// Every relation, for schema/docs enumeration.
     pub const ALL: [Self; 3] = [Self::Causes, Self::Fixes, Self::Contradicts];
+}
+
+/// Explicit absence markers in relation targets, including the exact `.md`
+/// forms emitted by the old extension-appending parser. No substring, title,
+/// or terminal-path matching: other ambiguous values remain curation data.
+#[must_use]
+pub fn relation_target_is_sentinel(target: &str) -> bool {
+    let target = target.trim();
+    ["none", "nenhuma", "n/a", "none.md", "nenhuma.md", "n/a.md"]
+        .iter()
+        .any(|sentinel| target.eq_ignore_ascii_case(sentinel))
 }
 
 impl LinkTarget {

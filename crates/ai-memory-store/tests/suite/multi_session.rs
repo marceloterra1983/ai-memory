@@ -84,6 +84,108 @@ fn page(ws: WorkspaceId, proj: ProjectId, path: &str, title: &str, body: &str) -
     }
 }
 
+/// A typed claim cannot gain a target by borrowing a same-named page from
+/// another project/workspace, or by creating the named target scope.
+#[tokio::test]
+async fn typed_relations_resolve_only_existing_exact_targets_in_the_named_scope() {
+    use ai_memory_core::{LinkTarget, Relation};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, proj) = scope(&store).await;
+    let sibling = store
+        .writer
+        .get_or_create_project(ws, "sibling", None)
+        .await
+        .unwrap();
+    let other_ws = store.writer.get_or_create_workspace("other").await.unwrap();
+    let other_proj = store
+        .writer
+        .get_or_create_project(other_ws, "shared-app", None)
+        .await
+        .unwrap();
+    for (target_ws, target_proj, path) in [
+        (ws, proj, "notes/local.md"),
+        (ws, sibling, "notes/sibling.md"),
+        (other_ws, other_proj, "notes/foreign.md"),
+    ] {
+        store
+            .writer
+            .upsert_page(page(
+                target_ws,
+                target_proj,
+                path,
+                "Synthetic target",
+                "Target facts.",
+            ))
+            .await
+            .unwrap();
+    }
+    let target = |workspace: Option<&str>, project: Option<&str>, path: &str| LinkTarget {
+        workspace: workspace.map(str::to_owned),
+        project: project.map(str::to_owned),
+        path: PagePath::new(path).unwrap(),
+        relation: Some(Relation::Contradicts),
+    };
+    let mut source = page(
+        ws,
+        proj,
+        "notes/source.md",
+        "Synthetic source",
+        "Facts remain unchanged.",
+    );
+    source.frontmatter_json = serde_json::json!({
+        "source_session": "synthetic-origin",
+        "relations": {"contradicts": ["Unresolved title", "missing:notes/foreign.md"]}
+    });
+    source.links = vec![
+        target(None, None, "notes/local.md"),
+        target(None, Some("sibling"), "notes/sibling.md"),
+        target(Some("other"), Some("shared-app"), "notes/foreign.md"),
+        target(None, None, "notes/sibling.md"),
+        target(None, Some("missing"), "notes/foreign.md"),
+        target(Some("missing"), Some("shared-app"), "notes/foreign.md"),
+        target(None, Some("sibling"), "notes/foreign.md"),
+        LinkTarget::local(PagePath::new("notes/future.md").unwrap()),
+    ];
+    let id = store.writer.upsert_page(source.clone()).await.unwrap();
+    let db = rusqlite::Connection::open(store.db_path()).unwrap();
+    let rows: Vec<(String, String, bool)> = db.prepare(
+        "SELECT link_type, to_path, to_page_id IS NOT NULL FROM links WHERE from_page_id = ?1 ORDER BY link_type, to_path"
+    ).unwrap().query_map([id.as_bytes()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap().collect::<Result<_, _>>().unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("contradicts".into(), "notes/foreign.md".into(), true),
+            ("contradicts".into(), "notes/local.md".into(), true),
+            ("contradicts".into(), "notes/sibling.md".into(), true),
+            ("references".into(), "notes/future.md".into(), false),
+        ],
+        "typed claims fail closed; body references still support forward links"
+    );
+    let stored = store
+        .reader
+        .page_body_by_ids(ws, proj, "notes/source.md")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.body, source.body);
+    let frontmatter: serde_json::Value = serde_json::from_str(&stored.frontmatter_json).unwrap();
+    assert_eq!(
+        frontmatter["relations"],
+        source.frontmatter_json["relations"]
+    );
+    assert_eq!(frontmatter["source_session"], "synthetic-origin");
+    let missing_scopes: i64 = db.query_row(
+        "SELECT (SELECT count(*) FROM workspaces WHERE name = 'missing') + (SELECT count(*) FROM projects WHERE name = 'missing')", [], |row| row.get(0)
+    ).unwrap();
+    assert_eq!(
+        missing_scopes, 0,
+        "relation resolution never creates a scope"
+    );
+}
+
 /// The collaboration guarantee, and the reason a team can use one server:
 /// what Alice writes, Carol reads.
 ///
@@ -802,4 +904,165 @@ async fn a_session_linked_by_one_managed_run_is_not_another_runs() {
         status(beta.run_id).await,
         (Some("native-beta".into()), true)
     );
+}
+
+/// Summary reconciliation must not borrow an identically pathed page in a
+/// sibling scope or one whose frontmatter names a different session.
+#[tokio::test]
+async fn session_summary_reconcile_links_only_the_latest_owned_anchor_in_its_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, proj) = scope(&store).await;
+    let sibling = store
+        .writer
+        .get_or_create_project(ws, "sibling", None)
+        .await
+        .unwrap();
+    let other_ws = store
+        .writer
+        .get_or_create_workspace("foreign")
+        .await
+        .unwrap();
+    let other_proj = store
+        .writer
+        .get_or_create_project(other_ws, "shared-app", None)
+        .await
+        .unwrap();
+    let session = open_session(&store, ws, proj, AgentKind::Codex).await;
+    let path = format!("sessions/{session}.md");
+    let anchor = |ws, proj, owner| {
+        let mut p = page(ws, proj, &path, "Synthetic anchor", "Synthetic facts.");
+        p.frontmatter_json = serde_json::json!({"session_id": owner});
+        p
+    };
+    for (target_ws, target_proj) in [(ws, sibling), (other_ws, other_proj)] {
+        store
+            .writer
+            .upsert_page(anchor(target_ws, target_proj, session.to_string()))
+            .await
+            .unwrap();
+    }
+    let db = rusqlite::Connection::open(store.db_path()).unwrap();
+    let pointer = || -> Option<Vec<u8>> {
+        db.query_row(
+            "SELECT summary_page_id FROM sessions WHERE id = ?1",
+            [session.as_bytes()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    store
+        .writer
+        .reconcile_session_consolidation_completed(session)
+        .await
+        .unwrap();
+    assert_eq!(pointer(), None, "foreign same-path anchors must be refused");
+    store
+        .writer
+        .upsert_page(anchor(ws, proj, SessionId::new().to_string()))
+        .await
+        .unwrap();
+    store
+        .writer
+        .reconcile_session_consolidation_completed(session)
+        .await
+        .unwrap();
+    assert_eq!(
+        pointer(),
+        None,
+        "a path alone does not prove session ownership"
+    );
+
+    let first = store
+        .writer
+        .upsert_page(anchor(ws, proj, session.to_string()))
+        .await
+        .unwrap();
+    store
+        .writer
+        .reconcile_session_consolidation_completed(session)
+        .await
+        .unwrap();
+    assert_eq!(
+        pointer(),
+        Some(first.as_bytes().to_vec()),
+        "owned in-scope control must link even without a job"
+    );
+    let mut refreshed = anchor(ws, proj, session.to_string());
+    refreshed.body = "Updated synthetic facts.".into();
+    let latest = store.writer.upsert_page(refreshed).await.unwrap();
+    assert_ne!(first, latest);
+    store
+        .writer
+        .reconcile_session_consolidation_completed(session)
+        .await
+        .unwrap();
+    assert_eq!(
+        pointer(),
+        Some(latest.as_bytes().to_vec()),
+        "superseded versions cannot remain the summary"
+    );
+}
+
+/// A scope adopted mid-session wins over the immutable startup row, exactly
+/// as in the consolidator. Reconciliation cannot link the startup duplicate.
+#[tokio::test]
+async fn session_summary_reconcile_follows_the_observation_target_scope() {
+    use ai_memory_core::{NewObservation, ObservationKind, Sanitized, Sanitizer};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, startup) = scope(&store).await;
+    let target = store
+        .writer
+        .get_or_create_project(ws, "target", None)
+        .await
+        .unwrap();
+    let session = open_session(&store, ws, startup, AgentKind::Codex).await;
+    store
+        .writer
+        .insert_observation(Sanitized::new(
+            NewObservation {
+                occurred_at: None,
+                session_id: session,
+                workspace_id: ws,
+                project_id: target,
+                kind: ObservationKind::UserPrompt,
+                extension: None,
+                source_event: None,
+                title: "Synthetic work".into(),
+                body: "Captured after adopting the target scope.".into(),
+                importance: 8,
+            },
+            &Sanitizer::default(),
+        ))
+        .await
+        .unwrap();
+    let path = format!("sessions/{session}.md");
+    let mut anchor = page(
+        ws,
+        startup,
+        &path,
+        "Synthetic startup duplicate",
+        "Synthetic startup facts.",
+    );
+    anchor.frontmatter_json = serde_json::json!({"session_id": session.to_string()});
+    let startup_id = store.writer.upsert_page(anchor.clone()).await.unwrap();
+    anchor.project_id = target;
+    let target_id = store.writer.upsert_page(anchor).await.unwrap();
+    store
+        .writer
+        .reconcile_session_consolidation_completed(session)
+        .await
+        .unwrap();
+    let summary: Option<Vec<u8>> = rusqlite::Connection::open(store.db_path())
+        .unwrap()
+        .query_row(
+            "SELECT summary_page_id FROM sessions WHERE id = ?1",
+            [session.as_bytes()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(startup_id, target_id);
+    assert_eq!(summary, Some(target_id.as_bytes().to_vec()));
 }

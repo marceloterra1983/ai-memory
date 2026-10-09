@@ -5,7 +5,7 @@
 //! involved.
 
 use ai_memory_consolidate::{LintOptions, run_lint};
-use ai_memory_core::{PagePath, ProjectId, Tier, WorkspaceId};
+use ai_memory_core::{PageEvidence, PageEvidenceKind, PagePath, ProjectId, Tier, WorkspaceId};
 use ai_memory_store::Store;
 use ai_memory_wiki::{Wiki, WritePageRequest};
 use tempfile::TempDir;
@@ -87,6 +87,116 @@ async fn declared_relations_become_typed_link_rows() {
         vec![("fixes".to_string(), 1), ("references".to_string(), 1)],
         "typed edge and plain reference must both exist, both resolved"
     );
+}
+
+#[tokio::test]
+async fn a_live_md_sentinel_target_keeps_its_typed_edge() {
+    let tmp = TempDir::new().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, proj) = scope(&store).await;
+    let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+
+    // `none.md` is a legitimate page in the same scope.
+    wiki.write_page(req(
+        ws,
+        proj,
+        "none.md",
+        "the absence-marker page",
+        serde_json::json!({}),
+    ))
+    .await
+    .unwrap();
+    wiki.write_page(req(
+        ws,
+        proj,
+        "notes/consumer.md",
+        "contradicts the absence page",
+        serde_json::json!({"relations": {"contradicts": ["none.md"]}}),
+    ))
+    .await
+    .unwrap();
+
+    let db = rusqlite::Connection::open(tmp.path().join("db").join("memory.sqlite")).unwrap();
+    let rows: Vec<(String, i64)> = db
+        .prepare(
+            "SELECT link_type, to_page_id IS NOT NULL FROM links \
+             WHERE to_path = 'none.md' ORDER BY link_type",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![("contradicts".to_string(), 1)],
+        "a live .md sentinel form must keep its resolved typed edge"
+    );
+}
+
+#[tokio::test]
+async fn an_absent_md_sentinel_target_leaves_no_edge_but_preserves_page_data() {
+    let tmp = TempDir::new().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, proj) = scope(&store).await;
+    let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+
+    let fm = serde_json::json!({
+        "relations": {"fixes": ["n/a.md"]},
+        "expires_at": "2099-01-01",
+        "origin": {"session_id": "synthetic-origin"},
+    });
+    let mut request = req(ws, proj, "notes/declaration.md", "facts stay intact", fm);
+    request.evidence = vec![PageEvidence {
+        kind: PageEvidenceKind::Session,
+        source_id: "synthetic".into(),
+    }];
+    let id = wiki.write_page(request).await.unwrap();
+
+    let db = rusqlite::Connection::open(tmp.path().join("db").join("memory.sqlite")).unwrap();
+    let link_count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM links WHERE to_path = 'n/a.md'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        link_count, 0,
+        "an absent .md sentinel form must not mint a typed edge"
+    );
+
+    // Body, frontmatter (retaining the declaration), evidence and TTL survive.
+    let stored = store
+        .reader
+        .page_body_by_ids(ws, proj, "notes/declaration.md")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.body, "facts stay intact");
+    let stored_fm: serde_json::Value = serde_json::from_str(&stored.frontmatter_json).unwrap();
+    assert_eq!(
+        stored_fm["relations"]["fixes"],
+        serde_json::json!(["n/a.md"]),
+        "the unresolved declaration stays in frontmatter for curation"
+    );
+    assert_eq!(stored_fm["expires_at"], serde_json::json!("2099-01-01"));
+    let evidence: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM page_evidence WHERE page_id = ?1",
+            [id.as_bytes()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(evidence, 1, "evidence survives an unresolved relation");
+    let expires: Option<i64> = db
+        .query_row(
+            "SELECT expires_at FROM pages WHERE id = ?1 AND is_latest = 1",
+            [id.as_bytes()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(expires.is_some(), "TTL survives an unresolved relation");
 }
 
 #[tokio::test]

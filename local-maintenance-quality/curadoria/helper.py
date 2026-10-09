@@ -17,7 +17,8 @@ import urllib.request
 import uuid
 
 KEYS = ("causes", "fixes", "contradicts", "references")
-SENTINELS = {"none", "nenhuma", "n/a", "none.md", "nenhuma.md", "n/a.md"}
+SENTINELS = {"none", "nenhuma", "n/a"}
+MD_SENTINELS = {"none.md", "nenhuma.md", "n/a.md"}
 WRITE_SCOPES = {("default", "dev"), ("default", "farol"), ("default", "regente")}
 
 
@@ -32,7 +33,13 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def is_sentinel(value):
+    """Bare absence markers; these never name a page path."""
     return isinstance(value, str) and value.strip().lower() in SENTINELS
+
+
+def is_md_sentinel(value):
+    """The exact `.md` absence-marker forms; they can also name a live page."""
+    return isinstance(value, str) and value.strip().lower() in MD_SENTINELS
 
 
 def ensure_write_scope(workspace, project):
@@ -72,6 +79,11 @@ def build_plan(rows, server_url, workspace, project, target_exists=None):
                 values = [values]
             for value in values:
                 if is_array and relation in KEYS and is_sentinel(value):
+                    removed += 1
+                elif (is_array and relation in KEYS and is_md_sentinel(value)
+                      and not target_exists(value)):
+                    # A `.md` sentinel form that provably names no live page
+                    # is absence; a live one is a legitimate link and stays.
                     removed += 1
                 elif not is_array or relation not in KEYS or not isinstance(value, str) or not target_exists(value):
                     plan["pending"].append({"head_id": row["head_id"], "path": row["path"],

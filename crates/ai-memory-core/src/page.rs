@@ -329,13 +329,28 @@ impl Relation {
     pub const ALL: [Self; 3] = [Self::Causes, Self::Fixes, Self::Contradicts];
 }
 
-/// Explicit absence markers in relation targets, including the exact `.md`
-/// forms emitted by the old extension-appending parser. No substring, title,
-/// or terminal-path matching: other ambiguous values remain curation data.
+/// Bare absence markers in relation targets. These carry no `.md` extension
+/// and so can never name a page: they are unconditional absence regardless of
+/// scope. No substring, title, or terminal-path matching: other ambiguous
+/// values remain curation data.
 #[must_use]
-pub fn relation_target_is_sentinel(target: &str) -> bool {
+pub fn relation_target_is_bare_sentinel(target: &str) -> bool {
     let target = target.trim();
-    ["none", "nenhuma", "n/a", "none.md", "nenhuma.md", "n/a.md"]
+    ["none", "nenhuma", "n/a"]
+        .iter()
+        .any(|sentinel| target.eq_ignore_ascii_case(sentinel))
+}
+
+/// The exact `.md` absence-marker forms emitted by the old
+/// extension-appending parser. Unlike the bare markers, these can also name a
+/// legitimate page (`none.md` is a valid [`PagePath`]); a caller that can
+/// resolve existence treats them as sentinels only when the target page does
+/// not exist in the source page's own scope. No substring, title, or
+/// terminal-path matching: other ambiguous values remain curation data.
+#[must_use]
+pub fn relation_target_is_sentinel_path(target: &str) -> bool {
+    let target = target.trim();
+    ["none.md", "nenhuma.md", "n/a.md"]
         .iter()
         .any(|sentinel| target.eq_ignore_ascii_case(sentinel))
 }

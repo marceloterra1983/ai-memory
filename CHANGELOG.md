@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scoped retrieval excludes the exact scoped project name from entity matches,
   preventing the scope label from adding an RRF vote to unrelated pages.
   (local fixbrainrank patch; no upstream issue opened)
+- Fixed the exact `.md` absence-marker forms (`none.md`, `nenhuma.md`, `n/a.md`)
+  being stripped even when they named a live page: a target that exists in the
+  source page's own scope now keeps its typed relation, index edge and
+  frontmatter declaration, while bare `none`/`nenhuma`/`N/A` markers still mean
+  absence and curation only removes an absent `.md` form it can provably verify.
+  (local-20261009; private integration, no upstream issue opened)
 
 ## [2.5.2] - 2026-10-01
 

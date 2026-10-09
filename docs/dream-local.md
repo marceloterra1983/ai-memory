@@ -192,12 +192,32 @@ support independently asks whether every draft claim is supported and whether
 each source's information, exceptions and conflicts survived. Every judgment
 must meet 0.95; failure, degraded output, uncertainty and invalid shape block
 apply. Numeric limits, permissions, paths, identities and hashes belong to code.
-The [Jev evaluation decision](design-decisions.md) records the adapter reached
-at the local endpoint, rejected prompt and calibration limits. Its synthetic
-pilot reported `model=qwen`; the downstream destination and native Jev weights
-remain unverified. Root must verify no port 8789 or external fallback behind
-the adapter before enabling dream. Availability, a probability,
-or mechanical tests do not certify complete factual coverage.
+Before requesting draft support, both the driver and local gate now require a
+literal-preservation proof. Memory prose has no typed grammar for arbitrary
+commands, identifiers or numeric records. Comparing token sets would miss
+swapped dates/values, changed units and commands assembled from valid tokens.
+The conservative accepted body therefore consists only of complete source
+bodies copied verbatim, separated by blank lines; identical bodies may appear
+once. A source contained inside another still needs its own complete record.
+The title must be an exact source excerpt. Paraphrases, changed formatting,
+additional prose, missing or invented literals and adjacent source copies fail
+closed with `draft_literals_refused`, before a support request or apply. The
+persisted body is checked separately: a title cannot supply a missing body fact.
+This also proves preservation of opaque identifiers without asking Jev to
+recognize their syntax. It restricts rewriting and does not establish fusion
+quality. All three semantic judgments remain required at the unchanged threshold.
+
+The [Jev evaluation decision](design-decisions.md) records the earlier adapter
+experiment and calibration limits. The broader Portuguese synthetic pilot did
+not reproduce its simple English positive control. The verified local route
+reported `model=qwen`, backed by local Qwen3.5-9B-AWQ rather than native Jev.
+Even the exact-copy control retaining all 17 facts passed source preservation
+but refused support at 0.95. Shorter questions and Portuguese questions also
+failed the fixed positive controls; their safe negative refusals do not certify
+acceptance. No semantic prompt or threshold was changed to obtain a pass.
+Root must verify the current downstream route excludes port 8789 and external
+fallback before each pilot. Availability, a probability or mechanical tests do
+not certify complete factual coverage or a completed merge/restore pilot.
 
 Root integration must still pilot actual Qwen drafting plus the local gate on
 synthetic fixtures and an isolated real-copy no-op, with a versioned answer key,

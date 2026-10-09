@@ -82,6 +82,59 @@ pub enum DreamSemanticError {
     /// No explicit local model was supplied.
     #[error("dream semantic model must be explicit")]
     InvalidModel,
+    /// Literal identities or their source context cannot be proved unchanged.
+    #[error("dream draft literal preservation cannot be proved")]
+    LiteralMismatch,
+}
+
+// There is no typed grammar for arbitrary commands, identifiers or numeric
+// records in memory prose. A token-set comparison would miss changed units,
+// swapped dates and values, or commands assembled from individually valid
+// tokens. Until those records are typed, only complete, verbatim source copies
+// attest literal identity and context; any additional body prose fails closed.
+pub(crate) fn validate_draft_literals(
+    sources: &[DreamSemanticSource],
+    body: &str,
+    title: Option<&str>,
+) -> Result<(), DreamSemanticError> {
+    if sources.len() != 2
+        || sources.iter().any(|source| {
+            source.body.trim().is_empty()
+                || source.body.len() > 6000
+                || !body.contains(&source.body)
+        })
+        || title.is_some_and(|title| {
+            title.trim().is_empty() || !sources.iter().any(|source| source.body.contains(title))
+        })
+    {
+        return Err(DreamSemanticError::LiteralMismatch);
+    }
+    let mut remainder = body;
+    let mut seen = [false; 2];
+    while !remainder.is_empty() {
+        let source = sources
+            .iter()
+            .filter(|source| remainder.starts_with(&source.body))
+            .max_by_key(|source| source.body.len())
+            .ok_or(DreamSemanticError::LiteralMismatch)?;
+        for (index, original) in sources.iter().enumerate() {
+            seen[index] |= original.body == source.body;
+        }
+        remainder = &remainder[source.body.len()..];
+        if remainder.trim().is_empty() {
+            break;
+        }
+        // Substrings and adjacent copies cannot attest distinct source records:
+        // concatenating individually valid values can invent a command or id.
+        if !remainder.starts_with("\n\n") {
+            return Err(DreamSemanticError::LiteralMismatch);
+        }
+        remainder = remainder.trim_start_matches('\n');
+    }
+    if seen.iter().any(|seen| !seen) {
+        return Err(DreamSemanticError::LiteralMismatch);
+    }
+    Ok(())
 }
 
 /// The two semantic decisions in the dream workflow.
@@ -191,6 +244,16 @@ fn build_request(
         || draft.is_some_and(|draft| draft.trim().is_empty() || draft.len() > 4004)
     {
         return Err(DreamSemanticError::InvalidInput);
+    }
+    if let Some(draft) = draft {
+        // The public gate also refuses unverifiable literals before HTTP. The
+        // driver separately checks the persisted body so a title cannot repair
+        // a fact missing from it, even with another gate implementation.
+        let (title, body) = draft
+            .strip_prefix("# ")
+            .and_then(|draft| draft.split_once("\n\n"))
+            .map_or((None, draft), |(title, body)| (Some(title), body));
+        validate_draft_literals(sources, body, title)?;
     }
     // Paths and ids stay with deterministic code. These questions concern only
     // the source prose; transmitting path names would add no semantic evidence.
@@ -549,6 +612,43 @@ mod tests {
     }
 
     #[test]
+    fn recorded_local_qwen_copy_controls_remain_uncertain_in_production_parser() {
+        // Captured once from the fixed local route with the original Portuguese
+        // controls. The complex copy retained all 17 facts; mechanical identity
+        // and high preservation scores cannot replace a passing support score.
+        let cases: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/dream_literal_copy_responses.json"
+        ))
+        .unwrap();
+        for name in ["simple_literal_copy", "pilot17_literal_copy"] {
+            let expected = &cases[name]["request"];
+            let state: Value = serde_json::from_str(expected["state"].as_str().unwrap()).unwrap();
+            let sources: Vec<_> = state["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|source| DreamSemanticSource {
+                    path: "synthetic.md".into(),
+                    body: source["body"].as_str().unwrap().into(),
+                })
+                .collect();
+            assert_eq!(
+                build_request("qwen", &sources, Some(state["draft"].as_str().unwrap())).unwrap(),
+                *expected,
+                "{name}: including the exact serialized state"
+            );
+            assert_eq!(
+                classify_response(
+                    cases[name]["response"].clone(),
+                    &["supported", "preserved_0", "preserved_1"]
+                ),
+                Ok(Verdict::Uncertain),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn long_source_and_full_wire_budget_refuse_without_truncation() {
         let mut sources = vec![
             DreamSemanticSource {
@@ -571,6 +671,66 @@ mod tests {
         assert_eq!(
             build_request("synthetic", &sources, None),
             Err(DreamSemanticError::InputBudget)
+        );
+    }
+
+    #[tokio::test]
+    async fn literal_guard_refuses_before_http_with_complete_record_control() {
+        let sources = vec![
+            DreamSemanticSource {
+                path: "a.md".into(),
+                body: "Aurora em 2026-01-10: 7 ciclos, 2 bar. Execute `cargo t`. ID amber-A."
+                    .into(),
+            },
+            DreamSemanticSource {
+                path: "b.md".into(),
+                body: "Aurora em 2026-02-10: 9 ciclos, 3 bar. Caminho /tmp/aurora. ID amber-B."
+                    .into(),
+            },
+        ];
+        let full = format!("{}\n\n{}", sources[0].body, sources[1].body);
+        assert!(build_request("qwen", &sources, Some(&full)).is_ok());
+        let gate = LocalJevGate::new("qwen").unwrap();
+        for draft in [
+            full.replace("2026-01-10", "2026-02-10"),
+            full.replace("7 ciclos, 2 bar", "2 ciclos, 7 bar"),
+            full.replace("cargo t", "cargo check"),
+            full.replace("amber-B", "amber-C"),
+            full.replace("\n\n", ""),
+            format!("{full}\nForam 8 ciclos."),
+            format!("# ID amber-C\n\n{full}"),
+            format!("# 2026-01-10\n\n{}", full.replace("2026-01-10", "janeiro")),
+        ] {
+            assert_eq!(
+                gate.draft_support(&sources, &draft).await,
+                Err(DreamSemanticError::LiteralMismatch)
+            );
+        }
+        assert_eq!(gate.request_count(), Some(0));
+    }
+
+    #[test]
+    fn contained_sources_are_distinct_records_but_identical_sources_can_deduplicate() {
+        let mut sources = vec![
+            DreamSemanticSource {
+                path: "a.md".into(),
+                body: "Run `cargo t` only in the lab.".into(),
+            },
+            DreamSemanticSource {
+                path: "b.md".into(),
+                body: "Run `cargo t`".into(),
+            },
+        ];
+        assert_eq!(
+            validate_draft_literals(&sources, &sources[0].body, None),
+            Err(DreamSemanticError::LiteralMismatch)
+        );
+        let full = format!("{}\n\n{}", sources[0].body, sources[1].body);
+        assert_eq!(validate_draft_literals(&sources, &full, None), Ok(()));
+        sources[1].body = sources[0].body.clone();
+        assert_eq!(
+            validate_draft_literals(&sources, &sources[0].body, None),
+            Ok(())
         );
     }
 
@@ -636,13 +796,11 @@ mod tests {
                 .unwrap(),
             DraftSupport::Approved
         );
-        assert!(
-            !gate
-                .draft_support(&duplicate, "Lina prefers long replies in English.")
-                .await
-                .unwrap()
-                .is_accepted()
-        );
+        assert!(matches!(
+            gate.draft_support(&duplicate, "Lina prefers long replies in English.")
+                .await,
+            Err(DreamSemanticError::LiteralMismatch)
+        ));
         for (a, b, draft) in [
             (
                 "Lina prefers short replies in Portuguese.",
@@ -665,14 +823,11 @@ mod tests {
                 "Lina prefers detailed replies with examples every time.",
             ),
         ] {
-            assert!(
-                !gate
-                    .draft_support(&sources(a, b), draft)
-                    .await
-                    .unwrap()
-                    .is_accepted()
-            );
+            assert!(matches!(
+                gate.draft_support(&sources(a, b), draft).await,
+                Err(DreamSemanticError::LiteralMismatch)
+            ));
         }
-        assert_eq!(gate.request_count(), Some(9));
+        assert_eq!(gate.request_count(), Some(4));
     }
 }

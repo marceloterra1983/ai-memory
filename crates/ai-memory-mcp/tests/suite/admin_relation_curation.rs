@@ -1,5 +1,5 @@
 //! The curator may remove exact sentinels, never rewrite knowledge or a stale head.
-use ai_memory_core::{ActorContext, AuthLevel, PageEvidence, PageEvidenceKind, PagePath, Tier};
+use ai_memory_core::{ActorContext, PageEvidence, PageEvidenceKind, PagePath, Tier};
 use ai_memory_mcp::{AdminState, admin_router};
 use ai_memory_wiki::WritePageRequest;
 use axum::{
@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-async fn fixture(state: &AdminState, project: &str) -> Value {
+pub(super) async fn fixture(state: &AdminState, project: &str) -> Value {
     let ws = state
         .writer
         .get_or_create_workspace("default")
@@ -46,15 +46,22 @@ async fn fixture(state: &AdminState, project: &str) -> Value {
     json!({"workspace":"default","project":project,"path":"notes/curate.md","expected_head_id":id.to_string(),"expected_body_sha256":hash})
 }
 
-async fn post(state: &AdminState, payload: Value, level: AuthLevel) -> (StatusCode, Value) {
-    let mut req = Request::builder()
+async fn post(state: &AdminState, payload: Value) -> (StatusCode, Value) {
+    let req = Request::builder()
         .method("POST")
         .uri("/admin/curate-relations")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&payload).unwrap()))
         .unwrap();
-    req.extensions_mut().insert(level);
-    let response = admin_router(state.clone()).oneshot(req).await.unwrap();
+    let auth = std::sync::Arc::new(ai_memory_mcp::auth::AuthState::new(None));
+    let response = admin_router(state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            auth,
+            ai_memory_mcp::require_dual_auth,
+        ))
+        .oneshot(req)
+        .await
+        .unwrap();
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 65536)
         .await
@@ -81,7 +88,7 @@ async fn relation_curation_is_dry_by_default_and_preserves_every_other_field_and
             &PagePath::new("notes/curate.md").unwrap(),
         )
         .unwrap();
-    let (status, preview) = post(&state, payload.clone(), AuthLevel::Root).await;
+    let (status, preview) = post(&state, payload.clone()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(preview["removed"], 3);
     assert_eq!(preview["applied"], false);
@@ -98,7 +105,7 @@ async fn relation_curation_is_dry_by_default_and_preserves_every_other_field_and
     );
     let mut apply = payload.clone();
     apply["dry_run"] = json!(false);
-    let (status, result) = post(&state, apply.clone(), AuthLevel::Root).await;
+    let (status, result) = post(&state, apply.clone()).await;
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!(result["applied"], true);
     assert!(result["before_checkpoint"].is_string());
@@ -153,10 +160,7 @@ async fn relation_curation_is_dry_by_default_and_preserves_every_other_field_and
         })
         .await
         .unwrap();
-    assert_eq!(
-        post(&state, apply, AuthLevel::Root).await.0,
-        StatusCode::CONFLICT
-    );
+    assert_eq!(post(&state, apply).await.0, StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -167,28 +171,19 @@ async fn relation_curation_refuses_foreign_heads_bad_hashes_unknown_fields_and_m
     let foreign = fixture(&state, "other").await;
     let mut forged = payload.clone();
     forged["expected_head_id"] = foreign["expected_head_id"].clone();
-    assert_eq!(
-        post(&state, forged, AuthLevel::Root).await.0,
-        StatusCode::CONFLICT
-    );
+    assert_eq!(post(&state, forged).await.0, StatusCode::CONFLICT);
     let mut bad_hash = payload.clone();
     bad_hash["expected_body_sha256"] = json!("00".repeat(32));
-    assert_eq!(
-        post(&state, bad_hash, AuthLevel::Root).await.0,
-        StatusCode::CONFLICT
-    );
+    assert_eq!(post(&state, bad_hash).await.0, StatusCode::CONFLICT);
     let mut unknown = payload.clone();
     unknown["body"] = json!("replace knowledge");
     assert_eq!(
-        post(&state, unknown, AuthLevel::Root).await.0,
+        post(&state, unknown).await.0,
         StatusCode::UNPROCESSABLE_ENTITY
     );
     let mut missing = payload.clone();
     missing["workspace"] = json!("does-not-exist");
-    assert_eq!(
-        post(&state, missing, AuthLevel::Root).await.0,
-        StatusCode::NOT_FOUND
-    );
+    assert_eq!(post(&state, missing).await.0, StatusCode::NOT_FOUND);
     assert!(
         state
             .reader
@@ -197,25 +192,5 @@ async fn relation_curation_refuses_foreign_heads_bad_hashes_unknown_fields_and_m
             .unwrap()
             .is_none()
     );
-    assert_eq!(
-        post(&state, payload, AuthLevel::Root).await.0,
-        StatusCode::OK
-    );
-}
-
-#[tokio::test]
-async fn relation_curation_is_root_only_even_on_a_single_operator_install() {
-    let tmp = TempDir::new().unwrap();
-    let state = super::admin_write_page::make_state(&tmp).await;
-    let payload = fixture(&state, "dev").await;
-    for (level, status) in [
-        (AuthLevel::Anonymous, StatusCode::UNAUTHORIZED),
-        (AuthLevel::User, StatusCode::FORBIDDEN),
-    ] {
-        assert_eq!(post(&state, payload.clone(), level).await.0, status);
-    }
-    assert_eq!(
-        post(&state, payload, AuthLevel::Root).await.0,
-        StatusCode::OK
-    );
+    assert_eq!(post(&state, payload).await.0, StatusCode::OK);
 }

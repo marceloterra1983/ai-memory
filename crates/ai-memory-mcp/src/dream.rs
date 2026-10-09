@@ -377,8 +377,7 @@ mod tests {
     use super::*;
     use ai_memory_consolidate::EmbeddingCoord;
     use ai_memory_consolidate::dream_semantics::{
-        ClusterSuitability, DraftSupport, DreamSemanticError, DreamSemanticGate,
-        DreamSemanticSource,
+        ClusterSuitability, DreamSemanticError, DreamSemanticGate, DreamSemanticSource,
     };
     use ai_memory_core::{ActorContext, PagePath, Tier};
     use ai_memory_llm::{Embedder, SyntheticEmbedder};
@@ -503,15 +502,6 @@ mod tests {
                 self.release.notified().await;
                 Ok(ClusterSuitability::Approved)
             })
-        }
-
-        fn draft_support<'a>(
-            &'a self,
-            _sources: &'a [DreamSemanticSource],
-            _draft: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<DraftSupport, DreamSemanticError>> + Send + 'a>>
-        {
-            Box::pin(async { panic!("shutdown must prevent the second semantic request") })
         }
     }
 

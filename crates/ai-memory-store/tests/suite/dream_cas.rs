@@ -242,16 +242,14 @@ async fn dream_sql_cas_refuses_expired_source_even_when_snapshot_matches() {
     let (ws, proj) = scope(&store).await;
     let mut input = page(ws, proj, "a.md", "expiring fact");
     input.expires_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1));
-    store.writer.upsert_page(input).await.unwrap();
+    store.writer.upsert_page(input.clone()).await.unwrap();
     let heads = store.reader.dream_heads_bounded(ws, proj, 1).await.unwrap();
+    // Keep TTL identical so refusal must reach the transaction's expiry guard.
+    input.body = "candidate".into();
     assert!(
         store
             .writer
-            .upsert_dream_pages_batch(
-                vec![page(ws, proj, "a.md", "candidate")],
-                heads,
-                Arc::new(|| false)
-            )
+            .upsert_dream_pages_batch(vec![input], heads, Arc::new(|| false))
             .await
             .is_err()
     );
@@ -265,6 +263,107 @@ async fn dream_sql_cas_refuses_expired_source_even_when_snapshot_matches() {
             .body,
         "expiring fact"
     );
+}
+
+#[tokio::test]
+async fn dream_sql_refuses_mixed_expiry_and_ttl_changes_with_equal_ttl_control() {
+    let expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
+    let later: jiff::Timestamp = "2099-01-02T00:00:00Z".parse().unwrap();
+    for (left, right) in [
+        (None, Some(expires)),
+        (Some(expires), None),
+        (Some(expires), Some(later)),
+        (None, None),
+        (Some(expires), Some(expires)),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let (ws, proj) = scope(&store).await;
+        let mut a = page(ws, proj, "a.md", "source a");
+        let mut b = page(ws, proj, "b.md", "source b");
+        a.expires_at = left;
+        b.expires_at = right;
+        store
+            .writer
+            .upsert_pages_batch(vec![a.clone(), b.clone()])
+            .await
+            .unwrap();
+        let heads = store.reader.dream_heads_bounded(ws, proj, 2).await.unwrap();
+        a.body = "merged source a and source b".into();
+        b.body = "merge pointer".into();
+        let result = store
+            .writer
+            .upsert_dream_pages_batch(
+                vec![a.clone(), b.clone()],
+                heads.clone(),
+                Arc::new(|| false),
+            )
+            .await;
+        if left != right {
+            assert!(
+                result.is_err(),
+                "different TTLs must refuse, including None: {left:?} {right:?}"
+            );
+            assert_eq!(
+                store.reader.dream_heads_bounded(ws, proj, 2).await.unwrap()[0]
+                    .candidate
+                    .id,
+                heads[0].candidate.id
+            );
+        } else {
+            assert_eq!(result.unwrap().len(), 2, "identical TTLs remain eligible");
+            let fresh = store.reader.dream_heads_bounded(ws, proj, 2).await.unwrap();
+            assert!(
+                fresh
+                    .iter()
+                    .all(|h| h.candidate.expires_at_us == left.map(|t| t.as_microsecond()))
+            );
+            a.expires_at = Some(later);
+            assert!(
+                store
+                    .writer
+                    .upsert_dream_pages_batch(vec![a, b], fresh.clone(), Arc::new(|| false))
+                    .await
+                    .is_err(),
+                "a new version must not change the shared TTL"
+            );
+            assert_eq!(
+                store.reader.dream_heads_bounded(ws, proj, 2).await.unwrap()[0]
+                    .candidate
+                    .id,
+                fresh[0].candidate.id
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn dream_sql_cas_refuses_expiry_between_snapshot_and_apply() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, proj) = scope(&store).await;
+    let expires = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(1);
+    let mut input = page(ws, proj, "a.md", "fact expires after snapshot");
+    input.expires_at = Some(expires);
+    store.writer.upsert_page(input.clone()).await.unwrap();
+    let heads = store.reader.dream_heads_bounded(ws, proj, 1).await.unwrap();
+    assert!(
+        jiff::Timestamp::now() < expires,
+        "snapshot is initially valid"
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    input.body = "late draft".into();
+    assert!(
+        store
+            .writer
+            .upsert_dream_pages_batch(vec![input], heads.clone(), Arc::new(|| false))
+            .await
+            .is_err(),
+        "expiry is checked again at apply"
+    );
+    let after = store.reader.dream_heads_bounded(ws, proj, 1).await.unwrap();
+    assert_eq!(after[0].candidate.id, heads[0].candidate.id);
+    assert_eq!(after[0].body_sha256, heads[0].body_sha256);
 }
 
 #[tokio::test]

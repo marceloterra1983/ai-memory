@@ -272,6 +272,18 @@ pub(crate) fn upsert_dream_pages_batch(
     if keys.len() != heads.len() || request_keys != keys {
         return Err(invalid("dream source coordinates do not match batch"));
     }
+    // A survivor cannot represent facts with different retention deadlines.
+    // Compare the stored instants, including absence, rather than date text.
+    let shared_expiry = heads[0].candidate.expires_at_us;
+    if heads
+        .iter()
+        .any(|h| h.candidate.expires_at_us != shared_expiry)
+        || pages
+            .iter()
+            .any(|p| p.expires_at.map(|t| t.as_microsecond()) != shared_expiry)
+    {
+        return Err(invalid("dream requires unchanged identical source expiry"));
+    }
     let now = Timestamp::now().as_microsecond();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for expected in heads {

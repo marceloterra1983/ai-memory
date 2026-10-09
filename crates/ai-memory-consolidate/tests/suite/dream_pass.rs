@@ -359,6 +359,11 @@ async fn flag_on_merges_cluster_via_llm() {
 
     assert_eq!(report.clusters_considered, 1, "one cluster: {report:?}");
     assert_eq!(report.clusters_merged, 1, "the merge applied: {report:?}");
+    assert_eq!(report.inference_requests, 2, "relatedness and draft only");
+    assert_eq!(
+        report.semantic_questions, 1,
+        "literal proof is not inference"
+    );
     assert_eq!(report.pages_rewritten, 1);
     assert_eq!(report.pages_superseded, 1);
     assert_eq!(report.skipped, 0);
@@ -690,23 +695,6 @@ impl ai_memory_consolidate::dream_semantics::DreamSemanticGate for AcceptingGate
     > {
         Box::pin(async { Ok(ai_memory_consolidate::dream_semantics::ClusterSuitability::Approved) })
     }
-    fn draft_support<'a>(
-        &'a self,
-        _sources: &'a [ai_memory_consolidate::dream_semantics::DreamSemanticSource],
-        _draft: &'a str,
-    ) -> Pin<
-        Box<
-            dyn Future<
-                    Output = Result<
-                        ai_memory_consolidate::dream_semantics::DraftSupport,
-                        ai_memory_consolidate::dream_semantics::DreamSemanticError,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async { Ok(ai_memory_consolidate::dream_semantics::DraftSupport::Approved) })
-    }
 }
 
 async fn seed_cluster() -> Fixture {
@@ -741,6 +729,11 @@ async fn editing_a_source_during_inference_refuses_the_entire_batch() {
     .unwrap();
     assert_eq!(report.clusters_merged, 0);
     assert_eq!(report.skipped, 1);
+    assert_eq!(
+        report.merges[0].reason,
+        "cas_admission_checkpoint_or_apply_refused"
+    );
+    assert_eq!(report.inference_requests, 2);
     assert_eq!(
         latest_body(&fx, "sessions/a.md"),
         "Concurrent operator: preserve this new exception."
@@ -871,6 +864,146 @@ async fn literal_loss_invention_and_rebinding_refuse_before_apply_with_copy_cont
         violations.is_empty(),
         "literal mutants escaped refusal: {violations:?}"
     );
+}
+
+#[tokio::test]
+async fn different_source_expiry_refuses_before_inference_with_equal_instant_control() {
+    for (left, right, allowed) in [
+        (None, Some("2099-01-01"), false),
+        (Some("2099-01-01"), None, false),
+        (Some("2099-01-01"), Some("2099-01-02"), false),
+        (
+            Some("2099-01-01"),
+            Some("2099-01-01T23:59:59.999999Z"),
+            true,
+        ),
+        (None, None, true),
+    ] {
+        let fx = seed_fixture(true).await;
+        for (path, body, expiry) in [
+            ("sessions/a.md", DUP_A, left),
+            ("sessions/b.md", DUP_B, right),
+            ("sessions/far.md", K8S_A, None),
+        ] {
+            let mut fm = serde_json::json!({"title":path});
+            if let Some(expiry) = expiry {
+                fm["expires_at"] = serde_json::json!(expiry);
+            }
+            fx.wiki
+                .write_page(WritePageRequest {
+                    workspace_id: fx.ws,
+                    project_id: fx.proj,
+                    path: PagePath::new(path).unwrap(),
+                    frontmatter: fm,
+                    body: body.into(),
+                    tier: Tier::Episodic,
+                    pinned: false,
+                    title: None,
+                    admission_ctx: None,
+                    author_id: None,
+                    actor: ActorContext::anonymous(),
+                    evidence: vec![],
+                })
+                .await
+                .unwrap();
+            backdate_latest(&fx, path, COLD_DAYS);
+        }
+        let llm = FakeMergeLlm::new();
+        let result = run_dream_pass(
+            &fx.store.reader,
+            &fx.wiki,
+            Some(&llm),
+            fx.ws,
+            fx.proj,
+            &DecayParams::default(),
+            0.0,
+            &dream_on(),
+            &DreamCancel::new(),
+            false,
+        )
+        .await;
+        if allowed {
+            assert_eq!(result.unwrap().clusters_merged, 1);
+            let heads = fx
+                .store
+                .reader
+                .dream_heads_bounded(fx.ws, fx.proj, 3)
+                .await
+                .unwrap();
+            let expected = left.map(|t| {
+                ai_memory_core::parse_expires_at_instant(t)
+                    .unwrap()
+                    .as_microsecond()
+            });
+            assert!(
+                heads
+                    .iter()
+                    .filter(|h| h.candidate.path.as_str() != "sessions/far.md")
+                    .all(|h| h.candidate.expires_at_us == expected)
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(ai_memory_consolidate::DreamError::Limit(
+                    "source_expiry_mismatch"
+                ))
+            ));
+            assert_eq!(llm.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(superseded_row_count(&fx), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn uncertain_and_unrelated_clusters_refuse_before_draft_with_literal_copy_control() {
+    use ai_memory_consolidate::dream_semantics::{
+        ClusterSuitability, DreamSemanticError, DreamSemanticGate, DreamSemanticSource,
+    };
+    #[derive(Debug)]
+    struct FixedGate(ClusterSuitability);
+    impl DreamSemanticGate for FixedGate {
+        fn cluster_suitability<'a>(
+            &'a self,
+            _sources: &'a [DreamSemanticSource],
+        ) -> Pin<Box<dyn Future<Output = Result<ClusterSuitability, DreamSemanticError>> + Send + 'a>>
+        {
+            Box::pin(async move { Ok(self.0) })
+        }
+    }
+    for decision in [
+        ClusterSuitability::Uncertain,
+        ClusterSuitability::Rejected,
+        ClusterSuitability::Approved,
+    ] {
+        let fx = seed_cluster().await;
+        let llm = FakeMergeLlm::new();
+        let mut cfg = dream_on();
+        cfg.semantic_gate = Some(Arc::new(FixedGate(decision)));
+        let report = run_dream_pass(
+            &fx.store.reader,
+            &fx.wiki,
+            Some(&llm),
+            fx.ws,
+            fx.proj,
+            &DecayParams::default(),
+            0.0,
+            &cfg,
+            &DreamCancel::new(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.semantic_questions, 1);
+        if decision == ClusterSuitability::Approved {
+            assert_eq!(report.clusters_merged, 1);
+            assert_eq!(report.inference_requests, 2);
+        } else {
+            assert_eq!(report.clusters_merged, 0);
+            assert_eq!(llm.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(superseded_row_count(&fx), 0);
+            assert_eq!(report.merges[0].reason, "cluster_gate_refused_or_failed");
+        }
+    }
 }
 
 #[tokio::test]

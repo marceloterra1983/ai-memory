@@ -8,19 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Added the root-only local `dream` admin route and scoped thin CLI, with dry-run
+- Added the operational local `dream` admin route (Anonymous bootstrap with no authority, Root when authority is configured) and scoped thin CLI, with dry-run
   by default and explicit apply, exact no-create allowlists, a globally bounded
   native scheduler, conservative input limits, local semantic screening,
   activity cancellation, all-source atomic CAS and verified premerge git
   recovery. Reported source provenance and new heads requiring explicit scoped
   embedding completion. Kept dream off by default and schema/version unchanged.
   (local-20261009; private integration, no upstream issue opened)
-- Added root-only, dry-run-by-default metadata curation with explicit existing
+- Added operational admin, dry-run-by-default metadata curation with explicit existing
   scope, head/hash checks, admission, retained evidence and recovery checkpoints.
   The local operator helper removes only exact relation sentinels and reports
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Replaced redundant dream ML support judgments with shared-driver proof of exactly two complete literal source records and no new body text. Kept local Jev relatedness mandatory at 0.95 and real Qwen drafting; refused rewritten output and counted only actual inference attempts/HTTP requests. (local-20261009; private integration, no upstream issue opened)
+- Refused dream clusters with different expiration instants (including an absent TTL), and required unchanged expiration on new versions; equal TTLs remain eligible and expiry is rechecked by CAS. (local-20261009; private integration, no upstream issue opened)
 - Fixed free titles and no-target sentinels being promoted to typed wiki links;
   new typed links now require an existing exact target in the declared scope,
   while the original frontmatter and facts remain available for curation.

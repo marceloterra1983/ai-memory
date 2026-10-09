@@ -142,8 +142,8 @@ truncated. Oversized clusters or input refuse the scope.
 Input is conservatively estimated as one complete UTF-8 wire byte per token,
 including JSON escaping, messages, model reserve and schema, with an 8192-token
 ceiling. The local transport checks the exact encoded request for both gates
-and drafting; the support gate additionally charges repeated state for each
-independent source question. Output requests are capped at 4000 tokens; empty/invalid output
+and drafting; semantic accounting also charges repeated state if questions
+are evaluated independently. Output requests are capped at 4000 tokens; empty/invalid output
 and drafts above the conservative 4000-byte bound fail closed. This deliberately
 rejects some inputs that a particular tokenizer could fit. It is not a measured
 tokenizer count. Each request has a 120-second deadline and the whole round has
@@ -167,8 +167,12 @@ bounded work budget, not a hard real-time disk-I/O SLA.
 Every source id, hash, timestamp and eligibility input is revalidated in the
 same SQL transaction that creates the new versions. The corresponding complete
 file digests are checked under the same exclusive wiki mutation/page locks.
-A concurrent edit, access/feedback change, expiry, pin or cancellation refuses
-the whole batch. Legitimate sources remain shared across users; author identity
+Clusters with different typed `expires_at` instants, including `None` versus
+a deadline, are refused before inference. Equivalent date/RFC3339 spellings are
+compared as stored microseconds. New versions must keep that common expiry;
+CAS revalidates it and refuses a source that expires before apply. TTL policy,
+decay, salience and global timestamps are unchanged. A concurrent edit,
+access/feedback change, expiry, pin or cancellation refuses the whole batch. Legitimate sources remain shared across users; author identity
 does not become a read filter. Successful merges stay episodic. All original
 versions, including the survivor, remain reachable; all source provenance is
 attached to the new heads. The source checkpoint is verified through actual git
@@ -196,37 +200,37 @@ Verify zero missing vectors for the coordinate, including every reported new
 id, and compare the same FTS/hybrid queries against known-answer facts before
 and after. No embedding timer is required or added.
 
-The two semantic decisions are cluster suitability and draft support. Draft
-support independently asks whether every draft claim is supported and whether
-each source's information, exceptions and conflicts survived. Every judgment
-must meet 0.95; failure, degraded output, uncertainty and invalid shape block
-apply. Numeric limits, permissions, paths, identities and hashes belong to code.
-Before requesting draft support, both the driver and local gate now require a
-literal-preservation proof. Memory prose has no typed grammar for arbitrary
-commands, identifiers or numeric records. Comparing token sets would miss
-swapped dates/values, changed units and commands assembled from valid tokens.
-The conservative accepted body therefore consists only of complete source
-bodies copied verbatim, separated by blank lines; identical bodies may appear
-once. A source contained inside another still needs its own complete record.
-The title must be an exact source excerpt. Paraphrases, changed formatting,
-additional prose, missing or invented literals and adjacent source copies fail
-closed with `draft_literals_refused`, before a support request or apply. The
-persisted body is checked separately: a title cannot supply a missing body fact.
-This also proves preservation of opaque identifiers without asking Jev to
-recognize their syntax. It restricts rewriting and does not establish fusion
-quality. All three semantic judgments remain required at the unchanged threshold.
+Jev at the fixed local endpoint judges only nonnumeric relatedness. Its unchanged
+0.95 threshold, strict response shape, uncertainty/degradation refusal and input
+budget remain mandatory. It does not establish numeric identity or factual
+support. The dedicated Qwen draft request copies the two complete source bodies
+literally, separated by one empty line, and chooses a title that is an exact
+substring of a source body. Both records are required even when identical;
+contained sources also require their own record. Either source order is accepted.
 
-The [Jev evaluation decision](design-decisions.md) records the earlier adapter
-experiment and calibration limits. The broader Portuguese synthetic pilot did
-not reproduce its simple English positive control. The verified local route
-reported `model=qwen`, backed by local Qwen3.5-9B-AWQ rather than native Jev.
-Even the exact-copy control retaining all 17 facts passed source preservation
-but refused support at 0.95. Shorter questions and Portuguese questions also
-failed the fixed positive controls; their safe negative refusals do not certify
-acceptance. No semantic prompt or threshold was changed to obtain a pass.
+The shared driver proves that the persisted body is exactly those two records
+and contains no new text. This deterministic proof replaces the redundant ML
+support/preservation judgment. Paraphrases, formatting changes, extra records or
+prose, missing/invented literals, swapped date/value relations, changed commands,
+paths or IDs and adjacent source copies refuse with `draft_literals_refused`.
+Titles and filenames cannot supply a fact absent from the body. A gate/mock that
+approves cannot bypass this check. Admission, sanitizer, all-source CAS and
+cancellation still apply after the proof; content modified by admission refuses.
+The proof attests literal preservation of these bounded source records, not the
+truth of their claims, semantic fusion quality or coverage of arbitrary data.
+
+The [Jev evaluation decision](design-decisions.md) and preserved synthetic
+responses describe the earlier support experiment. The verified adapter reported
+`model=qwen`, backed by local Qwen3.5-9B-AWQ rather than native Jev. An exact copy
+retaining 17 fixture facts had support 0.706 despite preservation 0.973/0.968.
+The final contract does not claim that this model judged factual support, and
+does not lower 0.95 or manufacture a probability. A valid selected cluster
+attempts one relatedness request and one real Qwen draft request: two inference
+attempts and one semantic question. Actual HTTP counters come from the dedicated
+clients; literal proof adds no request, inference or semantic question.
 Root must verify the current downstream route excludes port 8789 and external
-fallback before each pilot. Availability, a probability or mechanical tests do
-not certify complete factual coverage or a completed merge/restore pilot.
+fallback before each pilot. Availability and mechanical tests alone do not
+certify a completed merge/restore pilot.
 
 Root integration must still pilot actual Qwen drafting plus the local gate on
 synthetic fixtures and an isolated real-copy no-op, with a versioned answer key,

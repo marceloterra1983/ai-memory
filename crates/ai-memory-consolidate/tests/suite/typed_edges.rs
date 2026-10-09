@@ -156,10 +156,28 @@ async fn a_contradiction_to_a_deleted_page_reports_the_stale_declaration() {
     wiki.write_page(req(
         ws,
         proj,
+        "decisions/vanished.md",
+        "the original decision",
+        serde_json::json!({}),
+    ))
+    .await
+    .unwrap();
+    wiki.write_page(req(
+        ws,
+        proj,
         "notes/orphan-claim.md",
         "contradicts something gone",
         serde_json::json!({"relations": {"contradicts": ["decisions/vanished.md"]}}),
     ))
+    .await
+    .unwrap();
+    wiki.delete_page(
+        ws,
+        proj,
+        &PagePath::new("decisions/vanished.md").unwrap(),
+        None,
+        None,
+    )
     .await
     .unwrap();
 

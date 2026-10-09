@@ -16,6 +16,7 @@ mod admin_provider_error_logging;
 mod admin_purge;
 mod admin_read_page;
 mod admin_reclaim_ledger_versions;
+mod admin_relation_curation;
 mod admin_rename;
 mod admin_repair_session_times;
 mod admin_status_search;

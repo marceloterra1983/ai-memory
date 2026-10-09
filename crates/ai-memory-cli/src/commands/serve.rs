@@ -835,6 +835,7 @@ async fn run_session_consolidation_worker(
                 ),
             },
             Err(error) => {
+                let diagnostic = error.diagnostic();
                 let retry_at = if attempts < ai_memory_store::SESSION_CONSOLIDATION_MAX_ATTEMPTS {
                     let delay = session_consolidation_retry_delay(attempts);
                     let delay_micros = i64::try_from(delay.as_micros()).unwrap_or(i64::MAX);
@@ -848,7 +849,7 @@ async fn run_session_consolidation_worker(
                 };
                 let terminal = retry_at.is_none();
                 if let Err(store_error) = writer
-                    .fail_session_consolidation(job, error.to_string(), retry_at)
+                    .fail_session_consolidation(job, diagnostic.clone(), retry_at)
                     .await
                 {
                     tracing::warn!(
@@ -859,15 +860,15 @@ async fn run_session_consolidation_worker(
                     );
                 } else if terminal {
                     tracing::error!(
-                        %error,
+                        error = %diagnostic,
                         session = %session_id,
                         generation,
                         attempts,
-                        "SessionEnd LLM consolidation exhausted retries; heuristic page remains",
+                        "SessionEnd LLM consolidation exhausted retries",
                     );
                 } else {
                     tracing::warn!(
-                        %error,
+                        error = %diagnostic,
                         session = %session_id,
                         generation,
                         attempts,
@@ -3742,6 +3743,47 @@ mod tests {
 
     struct SuccessfulConsolidationLlm;
 
+    struct RejectedConsolidationLlm(bool);
+
+    impl LlmProvider for RejectedConsolidationLlm {
+        fn name(&self) -> &'static str {
+            "rejected-consolidation"
+        }
+        fn model(&self) -> &str {
+            "test"
+        }
+        fn complete<'life0, 'async_trait>(
+            &'life0 self,
+            _request: ChatRequest,
+        ) -> Pin<Box<dyn Future<Output = LlmResult<ChatResponse>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { panic!("structured completion required") })
+        }
+        fn complete_structured_raw<'life0, 'async_trait>(
+            &'life0 self,
+            _request: ChatRequest,
+            _schema: serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = LlmResult<serde_json::Value>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            let malformed_json = self.0;
+            Box::pin(async move {
+                if malformed_json {
+                    return Ok(serde_json::json!("SYNTHETIC_PRIVATE_RESPONSE"));
+                }
+                Err(ai_memory_llm::LlmError::Provider {
+                    status: 400,
+                    body: "SYNTHETIC_PRIVATE_RESPONSE".into(),
+                })
+            })
+        }
+    }
+
     impl LlmProvider for SuccessfulConsolidationLlm {
         fn name(&self) -> &'static str {
             "successful-consolidation"
@@ -4056,6 +4098,26 @@ mod tests {
             "queue completion must follow the durable wiki write"
         );
 
+        let db = rusqlite::Connection::open(store.db_path()).unwrap();
+        let (summary, latest, state, reason): (Option<Vec<u8>>, Vec<u8>, String, Option<String>) =
+            db.query_row(
+                "SELECT s.summary_page_id, p.id, j.state, j.last_error \
+                 FROM sessions s JOIN pages p ON p.path = ?2 AND p.is_latest = 1 \
+                   AND p.workspace_id = s.workspace_id AND p.project_id = s.project_id \
+                 JOIN session_consolidation_jobs j ON j.session_id = s.id \
+                 WHERE s.id = ?1",
+                rusqlite::params![session_id.as_bytes(), path],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            summary,
+            Some(latest),
+            "completed worker must link the actual page"
+        );
+        assert_eq!(state, "completed");
+        assert_eq!(reason, None);
+
         cancel.cancel();
         task.await.unwrap();
         let now = jiff::Timestamp::now().as_microsecond();
@@ -4092,6 +4154,115 @@ mod tests {
             .await
             .unwrap();
         (tmp, store, wiki, ws, first, second)
+    }
+
+    #[tokio::test]
+    async fn session_consolidation_worker_failure_records_only_redacted_diagnostics() {
+        use tracing::instrument::WithSubscriber;
+
+        for malformed_json in [false, true] {
+            let (tmp, store, wiki, ws, proj, _) = two_project_wiki().await;
+            let session = SessionId::new();
+            store
+                .writer
+                .begin_session(NewSession {
+                    occurred_at: None,
+                    id: session,
+                    workspace_id: ws,
+                    project_id: proj,
+                    agent_kind: AgentKind::Codex,
+                    cwd: None,
+                    actor_user: None,
+                })
+                .await
+                .unwrap();
+            store
+                .writer
+                .insert_observation(Sanitized::new(
+                    NewObservation {
+                        occurred_at: None,
+                        session_id: session,
+                        workspace_id: ws,
+                        project_id: proj,
+                        kind: ObservationKind::UserPrompt,
+                        extension: None,
+                        source_event: None,
+                        title: "Synthetic request".into(),
+                        body: "Compile the synthetic fixture.".into(),
+                        importance: 8,
+                    },
+                    &Sanitizer::default(),
+                ))
+                .await
+                .unwrap();
+            store.writer.end_session(session, None).await.unwrap();
+            store
+                .writer
+                .enqueue_session_consolidation(ws, proj, session)
+                .await
+                .unwrap();
+            let cancel = CancellationToken::new();
+            let log_path = tmp.path().join("synthetic-worker.log");
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(std::fs::File::create(&log_path).unwrap())
+                .finish();
+            let worker = tokio::spawn(
+                run_session_consolidation_worker(
+                    store.writer.clone(),
+                    Arc::new(Consolidator::new(
+                        store.reader.clone(),
+                        store.writer.clone(),
+                        wiki,
+                        Arc::new(RejectedConsolidationLlm(malformed_json)),
+                        ws,
+                        proj,
+                    )),
+                    Arc::new(tokio::sync::Notify::new()),
+                    cancel.child_token(),
+                    ai_memory_consolidate::ActivityClock::default(),
+                    Arc::new(tokio::sync::Notify::new()),
+                )
+                .with_subscriber(subscriber),
+            );
+            let db = rusqlite::Connection::open(store.db_path()).unwrap();
+            let (state, attempts, reason) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let row: (String, u32, Option<String>) = db.query_row(
+                    "SELECT state, attempts, last_error FROM session_consolidation_jobs WHERE session_id = ?1",
+                    [session.as_bytes()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+                if row.0 == "pending" && row.2.is_some() { break row; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("worker persists the failure");
+            cancel.cancel();
+            worker.await.unwrap();
+            assert_eq!(state, "pending");
+            assert_eq!(
+                attempts, 1,
+                "the failed attempt is bounded and scheduled, not looped immediately"
+            );
+            let reason = reason.unwrap();
+            if malformed_json {
+                assert!(reason.contains("serde"));
+            } else {
+                assert!(reason.contains("provider") && reason.contains("400"));
+            }
+            assert!(
+                !reason.contains("SYNTHETIC_PRIVATE_RESPONSE"),
+                "response bodies must stay out of durable diagnostics"
+            );
+            let log = std::fs::read_to_string(log_path).unwrap();
+            assert!(
+                log.contains("queued for retry"),
+                "the warning must remain observable"
+            );
+            assert!(
+                !log.contains("SYNTHETIC_PRIVATE_RESPONSE"),
+                "provider and invalid-JSON bodies must stay out of logs"
+            );
+        }
     }
 
     async fn write_test_page(

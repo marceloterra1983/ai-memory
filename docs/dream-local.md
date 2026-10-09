@@ -42,6 +42,9 @@ max_eps = 0.08
 max_clusters_per_run = 1
 min_cold_pages = 3
 
+[decay]
+observation_retention_days = 0
+
 [maintenance]
 enabled = false
 embedding_backfill_interval_secs = 0
@@ -203,3 +206,15 @@ invalid reference, malicious instruction and similar-but-unrelated subjects.
 Compare content retrieval rather than stub filenames. Prove restore from the
 reported premerge checkpoint and full rollback in the isolated copy. Do not
 activate production or recurrence solely because unit tests pass.
+
+## Session summary pointers and existing retention
+
+This private integration also reconciles `sessions.summary_page_id` after a
+session page is actually persisted. It preserves `ended_at` and the
+`ended_observation_count` watermark; linking a summary does not end a session or
+replay its observations. A newly linked live summary can make old observations
+eligible for the existing retention routine, which does not require `ended_at`.
+Keep `decay.observation_retention_days = 0` and maintenance disabled in the isolated
+pilot until root has reviewed that consequence. This integration performs no
+operational prune/delete; the owner reviews retention separately before any
+production activation.

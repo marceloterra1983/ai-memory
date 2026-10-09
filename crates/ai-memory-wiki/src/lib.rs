@@ -28,8 +28,8 @@ pub use markdown::{Markdown, derive_title, emit, parse, rewrite_local_wikilinks}
 pub use migrations::run_pending as run_wiki_migrations;
 pub use watcher::{DEBOUNCE_WINDOW, RECONCILE_INTERVAL, WatcherHandle};
 pub use wiki::{
-    DreamApplyResult, DreamSource, MoveSessionOutcome, PurgeSessionOutcome, SessionPageFile, Wiki,
-    WritePageRequest,
+    DreamApplyResult, DreamSource, MoveSessionOutcome, PurgeSessionOutcome,
+    RelationCurationRequest, RelationCurationResult, SessionPageFile, Wiki, WritePageRequest,
 };
 
 // Integration tests compile into this crate's test harness instead of a

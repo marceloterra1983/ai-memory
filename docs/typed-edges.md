@@ -43,9 +43,24 @@ frontmatter entirely; nothing else changes.
 The set is deliberately closed: a free-text relation column turns into
 an unqueryable folksonomy. Keys outside the vocabulary are skipped at
 the write boundary (with a warning) — a typo cannot mint a new edge
-kind. Targets use the same grammar as wikilinks: `path`,
-`project:path`, or `workspace/project:path`; extension-less targets
-gain `.md`.
+kind. Targets must name exact `.md` paths: `path.md`,
+`project:path.md`, or `workspace/project:path.md`. The writer indexes a
+typed edge only when its latest target page exists in the named scope, in
+the same transaction as the page write; resolving a relation never creates
+a workspace or project. Plain body wikilinks still allow forward references.
+
+Titles and extension-less values are not converted to paths. Explicit
+absence markers (`None`, `Nenhuma`, `N/A`, case-insensitive and trimmed),
+including their exact legacy `.md` forms, never become typed edges. The
+original relation values and page origin remain in frontmatter for private
+curation; validation does not change the body or resolve ambiguous titles by
+similarity. New links do not repair historic rows without an explicit write.
+
+Jev was considered for this boundary. An exact path either parses and
+resolves in its declared scope or it does not, and the absence markers have
+a closed vocabulary. Typed deterministic validation is sufficient; an AI
+judgment would add uncertainty and could invent a target. No additional LLM
+call is used to resolve relations.
 
 ## What typed edges do
 

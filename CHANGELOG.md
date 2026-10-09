@@ -14,9 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   activity cancellation, all-source atomic CAS and verified premerge git
   recovery. Reported source provenance and new heads requiring explicit scoped
   embedding completion. Kept dream off by default and schema/version unchanged.
-  (local dream-safe-local patch; no upstream issue opened)
+  (local-20261009; private integration, no upstream issue opened)
+- Added root-only, dry-run-by-default metadata curation with explicit existing
+  scope, head/hash checks, admission, retained evidence and recovery checkpoints.
+  The local operator helper removes only exact relation sentinels and reports
+  ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Fixed free titles and no-target sentinels being promoted to typed wiki links;
+  new typed links now require an existing exact target in the declared scope,
+  while the original frontmatter and facts remain available for curation.
+  (local-20261009; private integration, no upstream issue opened)
+- Fixed asynchronous and manual consolidation leaving session summary pointers
+  unset after writing a page. Completed jobs without an owned latest anchor now
+  expose `no_session_page`; provider/JSON diagnostics omit response bodies.
+  (local-20261009; private integration, no upstream issue opened)
 - Scoped retrieval excludes the exact scoped project name from entity matches,
   preventing the scope label from adding an RRF vote to unrelated pages.
   (local fixbrainrank patch; no upstream issue opened)

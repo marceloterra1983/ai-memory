@@ -80,6 +80,14 @@ before implementing against it.
 
 ## Recipe: control what gets kept, aged, or consolidated
 
+For exact relation-sentinel cleanup, the root operator can use
+[`local-maintenance-quality/curadoria`](../local-maintenance-quality/curadoria/README.md).
+Its `POST /admin/curate-relations` request requires existing workspace/project,
+path, `expected_head_id` and `expected_body_sha256`; `dry_run` defaults to true
+and unknown fields are refused. It preserves the body and other metadata,
+applies admission, retains the prior version/evidence and returns recovery
+checkpoints. `write-page` does not accept arbitrary integral frontmatter.
+
 By default nothing you have to think about: memory decays on a single gentle
 curve, and an upgrade to 2.4 changes no scores and evicts nothing. When you *do*
 want to tune aging, it is all opt-in and reversible — the original of anything

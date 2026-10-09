@@ -3835,7 +3835,7 @@ async fn consolidate_or_synth(
             Err(ConsolidatorError::EmptySession(_)) => return Ok(()),
             Err(e) if checkpoint_degrades_to_synth(&e) => {
                 warn!(
-                    error = %e,
+                    error = %e.diagnostic(),
                     session = %session_id,
                     "{}: LLM consolidation unavailable; falling back to rule-based checkpoint",
                     checkpoint_label

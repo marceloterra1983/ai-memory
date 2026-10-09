@@ -1,0 +1,531 @@
+[
+  {
+    "agent": "claude-code",
+    "shape": "snake-case",
+    "session_id": "4ee59d86-a438-5d97-a84e-09359a561dad",
+    "cwd": "/synthetic-quality/claude-code",
+    "query": {},
+    "token": "formatclaudecode",
+    "fact": "formatclaudecodeexclusive",
+    "start": {
+      "session_id": "4ee59d86-a438-5d97-a84e-09359a561dad",
+      "cwd": "/synthetic-quality/claude-code"
+    },
+    "prompt": {
+      "session_id": "4ee59d86-a438-5d97-a84e-09359a561dad",
+      "cwd": "/synthetic-quality/claude-code",
+      "prompt": "formatclaudecode fact is formatclaudecodeexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "4ee59d86-a438-5d97-a84e-09359a561dad",
+      "cwd": "/synthetic-quality/claude-code"
+    }
+  },
+  {
+    "agent": "codex",
+    "shape": "camel-case-legacy",
+    "session_id": "52d851cb-0e12-5337-9232-3b8979801ddc",
+    "cwd": "/synthetic-quality/codex",
+    "query": {},
+    "token": "formatcodex",
+    "fact": "formatcodexexclusive",
+    "start": {
+      "sessionId": "52d851cb-0e12-5337-9232-3b8979801ddc",
+      "working_dir": "/synthetic-quality/codex"
+    },
+    "prompt": {
+      "sessionId": "52d851cb-0e12-5337-9232-3b8979801ddc",
+      "working_dir": "/synthetic-quality/codex",
+      "prompt": "formatcodex fact is formatcodexexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "sessionId": "52d851cb-0e12-5337-9232-3b8979801ddc",
+      "working_dir": "/synthetic-quality/codex"
+    }
+  },
+  {
+    "agent": "open-code",
+    "shape": "plugin-sessionID",
+    "session_id": "b414acd9-3e04-5726-8b16-114b938a81c4",
+    "cwd": "/synthetic-quality/open-code",
+    "query": {},
+    "token": "formatopencode",
+    "fact": "formatopencodeexclusive",
+    "start": {
+      "sessionID": "b414acd9-3e04-5726-8b16-114b938a81c4",
+      "directory": "/synthetic-quality/open-code"
+    },
+    "prompt": {
+      "sessionID": "b414acd9-3e04-5726-8b16-114b938a81c4",
+      "directory": "/synthetic-quality/open-code",
+      "prompt": "formatopencode fact is formatopencodeexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "sessionID": "b414acd9-3e04-5726-8b16-114b938a81c4",
+      "directory": "/synthetic-quality/open-code"
+    }
+  },
+  {
+    "agent": "cursor",
+    "shape": "cursor-workspace-roots",
+    "session_id": "2aa3171b-3c07-58ba-9e43-0754a54d14ff",
+    "cwd": "/synthetic-quality/cursor",
+    "query": {},
+    "token": "formatcursor",
+    "fact": "formatcursorexclusive",
+    "start": {
+      "session_id": "2aa3171b-3c07-58ba-9e43-0754a54d14ff",
+      "cwd": "",
+      "workspace_roots": [
+        "/synthetic-quality/cursor"
+      ],
+      "cursor_version": "synthetic-fixture"
+    },
+    "prompt": {
+      "session_id": "2aa3171b-3c07-58ba-9e43-0754a54d14ff",
+      "cwd": "",
+      "workspace_roots": [
+        "/synthetic-quality/cursor"
+      ],
+      "cursor_version": "synthetic-fixture",
+      "prompt": "formatcursor fact is formatcursorexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "2aa3171b-3c07-58ba-9e43-0754a54d14ff",
+      "cwd": "",
+      "workspace_roots": [
+        "/synthetic-quality/cursor"
+      ],
+      "cursor_version": "synthetic-fixture"
+    }
+  },
+  {
+    "agent": "gemini-cli",
+    "shape": "snake-case",
+    "session_id": "f2309ae8-9a2a-5ab7-84da-b412f84a9c54",
+    "cwd": "/synthetic-quality/gemini-cli",
+    "query": {},
+    "token": "formatgeminicli",
+    "fact": "formatgeminicliexclusive",
+    "start": {
+      "session_id": "f2309ae8-9a2a-5ab7-84da-b412f84a9c54",
+      "cwd": "/synthetic-quality/gemini-cli"
+    },
+    "prompt": {
+      "session_id": "f2309ae8-9a2a-5ab7-84da-b412f84a9c54",
+      "cwd": "/synthetic-quality/gemini-cli",
+      "prompt": "formatgeminicli fact is formatgeminicliexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "f2309ae8-9a2a-5ab7-84da-b412f84a9c54",
+      "cwd": "/synthetic-quality/gemini-cli"
+    }
+  },
+  {
+    "agent": "openclaw",
+    "shape": "snake-case",
+    "session_id": "afdd8b71-9084-532b-a846-8d41f68eedd7",
+    "cwd": "/synthetic-quality/openclaw",
+    "query": {},
+    "token": "formatopenclaw",
+    "fact": "formatopenclawexclusive",
+    "start": {
+      "session_id": "afdd8b71-9084-532b-a846-8d41f68eedd7",
+      "cwd": "/synthetic-quality/openclaw"
+    },
+    "prompt": {
+      "session_id": "afdd8b71-9084-532b-a846-8d41f68eedd7",
+      "cwd": "/synthetic-quality/openclaw",
+      "prompt": "formatopenclaw fact is formatopenclawexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "afdd8b71-9084-532b-a846-8d41f68eedd7",
+      "cwd": "/synthetic-quality/openclaw"
+    }
+  },
+  {
+    "agent": "antigravity-cli",
+    "shape": "antigravity-conversationId",
+    "session_id": "12dadd27-cfb4-590c-838f-aebfc3669e09",
+    "cwd": "/synthetic-quality/antigravity-cli",
+    "query": {},
+    "token": "formatantigravitycli",
+    "fact": "formatantigravitycliexclusive",
+    "start": {
+      "conversationId": "12dadd27-cfb4-590c-838f-aebfc3669e09",
+      "workspacePaths": [
+        "/synthetic-quality/antigravity-cli"
+      ]
+    },
+    "prompt": {
+      "conversationId": "12dadd27-cfb4-590c-838f-aebfc3669e09",
+      "workspacePaths": [
+        "/synthetic-quality/antigravity-cli"
+      ],
+      "prompt": "formatantigravitycli fact is formatantigravitycliexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "conversationId": "12dadd27-cfb4-590c-838f-aebfc3669e09",
+      "workspacePaths": [
+        "/synthetic-quality/antigravity-cli"
+      ]
+    }
+  },
+  {
+    "agent": "omp",
+    "shape": "snake-case",
+    "session_id": "a1437a9f-ea47-5f94-9182-67116304ea17",
+    "cwd": "/synthetic-quality/omp",
+    "query": {},
+    "token": "formatomp",
+    "fact": "formatompexclusive",
+    "start": {
+      "session_id": "a1437a9f-ea47-5f94-9182-67116304ea17",
+      "cwd": "/synthetic-quality/omp"
+    },
+    "prompt": {
+      "session_id": "a1437a9f-ea47-5f94-9182-67116304ea17",
+      "cwd": "/synthetic-quality/omp",
+      "prompt": "formatomp fact is formatompexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "a1437a9f-ea47-5f94-9182-67116304ea17",
+      "cwd": "/synthetic-quality/omp"
+    }
+  },
+  {
+    "agent": "pi",
+    "shape": "snake-case",
+    "session_id": "992c456e-528e-5269-90d3-d9b09391fdf6",
+    "cwd": "/synthetic-quality/pi",
+    "query": {},
+    "token": "formatpi",
+    "fact": "formatpiexclusive",
+    "start": {
+      "session_id": "992c456e-528e-5269-90d3-d9b09391fdf6",
+      "cwd": "/synthetic-quality/pi"
+    },
+    "prompt": {
+      "session_id": "992c456e-528e-5269-90d3-d9b09391fdf6",
+      "cwd": "/synthetic-quality/pi",
+      "prompt": "formatpi fact is formatpiexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "992c456e-528e-5269-90d3-d9b09391fdf6",
+      "cwd": "/synthetic-quality/pi"
+    }
+  },
+  {
+    "agent": "crush",
+    "shape": "snake-case",
+    "session_id": "4626319d-819e-5195-b6de-40704912ac8b",
+    "cwd": "/synthetic-quality/crush",
+    "query": {},
+    "token": "formatcrush",
+    "fact": "formatcrushexclusive",
+    "start": {
+      "session_id": "4626319d-819e-5195-b6de-40704912ac8b",
+      "cwd": "/synthetic-quality/crush"
+    },
+    "prompt": {
+      "session_id": "4626319d-819e-5195-b6de-40704912ac8b",
+      "cwd": "/synthetic-quality/crush",
+      "prompt": "formatcrush fact is formatcrushexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "4626319d-819e-5195-b6de-40704912ac8b",
+      "cwd": "/synthetic-quality/crush"
+    }
+  },
+  {
+    "agent": "grok",
+    "shape": "snake-case",
+    "session_id": "f5890a20-5c35-5895-bc7c-4d652c7808bb",
+    "cwd": "/synthetic-quality/grok",
+    "query": {},
+    "token": "formatgrok",
+    "fact": "formatgrokexclusive",
+    "start": {
+      "session_id": "f5890a20-5c35-5895-bc7c-4d652c7808bb",
+      "cwd": "/synthetic-quality/grok"
+    },
+    "prompt": {
+      "session_id": "f5890a20-5c35-5895-bc7c-4d652c7808bb",
+      "cwd": "/synthetic-quality/grok",
+      "prompt": "formatgrok fact is formatgrokexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "f5890a20-5c35-5895-bc7c-4d652c7808bb",
+      "cwd": "/synthetic-quality/grok"
+    }
+  },
+  {
+    "agent": "zero",
+    "shape": "snake-case",
+    "session_id": "c0d75386-66ae-502a-8c1f-0c3624a8df66",
+    "cwd": "/synthetic-quality/zero",
+    "query": {},
+    "token": "formatzero",
+    "fact": "formatzeroexclusive",
+    "start": {
+      "session_id": "c0d75386-66ae-502a-8c1f-0c3624a8df66",
+      "cwd": "/synthetic-quality/zero"
+    },
+    "prompt": {
+      "session_id": "c0d75386-66ae-502a-8c1f-0c3624a8df66",
+      "cwd": "/synthetic-quality/zero",
+      "prompt": "formatzero fact is formatzeroexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "c0d75386-66ae-502a-8c1f-0c3624a8df66",
+      "cwd": "/synthetic-quality/zero"
+    }
+  },
+  {
+    "agent": "devin",
+    "shape": "devin-query-bridge",
+    "session_id": "a5358a03-1479-574d-a3df-6399e4d2038c",
+    "cwd": "/synthetic-quality/devin",
+    "query": {
+      "session_id": "a5358a03-1479-574d-a3df-6399e4d2038c",
+      "cwd": "/synthetic-quality/devin"
+    },
+    "token": "formatdevin",
+    "fact": "formatdevinexclusive",
+    "start": {},
+    "prompt": {
+      "prompt": "formatdevin fact is formatdevinexclusive. Continue the synthetic quality task."
+    },
+    "end": {}
+  },
+  {
+    "agent": "kimi-code",
+    "shape": "kimi-content-blocks",
+    "session_id": "112243d0-0303-5e90-b8bd-d6b080cbb848",
+    "cwd": "/synthetic-quality/kimi-code",
+    "query": {},
+    "token": "formatkimicode",
+    "fact": "formatkimicodeexclusive",
+    "start": {
+      "session_id": "112243d0-0303-5e90-b8bd-d6b080cbb848",
+      "cwd": "/synthetic-quality/kimi-code"
+    },
+    "prompt": {
+      "session_id": "112243d0-0303-5e90-b8bd-d6b080cbb848",
+      "cwd": "/synthetic-quality/kimi-code",
+      "prompt": [
+        {
+          "type": "text",
+          "text": "formatkimicode fact is formatkimicodeexclusive. Continue the synthetic quality task."
+        }
+      ]
+    },
+    "end": {
+      "session_id": "112243d0-0303-5e90-b8bd-d6b080cbb848",
+      "cwd": "/synthetic-quality/kimi-code"
+    }
+  },
+  {
+    "agent": "kiro-cli",
+    "shape": "snake-case",
+    "session_id": "3ba13f52-bab0-5f57-9cc7-e22475175f07",
+    "cwd": "/synthetic-quality/kiro-cli",
+    "query": {},
+    "token": "formatkirocli",
+    "fact": "formatkirocliexclusive",
+    "start": {
+      "session_id": "3ba13f52-bab0-5f57-9cc7-e22475175f07",
+      "cwd": "/synthetic-quality/kiro-cli"
+    },
+    "prompt": {
+      "session_id": "3ba13f52-bab0-5f57-9cc7-e22475175f07",
+      "cwd": "/synthetic-quality/kiro-cli",
+      "prompt": "formatkirocli fact is formatkirocliexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "3ba13f52-bab0-5f57-9cc7-e22475175f07",
+      "cwd": "/synthetic-quality/kiro-cli"
+    }
+  },
+  {
+    "agent": "command-code",
+    "shape": "snake-case",
+    "session_id": "284c3eae-777a-5cfe-89e8-3f274dc83bad",
+    "cwd": "/synthetic-quality/command-code",
+    "query": {},
+    "token": "formatcommandcode",
+    "fact": "formatcommandcodeexclusive",
+    "start": {
+      "session_id": "284c3eae-777a-5cfe-89e8-3f274dc83bad",
+      "cwd": "/synthetic-quality/command-code"
+    },
+    "prompt": {
+      "session_id": "284c3eae-777a-5cfe-89e8-3f274dc83bad",
+      "cwd": "/synthetic-quality/command-code",
+      "prompt": "formatcommandcode fact is formatcommandcodeexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "284c3eae-777a-5cfe-89e8-3f274dc83bad",
+      "cwd": "/synthetic-quality/command-code"
+    }
+  },
+  {
+    "agent": "hermes",
+    "shape": "snake-case",
+    "session_id": "5b642a13-f264-5eda-b1c9-a5fd92ff5fb3",
+    "cwd": "/synthetic-quality/hermes",
+    "query": {},
+    "token": "formathermes",
+    "fact": "formathermesexclusive",
+    "start": {
+      "session_id": "5b642a13-f264-5eda-b1c9-a5fd92ff5fb3",
+      "cwd": "/synthetic-quality/hermes"
+    },
+    "prompt": {
+      "session_id": "5b642a13-f264-5eda-b1c9-a5fd92ff5fb3",
+      "cwd": "/synthetic-quality/hermes",
+      "prompt": "formathermes fact is formathermesexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "5b642a13-f264-5eda-b1c9-a5fd92ff5fb3",
+      "cwd": "/synthetic-quality/hermes"
+    }
+  },
+  {
+    "agent": "pool",
+    "shape": "snake-case",
+    "session_id": "fb1ccbb3-635b-54c8-aeca-26ebaeba090f",
+    "cwd": "/synthetic-quality/pool",
+    "query": {},
+    "token": "formatpool",
+    "fact": "formatpoolexclusive",
+    "start": {
+      "session_id": "fb1ccbb3-635b-54c8-aeca-26ebaeba090f",
+      "cwd": "/synthetic-quality/pool"
+    },
+    "prompt": {
+      "session_id": "fb1ccbb3-635b-54c8-aeca-26ebaeba090f",
+      "cwd": "/synthetic-quality/pool",
+      "prompt": "formatpool fact is formatpoolexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "fb1ccbb3-635b-54c8-aeca-26ebaeba090f",
+      "cwd": "/synthetic-quality/pool"
+    }
+  },
+  {
+    "agent": "zcode",
+    "shape": "zcode-dual-case",
+    "session_id": "53611b20-1cbc-5403-ae8e-f7c491d4f966",
+    "cwd": "/synthetic-quality/zcode",
+    "query": {},
+    "token": "formatzcode",
+    "fact": "formatzcodeexclusive",
+    "start": {
+      "session_id": "53611b20-1cbc-5403-ae8e-f7c491d4f966",
+      "sessionId": "53611b20-1cbc-5403-ae8e-f7c491d4f966",
+      "cwd": "/synthetic-quality/zcode"
+    },
+    "prompt": {
+      "session_id": "53611b20-1cbc-5403-ae8e-f7c491d4f966",
+      "sessionId": "53611b20-1cbc-5403-ae8e-f7c491d4f966",
+      "cwd": "/synthetic-quality/zcode",
+      "prompt": "formatzcode fact is formatzcodeexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "53611b20-1cbc-5403-ae8e-f7c491d4f966",
+      "sessionId": "53611b20-1cbc-5403-ae8e-f7c491d4f966",
+      "cwd": "/synthetic-quality/zcode"
+    }
+  },
+  {
+    "agent": "other",
+    "shape": "snake-case",
+    "session_id": "2b989867-ab96-50cc-9073-bc9eb7c45583",
+    "cwd": "/synthetic-quality/other",
+    "query": {},
+    "token": "formatother",
+    "fact": "formatotherexclusive",
+    "start": {
+      "session_id": "2b989867-ab96-50cc-9073-bc9eb7c45583",
+      "cwd": "/synthetic-quality/other"
+    },
+    "prompt": {
+      "session_id": "2b989867-ab96-50cc-9073-bc9eb7c45583",
+      "cwd": "/synthetic-quality/other",
+      "prompt": "formatother fact is formatotherexclusive. Continue the synthetic quality task."
+    },
+    "end": {
+      "session_id": "2b989867-ab96-50cc-9073-bc9eb7c45583",
+      "cwd": "/synthetic-quality/other"
+    }
+  },
+  {
+    "agent": "open-code",
+    "shape": "opencode-properties-info",
+    "session_id": "52a01c77-a1bf-525b-8534-40e5008a09ed",
+    "cwd": "/synthetic-quality/opencode-info",
+    "query": {},
+    "token": "opencodepropertiesinfo",
+    "fact": "opencodepropertiesinfoexclusive",
+    "start": {
+      "properties": {
+        "info": {
+          "id": "52a01c77-a1bf-525b-8534-40e5008a09ed",
+          "directory": "/synthetic-quality/opencode-info"
+        }
+      }
+    },
+    "prompt": {
+      "properties": {
+        "info": {
+          "id": "52a01c77-a1bf-525b-8534-40e5008a09ed",
+          "directory": "/synthetic-quality/opencode-info"
+        }
+      },
+      "prompt": "opencodepropertiesinfo fact is opencodepropertiesinfoexclusive."
+    },
+    "end": {
+      "properties": {
+        "info": {
+          "id": "52a01c77-a1bf-525b-8534-40e5008a09ed",
+          "directory": "/synthetic-quality/opencode-info"
+        }
+      }
+    }
+  },
+  {
+    "agent": "open-code",
+    "shape": "opencode-legacy-payload",
+    "session_id": "01c1e91c-e2d8-5e6e-9b32-57cd8c99dfa9",
+    "cwd": "/synthetic-quality/opencode-legacy",
+    "query": {},
+    "token": "opencodelegacypayload",
+    "fact": "opencodelegacypayloadexclusive",
+    "start": {
+      "payload": {
+        "info": {
+          "id": "01c1e91c-e2d8-5e6e-9b32-57cd8c99dfa9",
+          "directory": "/synthetic-quality/opencode-legacy"
+        }
+      }
+    },
+    "prompt": {
+      "payload": {
+        "info": {
+          "id": "01c1e91c-e2d8-5e6e-9b32-57cd8c99dfa9",
+          "directory": "/synthetic-quality/opencode-legacy"
+        }
+      },
+      "prompt": "opencodelegacypayload fact is opencodelegacypayloadexclusive."
+    },
+    "end": {
+      "payload": {
+        "info": {
+          "id": "01c1e91c-e2d8-5e6e-9b32-57cd8c99dfa9",
+          "directory": "/synthetic-quality/opencode-legacy"
+        }
+      }
+    }
+  }
+]

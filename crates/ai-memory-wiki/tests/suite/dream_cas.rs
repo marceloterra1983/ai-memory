@@ -2,7 +2,7 @@
 
 use ai_memory_core::{ActorContext, PagePath, ProjectId, Tier, WorkspaceId};
 use ai_memory_store::Store;
-use ai_memory_wiki::{Wiki, WritePageRequest};
+use ai_memory_wiki::{RelationCurationRequest, Wiki, WritePageRequest};
 use std::sync::Arc;
 
 fn page(ws: WorkspaceId, proj: ProjectId, path: &str, body: &str) -> WritePageRequest {
@@ -45,6 +45,116 @@ async fn fixture() -> (tempfile::TempDir, Store, Wiki, WorkspaceId, ProjectId) {
     .await
     .unwrap();
     (tmp, store, wiki, ws, proj)
+}
+
+#[tokio::test]
+async fn dream_cas_refuses_metadata_curation_of_survivor_or_loser_without_body_change() {
+    for curated_path in ["a.md", "b.md"] {
+        let (_tmp, store, wiki, ws, proj) = fixture().await;
+        let mut original = page(ws, proj, curated_path, "synthetic fact and exception\r\n");
+        original.frontmatter = serde_json::json!({
+            "title": curated_path, "relations": {"references": ["None", "Free title"]},
+            "tags": ["preserve"], "abstract": "Synthetic abstract",
+            "custom": {"nested": [1, true, null]}, "expires_at": "2099-01-01"
+        });
+        wiki.write_page(original).await.unwrap();
+        let sources = wiki
+            .snapshot_dream_sources(
+                store.reader.dream_heads_bounded(ws, proj, 2).await.unwrap(),
+                6000,
+            )
+            .await
+            .unwrap();
+        let source = sources
+            .iter()
+            .find(|s| s.head.candidate.path.as_str() == curated_path)
+            .unwrap();
+        let receipt = wiki
+            .curate_relations(RelationCurationRequest {
+                workspace_id: ws,
+                project_id: proj,
+                path: source.head.candidate.path.clone(),
+                expected_head_id: source.head.candidate.id,
+                expected_body_sha256: source.head.body_sha256,
+                dry_run: false,
+                actor: ActorContext::anonymous(),
+            })
+            .await
+            .unwrap();
+        assert!(receipt.applied);
+        assert_ne!(receipt.page_id, source.head.candidate.id);
+        let mut expected = source.markdown.clone();
+        expected.frontmatter["relations"]["references"] = serde_json::json!(["Free title"]);
+        assert_eq!(
+            wiki.read_page(ws, proj, &source.head.candidate.path)
+                .unwrap(),
+            expected,
+            "curation preserves the body and every unrelated frontmatter value"
+        );
+        let current = wiki
+            .snapshot_dream_sources(
+                store.reader.dream_heads_bounded(ws, proj, 2).await.unwrap(),
+                6000,
+            )
+            .await
+            .unwrap();
+        let curated = current
+            .iter()
+            .find(|s| s.head.candidate.path.as_str() == curated_path)
+            .unwrap();
+        assert_eq!(curated.head.body_sha256, source.head.body_sha256);
+        assert_ne!(
+            curated.head.eligibility_sha256,
+            source.head.eligibility_sha256
+        );
+        let drafts = vec![
+            page(ws, proj, "a.md", "synthetic reviewed merge\n"),
+            page(ws, proj, "b.md", "synthetic reviewed stub\n"),
+        ];
+        // First exercise the complete file guard. Then present current file
+        // digests with stale SQL heads to independently exercise writer CAS and
+        // rollback after files have been installed.
+        let mut stale_sql = sources.clone();
+        for stale in &mut stale_sql {
+            stale.file_sha256 = current
+                .iter()
+                .find(|s| s.head.candidate.path == stale.head.candidate.path)
+                .unwrap()
+                .file_sha256;
+        }
+        for stale in [&sources, &stale_sql] {
+            assert!(
+                wiki.apply_dream_batch(drafts.clone(), stale, Arc::new(|| false))
+                    .await
+                    .is_err()
+            );
+            let after = wiki
+                .snapshot_dream_sources(
+                    store.reader.dream_heads_bounded(ws, proj, 2).await.unwrap(),
+                    6000,
+                )
+                .await
+                .unwrap();
+            for saved in &current {
+                let actual = after
+                    .iter()
+                    .find(|s| s.head.candidate.path == saved.head.candidate.path)
+                    .unwrap();
+                assert_eq!(actual.head.candidate.id, saved.head.candidate.id);
+                assert_eq!(actual.file_sha256, saved.file_sha256);
+                assert_eq!(actual.markdown, saved.markdown);
+            }
+        }
+        // Refusing every batch cannot satisfy this legitimate fresh-snapshot control.
+        assert_eq!(
+            wiki.apply_dream_batch(drafts, &current, Arc::new(|| false))
+                .await
+                .unwrap()
+                .ids
+                .len(),
+            2
+        );
+    }
 }
 
 #[tokio::test]

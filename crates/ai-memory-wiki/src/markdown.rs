@@ -348,7 +348,13 @@ pub fn extract_relation_links(frontmatter: &serde_json::Value) -> Vec<LinkTarget
                 },
             };
             let raw_path = raw_path.trim();
-            if ai_memory_core::relation_target_is_sentinel(raw_path) {
+            // Bare absence markers never name a page. The `.md` sentinel
+            // forms (`none.md`, `nenhuma.md`, `n/a.md`) can name a legitimate
+            // page, so they are retained here as explicit path declarations;
+            // the writer resolves existence in its transaction and drops a
+            // typed claim whose target is absent. See
+            // `relation_target_is_sentinel_path`.
+            if ai_memory_core::relation_target_is_bare_sentinel(raw_path) {
                 continue;
             }
             // Appending `.md` to arbitrary model text promoted a title or
@@ -904,25 +910,47 @@ mod tests {
     }
 
     #[test]
-    fn relation_sentinels_and_free_titles_stay_raw_without_becoming_edges() {
+    fn bare_sentinels_and_free_titles_stay_raw_without_becoming_edges() {
         let fm = serde_json::json!({
             "source_session": "synthetic-origin",
             "relations": {"contradicts": [
-                "None", " Nenhuma ", "N/A", "none.md", "Nenhuma.md", "N/A.md",
-                "A free title", "concepts/writer", "notes/none-mentioned.md"
+                "None", " Nenhuma ", "N/A", "A free title", "concepts/writer"
             ]}
         });
         let original = fm.clone();
         let links = extract_relation_links(&fm);
-        assert_eq!(
-            links.len(),
-            1,
-            "sentinels and titles must not mint typed paths"
+        assert!(
+            links.is_empty(),
+            "bare markers and titles must not mint typed paths"
         );
-        assert_eq!(links[0].path.as_str(), "notes/none-mentioned.md");
         assert_eq!(
             fm, original,
             "raw ambiguity and origin remain available to curation"
+        );
+    }
+
+    #[test]
+    fn md_sentinel_forms_become_explicit_path_edges() {
+        let fm = serde_json::json!({
+            "source_session": "synthetic-origin",
+            "relations": {"contradicts": [
+                "none.md", "Nenhuma.md", "N/A.md", "notes/none-mentioned.md"
+            ]}
+        });
+        let links = extract_relation_links(&fm);
+        assert_eq!(
+            links.len(),
+            4,
+            "explicit .md paths, including the .md sentinel forms, become edges"
+        );
+        let paths: Vec<&str> = links.iter().map(|l| l.path.as_str()).collect();
+        for expected in ["none.md", "Nenhuma.md", "N/A.md", "notes/none-mentioned.md"] {
+            assert!(paths.contains(&expected), "missing edge for {expected}");
+        }
+        assert!(
+            links
+                .iter()
+                .all(|l| l.relation == Some(ai_memory_core::Relation::Contradicts))
         );
     }
 

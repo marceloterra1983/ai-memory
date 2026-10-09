@@ -23,7 +23,17 @@ class CurationTests(unittest.TestCase):
         self.assertEqual([p["raw_target"] for p in plan["pending"]], ["Free title", "notes/none.md", "FALHA.md"])
         self.assertTrue(all(p["origin"] == {"session_id": "synthetic-origin"} for p in plan["pending"]))
         self.assertFalse(curation.is_sentinel("not-none.md"))
-        self.assertTrue(curation.is_sentinel("  Nenhuma.md "))
+        self.assertTrue(curation.is_sentinel("  Nenhuma "))
+        self.assertFalse(curation.is_sentinel("  Nenhuma.md "))
+        self.assertTrue(curation.is_md_sentinel("  Nenhuma.md "))
+
+    def test_md_sentinel_that_exists_is_preserved(self):
+        rows = [{"head_id": "synthetic-id", "path": "notes/a.md", "body_sha256": "ab" * 32,
+                 "frontmatter": {"relations": {"fixes": ["none.md"]}}}]
+        plan = curation.build_plan(rows, "http://127.0.0.1:12345", "default", "dev",
+                                   target_exists=lambda target: target == "none.md")
+        self.assertEqual(plan["candidates"], [])
+        self.assertEqual(plan["pending"], [])
 
     def test_consolidator_top_level_origin_is_reported_without_inference(self):
         fm = {"session_id": "synthetic-session", "agent": "grok", "relations": {"fixes": ["Free title"]}}

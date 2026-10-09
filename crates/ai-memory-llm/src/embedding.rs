@@ -362,6 +362,7 @@ impl Embedder for OpenAiEmbedder {
 /// check treats them as their own family.
 pub struct OpenAiCompatEmbedder {
     client: reqwest::Client,
+    local_client: Option<crate::DreamLocalClient>,
     api_key: Option<SecretString>,
     base_url: String,
     model: String,
@@ -402,6 +403,7 @@ impl OpenAiCompatEmbedder {
             .build()?;
         Ok(Self {
             client,
+            local_client: None,
             api_key,
             base_url: base_url.into(),
             model: model.into(),
@@ -409,6 +411,96 @@ impl OpenAiCompatEmbedder {
             query_prefix: String::new(),
             document_prefix: String::new(),
         })
+    }
+
+    /// Construct the credential-free, bounded local dream embedding path.
+    ///
+    /// The original provider identity remains `openai-compat` so matching
+    /// stored vectors keeps the same provider/model/dimension coordinate.
+    /// Unlike the ordinary compat path, this never truncates or retries, and
+    /// cannot follow a redirect, proxy setting or remote endpoint.
+    ///
+    /// # Errors
+    /// Refuses non-local endpoints, empty models or zero dimensions.
+    pub fn new_local(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        dim: u32,
+    ) -> LlmResult<Self> {
+        let base_url = base_url.into();
+        let model = model.into();
+        crate::validate_dream_local_endpoint(&base_url)?;
+        if model.trim().is_empty() || model.len() > 200 || dim == 0 {
+            return Err(LlmError::NotConfigured(
+                "dream local embedding model and dimension must be explicit".into(),
+            ));
+        }
+        let endpoint = normalize_openai_base(&base_url, "embeddings");
+        let local_client = crate::DreamLocalClient::new(&endpoint)?;
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()?,
+            local_client: Some(local_client),
+            api_key: None,
+            base_url,
+            model,
+            dim,
+            query_prefix: String::new(),
+            document_prefix: String::new(),
+        })
+    }
+
+    async fn embed_text(&self, text: &str) -> LlmResult<Vec<f32>> {
+        let Some(client) = &self.local_client else {
+            return openai_style_embed(
+                &self.client,
+                &self.base_url,
+                self.api_key.as_ref(),
+                &self.model,
+                self.dim,
+                text,
+            )
+            .await;
+        };
+        let response = client
+            .post_json(&serde_json::json!({"model":self.model,"input":text}))
+            .await?;
+        let data = response
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .filter(|data| data.len() == 1)
+            .ok_or_else(|| {
+                LlmError::UnexpectedShape("dream embedding requires exactly one result".into())
+            })?;
+        let vector = data[0]
+            .get("embedding")
+            .and_then(serde_json::Value::as_array)
+            .filter(|vector| vector.len() == self.dim as usize)
+            .ok_or_else(|| {
+                LlmError::UnexpectedShape("dream embedding dimension mismatch".into())
+            })?;
+        let values: Option<Vec<f32>> = vector
+            .iter()
+            .map(|number| {
+                number
+                    .as_f64()
+                    .map(|value| value as f32)
+                    .filter(|value| value.is_finite())
+            })
+            .collect();
+        let values = values.ok_or_else(|| {
+            LlmError::UnexpectedShape("dream embedding values must be finite numbers".into())
+        })?;
+        let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= 0.0 {
+            return Err(LlmError::UnexpectedShape(
+                "dream embedding has a degenerate norm".into(),
+            ));
+        }
+        Ok(normalise(values))
     }
 
     /// Set the strings prepended to query / document text before embedding,
@@ -451,41 +543,17 @@ impl Embedder for OpenAiCompatEmbedder {
     }
 
     async fn embed(&self, text: &str) -> LlmResult<Vec<f32>> {
-        openai_style_embed(
-            &self.client,
-            &self.base_url,
-            self.api_key.as_ref(),
-            &self.model,
-            self.dim,
-            text,
-        )
-        .await
+        self.embed_text(text).await
     }
 
     async fn embed_document(&self, text: &str) -> LlmResult<Vec<f32>> {
         let prefixed = prepend_prefix(&self.document_prefix, text);
-        openai_style_embed(
-            &self.client,
-            &self.base_url,
-            self.api_key.as_ref(),
-            &self.model,
-            self.dim,
-            &prefixed,
-        )
-        .await
+        self.embed_text(&prefixed).await
     }
 
     async fn embed_query(&self, text: &str) -> LlmResult<Vec<f32>> {
         let prefixed = prepend_prefix(&self.query_prefix, text);
-        openai_style_embed(
-            &self.client,
-            &self.base_url,
-            self.api_key.as_ref(),
-            &self.model,
-            self.dim,
-            &prefixed,
-        )
-        .await
+        self.embed_text(&prefixed).await
     }
 }
 

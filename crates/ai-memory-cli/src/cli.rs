@@ -169,6 +169,8 @@ pub enum Command {
     PendingWrites(PendingWritesArgs),
     /// Compute + store embeddings for every latest page (M9).
     Embed(EmbedArgs),
+    /// Plan a bounded local DREAM pass; inference and writes require --apply.
+    Dream(DreamArgs),
     /// Generate a random hex bearer token for AI_MEMORY_AUTH_TOKEN.
     GenerateAuthToken(GenerateAuthTokenArgs),
     /// One-shot agent setup for docker deploys: extract the bundled
@@ -2393,6 +2395,23 @@ pub struct EmbedArgs {
     /// same project sessions write into.
     #[arg(long)]
     pub project: Option<String>,
+}
+
+/// Arguments for the thin, explicitly scoped DREAM client.
+#[derive(Debug, Args)]
+pub struct DreamArgs {
+    /// Existing workspace name. Required; cwd/marker defaults are not used.
+    #[arg(long)]
+    pub workspace: String,
+    /// Existing project name within the workspace. Required.
+    #[arg(long)]
+    pub project: String,
+    /// Explicitly admit local inference and guarded writes.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub apply: bool,
+    /// Report the plan without inference or writes (also the default).
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `forget-sweep`.

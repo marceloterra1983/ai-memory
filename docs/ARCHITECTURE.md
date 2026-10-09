@@ -352,33 +352,46 @@ terminal for the decay pass (never re-compacted, never re-evicted, never
 re-reported as cold). Zero-LLM, off by default; the R2 recall no-regression
 proof gates any future default-on.
 
-**LLM "dream" pass (B2/B3/B4, opt-in LLM, OFF by default, R2-gated before
-default-on).** Where A3 collapses near-duplicate cold clusters *extractively*
-(zero-LLM, keep-token union), the dream pass
-(`ai-memory-consolidate::dream::run_dream_pass`) hands each cold cluster to the
-configured provider to be rewritten into ONE coherent page — the prose-coherent
-merge extraction cannot do. It reuses A3's clustering math (`adaptive_eps` /
-`dbscan`) over the *same* bounded cold set the forget sweep materialises
-(`sweep::materialize_cold_set`, invariant #2). It runs only when `[dream]
-enabled` is set AND a provider AND an embedder are configured; a provider-less
-store keeps the zero-LLM A3 path (invariant #13). It **never deletes a source**
-(invariant #16): the highest-retention member is rewritten and every merged-away
-member is *superseded* with a merge-note stub, so the full pre-merge body stays
-reachable (git + supersession chain; `restore-page` recovers it), and
-`page_evidence` (`reconsolidation` + `b2_dream:<id>`) records which members fed
-each merge (the hallucinated-merge guard). The rewrite routes through the gated
-apply path — `preflight_admission(Consolidate)` before the LLM, then
-`Wiki::apply_batch` (single-writer actor, invariant #2) — with **`dry_run`
-first** (returns the plan, calls neither the LLM nor the writer) and
-**JSON-schema structured output only** (invariant #7). Scheduling (B3, in
-`serve.rs`) starts a run only after `[dream] idle_window_secs` of no client
-activity (read from the tool router's shared `ActivityClock`) and **cancels it
-the moment activity resumes** — a cheap `DreamCancel` flag polled between
-clusters — bounded to `max_clusters_per_run` clusters per run (invariant #5).
-Work is ordered **surprisal-first** (B4): the most-novel clusters, farthest in
-embedding space from the nearest existing (non-cold) page, first. Every run
-returns an observable `DreamReport` so a bad run is never silent. No new
-migration (reuses `page_evidence` + supersession); no new MCP tool.
+**Local LLM dream pass (opt-in, OFF by default).**
+`run_dream_pass` reuses the sweep's cold-page scoring and clustering, with
+4096-head / 64-cold-candidate bounds checked before materializing source bodies
+or vectors. Matching vectors have at most 8192 dimensions (128 MiB total).
+Whole source files fit 6000 bytes, clusters have at most two members,
+and complete encoded inputs use a conservative one-byte-per-token 8192 ceiling.
+There is no truncation or candidate sampling. Requests are bounded to 120s,
+output to 4000 tokens, and each serialized allowlisted round to a shared 300s
+work deadline; apply cleanup is awaited safely. The native scheduler uses only
+exact `[dream].scopes`, with a **global** selected-cluster cap (default one).
+`serve --project` does not filter it.
+
+`ai-memory dream --workspace W --project P` calls root-only `POST /admin/dream`
+using the existing server writer and no-create scope resolution. Dry-run is the
+default, with no inference, checkpoint, or data mutation; `--apply` is explicit.
+Dedicated draft and Jev clients refuse external endpoints, redirects, proxies,
+credentials and fallback. Jev is fixed to local port 8787 and supplies two typed
+semantic decisions: cluster suitability, and draft support with independent
+preservation questions for every source. Failure, uncertainty, invalid shape or
+probability below 0.95 blocks apply. This is a calibrated semantic screen, not
+proof of complete factual coverage; a known-answer Qwen/Jev pilot and review
+remain necessary.
+
+The idle gate and cancellation use one activity snapshot with a generation and
+in-flight reservations covering HTTP/admin/MCP, hook processing and relevant
+inference/work. Dream excludes its own request and inert health probes. Read-only
+lock/pool waits obey cancellation and the round deadline. Cancellation is checked before
+every request and under the apply locks and SQL transaction; an admitted backend
+request may still finish. An admitted HTTP operation survives client disconnect;
+shutdown cancels admission and drains apply/rollback. `Wiki::apply_dream_batch` uses the existing writer,
+exclusive mutation/page locks, all-source id/hash/version/eligibility CAS, and a
+verified premerge git checkpoint. Concurrent changes refuse the entire batch
+without overwriting the new head. Admission remains required, local-only for
+dream, and cannot mutate a semantically gated draft. All original versions are
+retained through supersession; all ids and body/file/eligibility digests appear
+in content-free provenance, including the survivor. New heads stay episodic,
+and reports list ids whose embeddings must be completed by explicit scoped
+`embed` before accepting hybrid recall. No migration or new MCP tool is added.
+See [local operation and pilot](dream-local.md) and the Jev evaluation entry in
+[design decisions](design-decisions.md).
 
 Pinned pages (`pinned: true` in frontmatter) are exempt from all
 decay paths. Pages under `_slots/` are pinned automatically and surfaced
@@ -564,7 +577,7 @@ completions          handoffs             purge-session
 compact              api-key              export-okf
 message              doctor               backfill
 project              reclaim-ledger-versions               repair-backfill-timestamps
-server
+server               dream
 ```
 
 Run `ai-memory --help` for the full tree.
@@ -875,19 +888,21 @@ belief_authority_weight = 0.0     # fold read-time belief-strength confidence (P
                                   #   "nao", "não", "voce", "você",
                                   # ]
 
-[dream]                           # B2/B3/B4 opt-in LLM "dream" pass. OFF by default,
-                                  # R2-gated before it may default on. Never deletes a source.
-enabled = false                   # true starts the scheduled pass — but ONLY if a provider AND
-                                  # an embedder are also configured. A provider-less store keeps
-                                  # the zero-LLM A3 path untouched (invariant #13).
-interval_secs = 3600              # how often the scheduler CONSIDERS a run (0 ⇒ 3600)
-idle_window_secs = 300            # operator must be quiet this long before a run starts; returning
-                                  # activity CANCELS an in-flight run at the next cluster boundary
-                                  # (B3). 0 ⇒ default 300.
-# min_pts = 2                     # DBSCAN density floor (0 ⇒ default 2)
-# max_eps = 0.15                  # conservative eps ceiling (cosine distance; 0 ⇒ default)
-# max_clusters_per_run = 8        # bounded fan-out per run (invariant #5; 0 ⇒ default 8)
-# min_cold_pages = 2             # events-accrued gate: skip a run below this many cold pages
+[dream]                           # Local-only; unknown fields fail validation.
+enabled = false                   # Native scheduler OFF; explicit manual CLI still available.
+scopes = []                       # Exact {workspace, project} pairs; required before any run.
+# llm_endpoint = "http://127.0.0.1:8000/v1"  # Dedicated keyless local draft endpoint.
+# llm_model = "verified-local-draft-model"
+# jev_model = "verified-local-system-one-model" # Fixed endpoint 127.0.0.1:8787, never :8789.
+interval_secs = 3600              # Scheduler consideration cadence (0 => 3600).
+idle_window_secs = 300            # Single snapshot: no activity or requests in flight.
+# min_pts = 2                     # DBSCAN density floor (0 => 2).
+# max_eps = 0.15                  # Conservative distance ceiling (0 => default).
+# max_clusters_per_run = 1        # GLOBAL selected clusters, including skips (0 => 1).
+# min_cold_pages = 2              # Cold-candidate floor (0 => 2).
+# Fixed caps (not config keys): 4096 heads, 64 cold, 2 members, 6000 bytes/source,
+# 8192 vector dimensions, 8192 conservative input tokens, 4000 output,
+# 120s/request, 300s/round.
 ```
 
 **LLM provider env** (opt-in):

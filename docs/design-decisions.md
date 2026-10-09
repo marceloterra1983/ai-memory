@@ -353,3 +353,88 @@ Crush is the exception because its project-local database moves with the tree.
 This design follows the harness-format and session-portability experiments in
 the companion `ai-babel` research project: semantic continuity is portable,
 while exact native context is preserved by resuming that harness's own session.
+
+## 16. Dream uses restricted local semantic judgments (2026-10-09)
+
+Dream's statistical checks are separate from its deterministic scope, auth,
+budget, path, provenance and compare-and-swap checks. The semantic gate admits
+only `http://127.0.0.1:8787/v1/systemone`, with no credentials, environment
+proxy, redirects, transport retries or external fallback. The local merge and
+embedding clients share the same restricted transport boundary; port 8789 is
+excluded. Every complete encoded request is bounded by a conservative estimate
+of one UTF-8 wire byte per token, including questions and schema. Compatibility
+parsing consumes the same merge response rather than generating again.
+
+We evaluated the installed System One adapter before integrating it. Its
+response identifies `model=qwen` and includes explicit `notjev` readout metadata.
+The configured Jev alias therefore does **not** demonstrate native Jev weights,
+model identity behind an alias, or a calibrated probability of factual
+correctness. The adapter's installed `lib/wire.js` and the current
+[TypeSafe HTTP contract](https://docs.typesafe.ai/api) define the request and
+typed response; [Noul](https://docs.typesafe.ai/primitives/noul) supplies the
+yes/no probability. Distribution concentration is not a correctness certificate.
+
+The first combined Choice prompt was rejected as an implementation strategy:
+it approved a draft omitting the owner's examples-only-when-requested preference
+with probability 0.976111. The replacement keeps two application decisions:
+cluster suitability and draft support. Suitability asks one narrow Noul about
+shared subject. Draft support asks independent Nouls for unsupported draft
+claims and preservation of each complete source, in one request, and requires
+all of them to pass. No question judges exact numbers, paths, permissions,
+identifiers, hashes or versions. Source paths stay in deterministic provenance.
+
+The acceptance threshold remained 0.95 throughout the evaluation. The eight
+synthetic known-answer cases used duplicated Portuguese reply preferences,
+unrelated orchard notes, a supported draft, invented English reply preferences,
+loss of a unique preference, loss of a rain exception, loss of one side of a
+reply-length conflict and an embedded instruction to approve. In the initial
+atomic-question experiment both positive controls passed and all six negative
+controls were refused. This is a small development sample, not a coverage or
+recall claim. Compact versus spaced JSON state changed probabilities enough to
+refuse a legitimate control; formatting and model identity must remain part of
+the pilot, and uncertain output must stay blocked rather than lowering the
+threshold until it passes. Production state uses explicit readable JSON.
+
+`LocalJevGate` parses the exact expected answer keys and typed response shape,
+including an explicit allowlist for the adapter metadata. Unknown or missing
+answers, non-finite/out-of-range probabilities, degraded/undecided readouts,
+low option-mass coverage, service failure and timeout block apply. Supplied
+confidence below the binary-entropy confidence implied by the unchanged 0.95
+probability threshold (about 0.713603) also refuses: adapter confidence is
+`1 - H(p)/ln(2)`, not the probability itself. When adapter metadata is present,
+its sorted probabilities, margin, winning boolean, option masses, decision
+threshold and optional entropy confidence must agree with the reported Noul.
+Contradictory metadata fails shape validation. Minimal typed responses without
+optional adapter/confidence fields remain supported; native Jev confidence
+calibration has not been demonstrated by this adapter pilot. The regression
+suite includes independent preservation failures with a legitimate control.
+The opt-in `local_jev_synthetic_pilot_uses_the_production_parser` test exercises
+the actual Rust transport/parser against the fixed local endpoint with synthetic
+data; it never opens a memory store. A bridge-network build container cannot
+reach the host endpoint through its own loopback; run its built test executable
+on the host for that manual pilot.
+
+The final Rust pilot passed all eight cases on 2026-10-09 against the actual
+local adapter, including a direct typed `DraftSupport::Approved` control. It
+made nine admitted HTTP requests (the supported control also checked the raw
+typed parser), completed in under a second, and reported `model=qwen`. Its
+supported-control probabilities were 0.979968 for claim support, 0.978045 for
+the first source's preservation and 0.966402 for the second source. The transport
+counts admitted HTTP attempts after budget checks; a rejected input adds no
+HTTP attempt. One support HTTP request contains three independent semantic
+questions; its budget charges repeated source state for those backend questions
+before sending. Removing the uncertainty refusal guard made the adversarial
+regression accept probability 0.5, and the test failed; restoring it made the
+same regression pass.
+
+That evidence proves our fixed client destination, not the adapter's downstream
+routing or native Jev weights. The installed adapter delegates to a configured
+OpenAI-compatible client; the pilot did not capture its base URL. The owner must
+verify that backend's local destination and absence of port 8789 or external
+fallback before enabling dream. A loopback front door alone cannot attest the
+backend.
+
+This gate cannot certify absolute factual coverage. The owner still needs the
+known-answer Qwen+System One pilot and review of unique facts, conflicts and
+exceptions before deploying a restricted scheduler. Errors and uncertainty are
+terminal refusals, never a reason to use another provider or endpoint.

@@ -195,6 +195,53 @@ pub struct Wiki {
 /// Key uniquely identifying a page for per-path write serialization.
 type PageKey = (WorkspaceId, ProjectId, PagePath);
 
+/// The complete bounded source supplied to dream inference, protected at apply.
+#[derive(Debug, Clone)]
+pub struct DreamSource {
+    /// Store version and every eligibility input observed for this source.
+    pub head: ai_memory_store::DreamHead,
+    /// Complete parsed source; never truncated.
+    pub markdown: Markdown,
+    /// SHA-256 of the exact source file, including frontmatter.
+    pub file_sha256: [u8; 32],
+}
+
+/// A successful atomic dream apply and its recoverable pre-merge checkpoint.
+#[derive(Debug, Clone)]
+pub struct DreamApplyResult {
+    /// The new heads, in request order.
+    pub ids: Vec<PageId>,
+    /// Full git commit OID retaining all source files before this merge.
+    pub checkpoint: String,
+}
+
+struct DreamBatchGuard {
+    sources: Vec<DreamSource>,
+    cancel: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+fn dream_refused(reason: &str) -> WikiError {
+    ai_memory_store::StoreError::InvalidState(reason.into()).into()
+}
+
+fn read_dream_file(abs: &Path, max_bytes: usize) -> WikiResult<Vec<u8>> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(abs)?;
+    if file.metadata()?.len() > max_bytes as u64 {
+        return Err(dream_refused(
+            "dream source byte cap exceeded; source refused without truncation",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(dream_refused(
+            "dream source byte cap exceeded; source refused without truncation",
+        ));
+    }
+    Ok(bytes)
+}
+
 impl Wiki {
     /// Construct a wiki handle rooted at `<data_dir>/wiki/`. Creates the
     /// directory if absent and initialises a git repo inside it.
@@ -1364,6 +1411,49 @@ impl Wiki {
         Ok(())
     }
 
+    /// Preflight dream admission with literal loopback destinations and a
+    /// client that never follows redirects, proxies, retries, or external DNS.
+    /// Both consolidate and ordinary page subscribers are validated because
+    /// a merge contains both survivor rewrites and loser stubs.
+    ///
+    /// # Errors
+    /// Refuses nonlocal endpoints, port 8789, and any failed local admission.
+    pub async fn preflight_dream_admission(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &PagePath,
+        actor: ActorContext,
+        cancel: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> WikiResult<()> {
+        if cancel() {
+            return Err(dream_refused("dream cancelled before admission"));
+        }
+        let mut local = self.dream_local_clone()?;
+        if let Some(chain) = &mut local.admission_chain {
+            chain.set_dream_cancel(cancel);
+        }
+        local
+            .preflight_admission(
+                workspace_id,
+                project_id,
+                path,
+                AdmissionOp::Consolidate,
+                actor,
+            )
+            .await
+    }
+
+    fn dream_local_clone(&self) -> WikiResult<Self> {
+        let mut local = self.clone();
+        local.admission_chain = self
+            .admission_chain
+            .as_ref()
+            .map(AdmissionChain::dream_local)
+            .transpose()?;
+        Ok(local)
+    }
+
     /// Remove the project's on-disk directory without running admission.
     ///
     /// # Errors
@@ -2085,8 +2175,136 @@ impl Wiki {
     /// Returns [`WikiError`] for any filesystem, parsing, or store
     /// error.
     pub async fn apply_batch(&self, requests: Vec<WritePageRequest>) -> WikiResult<Vec<PageId>> {
+        self.apply_batch_inner(requests, None)
+            .await
+            .map(|(ids, _)| ids)
+    }
+
+    /// Snapshot complete bounded source files under the same page locks used
+    /// by apply. A file/body mismatch with the indexed head refuses inference.
+    ///
+    /// # Errors
+    /// Refuses long, missing, invalid, or concurrently changed source files.
+    pub async fn snapshot_dream_sources(
+        &self,
+        heads: Vec<ai_memory_store::DreamHead>,
+        max_bytes: usize,
+    ) -> WikiResult<Vec<DreamSource>> {
+        if heads.is_empty()
+            || heads.len() > 2
+            || max_bytes == 0
+            || max_bytes > ai_memory_store::DREAM_SOURCE_MAX_BYTES
+        {
+            return Err(dream_refused("dream source snapshot shape invalid"));
+        }
+        let _guard = self.mutation_lock.read().await;
+        let keys: Vec<_> = heads
+            .iter()
+            .map(|h| (h.workspace_id, h.project_id, h.candidate.path.clone()))
+            .collect();
+        let _page_guards = self.lock_pages(&keys).await;
+        let mut sources = Vec::with_capacity(heads.len());
+        for head in heads {
+            self.ensure_project_workspace(head.workspace_id, head.project_id)
+                .await?;
+            if head.body_bytes > max_bytes {
+                return Err(dream_refused(
+                    "dream source byte cap exceeded; source refused without truncation",
+                ));
+            }
+            let bytes = read_dream_file(
+                &self.abs_path(head.workspace_id, head.project_id, &head.candidate.path),
+                max_bytes,
+            )?;
+            let raw = std::str::from_utf8(&bytes)
+                .map_err(|_| dream_refused("dream source is not valid UTF-8"))?;
+            let markdown =
+                parse(raw).map_err(|_| dream_refused("dream source Markdown invalid"))?;
+            let indexed_frontmatter: serde_json::Value =
+                serde_json::from_str(&head.candidate.frontmatter_json)
+                    .map_err(|_| dream_refused("dream indexed frontmatter invalid"))?;
+            if !markdown.frontmatter.is_object()
+                || ai_memory_store::dream_source_digest(markdown.body.as_bytes())
+                    != head.body_sha256
+                || ai_memory_core::okf::strip_generated_at(&markdown.frontmatter)
+                    != ai_memory_core::okf::strip_generated_at(&indexed_frontmatter)
+            {
+                return Err(dream_refused(
+                    "dream source file does not match indexed head",
+                ));
+            }
+            sources.push(DreamSource {
+                head,
+                markdown,
+                file_sha256: ai_memory_store::dream_source_digest(&bytes),
+            });
+        }
+        Ok(sources)
+    }
+
+    /// Apply source-derived rewrites with disk and SQL CAS, a pre-merge git
+    /// checkpoint, and cancellation rechecked inside the writer transaction.
+    /// Every source and request must name exactly the same set of paths.
+    ///
+    /// # Errors
+    /// Any stale source, cancellation, checkpoint/admission/write failure
+    /// refuses the whole batch and restores installed files on SQL failure.
+    pub async fn apply_dream_batch(
+        &self,
+        requests: Vec<WritePageRequest>,
+        sources: &[DreamSource],
+        cancel: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> WikiResult<DreamApplyResult> {
+        let request_keys: HashSet<_> = requests
+            .iter()
+            .map(|r| (r.workspace_id, r.project_id, r.path.clone()))
+            .collect();
+        let source_keys: HashSet<_> = sources
+            .iter()
+            .map(|s| {
+                (
+                    s.head.workspace_id,
+                    s.head.project_id,
+                    s.head.candidate.path.clone(),
+                )
+            })
+            .collect();
+        if requests.is_empty()
+            || requests.len() > 2
+            || request_keys.len() != requests.len()
+            || sources.len() != requests.len()
+            || source_keys != request_keys
+        {
+            return Err(dream_refused("dream source coordinates do not match batch"));
+        }
+        if cancel() {
+            return Err(dream_refused("dream cancelled before apply"));
+        }
+        let mut local = self.dream_local_clone()?;
+        if let Some(chain) = &mut local.admission_chain {
+            chain.set_dream_cancel(cancel.clone());
+        }
+        let (ids, checkpoint) = local
+            .apply_batch_inner(
+                requests,
+                Some(DreamBatchGuard {
+                    sources: sources.to_vec(),
+                    cancel,
+                }),
+            )
+            .await?;
+        let checkpoint =
+            checkpoint.ok_or_else(|| dream_refused("dream pre-merge checkpoint missing"))?;
+        Ok(DreamApplyResult { ids, checkpoint })
+    }
+
+    async fn apply_batch_inner(
+        &self,
+        requests: Vec<WritePageRequest>,
+        dream: Option<DreamBatchGuard>,
+    ) -> WikiResult<(Vec<PageId>, Option<String>)> {
         if requests.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
         // Reject any path that cannot be materialised and checkpointed on every
         // supported platform, before anything is written.
@@ -2102,10 +2320,22 @@ impl Wiki {
             Option<AdmissionContext>,
         )> = Vec::with_capacity(requests.len());
         for mut req in requests {
+            if let Some(dream) = &dream
+                && (dream.cancel)()
+            {
+                return Err(dream_refused("dream cancelled before admission"));
+            }
             // Defence-in-depth scrub at the batch boundary too.
+            let gated_body = req.body.clone();
+            let gated_title = req.title.clone();
             req.body = self.sanitizer.scrub(&req.body);
             if let Some(t) = req.title.take() {
                 req.title = Some(self.sanitizer.scrub(&t));
+            }
+            if dream.is_some() && (req.body != gated_body || req.title != gated_title) {
+                return Err(dream_refused(
+                    "dream draft sanitization changed reviewed content",
+                ));
             }
 
             req.frontmatter = stamp_last_modified_by(req.frontmatter, &req.actor);
@@ -2113,6 +2343,7 @@ impl Wiki {
                 frontmatter: req.frontmatter,
                 body: req.body,
             };
+            let gated_markdown = dream.as_ref().map(|_| markdown.clone());
 
             let resolved_ctx = if let Some(chain) = &self.admission_chain {
                 let mut ctx = req.admission_ctx.take().unwrap_or_default();
@@ -2127,6 +2358,13 @@ impl Wiki {
 
             markdown.body = self.sanitizer.scrub(&markdown.body);
             scrub_frontmatter_strings(&mut markdown.frontmatter, &self.sanitizer);
+            if let Some(gated) = gated_markdown
+                && (gated.body != markdown.body || gated.frontmatter != markdown.frontmatter)
+            {
+                return Err(dream_refused(
+                    "dream admission or sanitization changed reviewed content",
+                ));
+            }
             req.pinned = req.pinned
                 || is_slot_path(&req.path)
                 || markdown
@@ -2157,8 +2395,29 @@ impl Wiki {
             staged.push((req_with_title, emitted, abs, resolved_ctx));
         }
 
-        let (ids, dispatches) = {
-            let _guard = self.mutation_lock.read().await;
+        let (ids, dispatches, checkpoint) = {
+            // Some existing mutation paths use only the global gate. Dream
+            // excludes those as well until its disk and SQL CAS finish.
+            let _dream_guard = if let Some(dream) = &dream {
+                let acquire = self.mutation_lock.write();
+                tokio::pin!(acquire);
+                let mut poll = tokio::time::interval(std::time::Duration::from_millis(50));
+                Some(loop {
+                    tokio::select! {
+                        guard = &mut acquire => break guard,
+                        _ = poll.tick() => {
+                            if (dream.cancel)() { return Err(dream_refused("dream cancelled while waiting for mutation lock")); }
+                        }
+                    }
+                })
+            } else {
+                None
+            };
+            let _ordinary_guard = if dream.is_none() {
+                Some(self.mutation_lock.read().await)
+            } else {
+                None
+            };
             // Serialize every path in this batch against concurrent single-page
             // or batch writers to the same path (#607). Sorted acquisition
             // keeps a batch deadlock-free against any other writer.
@@ -2167,6 +2426,56 @@ impl Wiki {
                 .map(|(req, _, _, _)| (req.workspace_id, req.project_id, req.path.clone()))
                 .collect();
             let _page_guards = self.lock_pages(&batch_keys).await;
+            let checkpoint = if let Some(dream) = &dream {
+                if (dream.cancel)() {
+                    return Err(dream_refused("dream cancelled before staging"));
+                }
+                let mut checkpoint_sources = Vec::with_capacity(dream.sources.len());
+                for source in &dream.sources {
+                    let head = &source.head;
+                    let bytes = read_dream_file(
+                        &self.abs_path(head.workspace_id, head.project_id, &head.candidate.path),
+                        ai_memory_store::DREAM_SOURCE_MAX_BYTES,
+                    )?;
+                    if ai_memory_store::dream_source_digest(&bytes) != source.file_sha256 {
+                        return Err(dream_refused("dream source file changed; batch cancelled"));
+                    }
+                    let rel = self
+                        .abs_path(head.workspace_id, head.project_id, &head.candidate.path)
+                        .strip_prefix(&self.root)
+                        .map_err(|_| dream_refused("dream source is outside wiki root"))?
+                        .to_path_buf();
+                    checkpoint_sources.push((rel, bytes));
+                }
+                let oid = match self.git.commit_dream_sources(&checkpoint_sources)? {
+                    Some(oid) => oid.to_string(),
+                    None => {
+                        self.git
+                            .recent_checkpoints(1)?
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| dream_refused("dream pre-merge checkpoint missing"))?
+                            .oid
+                    }
+                };
+                for source in &dream.sources {
+                    let head = &source.head;
+                    let rel = self
+                        .abs_path(head.workspace_id, head.project_id, &head.candidate.path)
+                        .strip_prefix(&self.root)
+                        .map_err(|_| dream_refused("dream source is outside wiki root"))?
+                        .to_path_buf();
+                    let bytes = self.git.file_at_rev(&oid, &rel)?;
+                    if ai_memory_store::dream_source_digest(&bytes) != source.file_sha256 {
+                        return Err(dream_refused(
+                            "dream checkpoint does not retain exact source",
+                        ));
+                    }
+                }
+                Some(oid)
+            } else {
+                None
+            };
             let mut staged_files: Vec<(
                 WritePageRequest,
                 tempfile::NamedTempFile,
@@ -2221,6 +2530,11 @@ impl Wiki {
             // the derived DB from the markdown source of truth.
             let mut installed = Vec::with_capacity(staged_files.len());
             let mut dispatches = Vec::with_capacity(staged_files.len());
+            if let Some(dream) = &dream
+                && (dream.cancel)()
+            {
+                return Err(dream_refused("dream cancelled before file install"));
+            }
             for (req, tmp, abs, ctx) in staged_files {
                 let install = match persist_tmp_with_rollback_snapshot(&self.git, tmp, &abs) {
                     Ok(install) => install,
@@ -2233,7 +2547,19 @@ impl Wiki {
                 dispatches.push((req.path, req.frontmatter, req.body, ctx));
             }
 
-            let ids = match self.writer.upsert_pages_batch(pages).await {
+            let result = match &dream {
+                Some(dream) => {
+                    self.writer
+                        .upsert_dream_pages_batch(
+                            pages,
+                            dream.sources.iter().map(|s| s.head.clone()).collect(),
+                            dream.cancel.clone(),
+                        )
+                        .await
+                }
+                None => self.writer.upsert_pages_batch(pages).await,
+            };
+            let ids = match result {
                 Ok(ids) => ids,
                 Err(e) => {
                     rollback_or_inconsistent(&self.git, &installed, &e)?;
@@ -2241,7 +2567,7 @@ impl Wiki {
                 }
             };
 
-            (ids, dispatches)
+            (ids, dispatches, checkpoint)
         };
 
         if let Some(chain) = &self.admission_chain {
@@ -2252,7 +2578,7 @@ impl Wiki {
             }
         }
 
-        Ok(ids)
+        Ok((ids, checkpoint))
     }
 
     /// Acquire the per-path write lock for one page, serializing concurrent
@@ -3775,6 +4101,68 @@ mod tests {
             .unwrap()
             .with_store_reader(store.reader.clone());
         (store, wiki, ws, proj)
+    }
+
+    #[tokio::test]
+    async fn dream_cancel_while_waiting_for_mutation_lock_finishes_without_writes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let tmp = TempDir::new().unwrap();
+        let (store, wiki, ws, proj) = scoped(&tmp).await;
+        let req = WritePageRequest {
+            workspace_id: ws,
+            project_id: proj,
+            path: PagePath::new("a.md").unwrap(),
+            frontmatter: serde_json::json!({}),
+            body: "original exception\n".into(),
+            tier: Tier::Episodic,
+            pinned: false,
+            title: None,
+            admission_ctx: None,
+            author_id: None,
+            actor: ActorContext::anonymous(),
+            evidence: vec![],
+        };
+        wiki.write_page(req.clone()).await.unwrap();
+        let sources = wiki
+            .snapshot_dream_sources(
+                store.reader.dream_heads_bounded(ws, proj, 1).await.unwrap(),
+                6000,
+            )
+            .await
+            .unwrap();
+        let held = wiki.mutation_lock.write().await;
+        let flag = Arc::new(AtomicBool::new(false));
+        let cancelled = flag.clone();
+        let guarded = wiki.clone();
+        let captured = sources.clone();
+        let mut rewrite = req.clone();
+        rewrite.body = "draft\n".into();
+        let draft = rewrite.clone();
+        let waiting = tokio::spawn(async move {
+            guarded
+                .apply_dream_batch(
+                    vec![rewrite],
+                    &captured,
+                    Arc::new(move || cancelled.load(Ordering::SeqCst)),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        flag.store(true, Ordering::SeqCst);
+        let refused = tokio::time::timeout(std::time::Duration::from_millis(300), waiting)
+            .await
+            .expect("cancel must not wait for the held lock")
+            .unwrap();
+        assert!(refused.is_err());
+        assert_eq!(
+            wiki.read_page(ws, proj, &req.path).unwrap().body,
+            "original exception\n"
+        );
+        drop(held);
+        wiki.apply_dream_batch(vec![draft], &sources, Arc::new(|| false))
+            .await
+            .unwrap();
+        assert_eq!(wiki.read_page(ws, proj, &req.path).unwrap().body, "draft\n");
     }
 
     #[tokio::test]

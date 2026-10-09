@@ -71,6 +71,7 @@ pub mod anthropic;
 pub mod auth;
 pub mod codex;
 pub mod copilot;
+pub mod dream_local;
 pub mod embedding;
 pub mod error;
 pub mod factory;
@@ -106,6 +107,7 @@ pub use copilot::{
     GITHUB_ACCESS_TOKEN_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_TOKEN_URL,
     GITHUB_DEVICE_CODE_URL,
 };
+pub use dream_local::{DreamLocalClient, DreamLocalProvider, validate_dream_local_endpoint};
 pub use embedding::{
     Embedder, OpenAiCompatEmbedder, OpenAiEmbedder, SyntheticEmbedder, VoyageEmbedder, cosine,
 };

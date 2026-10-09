@@ -25,6 +25,14 @@ pub trait LlmProvider: Send + Sync {
     /// The model identifier this provider will hit.
     fn model(&self) -> &str;
 
+    /// Monotonic HTTP attempt count when a provider exposes one.
+    ///
+    /// `None` means unavailable, not zero. The restricted dream provider uses
+    /// this to distinguish refused input from an admitted local request.
+    fn request_count(&self) -> Option<usize> {
+        None
+    }
+
     /// Plain text completion.
     async fn complete(&self, request: ChatRequest) -> LlmResult<ChatResponse>;
 

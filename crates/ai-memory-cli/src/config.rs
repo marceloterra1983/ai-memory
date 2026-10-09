@@ -1296,18 +1296,27 @@ impl Default for MaintenanceSettings {
 
 /// `[dream]` — the opt-in LLM dream pass (docs/design-memory-aging.md §B2–B4).
 ///
-/// OFF by default (`enabled = false`): the scheduled job is not started, and even
-/// a direct call is a clean no-op. It runs only when this flag is set AND a
-/// provider AND an embedder are configured; a provider-less store keeps the
-/// zero-LLM A3 path (invariant #13). Gated on an R2 number before default-on.
+/// OFF by default (`enabled = false`): the scheduled job is not started.
+/// Manual dry-run remains available for explicitly allowlisted existing scopes;
+/// manual apply requires dedicated local models and the semantic gate. Neither
+/// path inherits the primary LLM/fallback chain. Unknown keys are refused.
 ///
 /// Env form: `AI_MEMORY_DREAM__ENABLED=true`,
 /// `AI_MEMORY_DREAM__IDLE_WINDOW_SECS=600`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct DreamSettings {
     /// Master switch. `false` (the default) means the job never starts.
     pub enabled: bool,
+    /// Exact existing scopes allowed for both manual and scheduled runs.
+    pub scopes: Vec<ai_memory_mcp::dream::DreamScope>,
+    /// Dedicated keyless local OpenAI-compatible endpoint. Never inherits the
+    /// primary LLM provider, ambient endpoint, credential, or fallback chain.
+    pub llm_endpoint: Option<String>,
+    /// Explicit model name served by `llm_endpoint`.
+    pub llm_model: Option<String>,
+    /// Explicit model name used by the fixed local Jev endpoint on :8787.
+    pub jev_model: Option<String>,
     /// How often the scheduler CONSIDERS a run (seconds). It still only runs when
     /// the operator has been idle for `idle_window_secs`. `0` ⇒ a conservative
     /// default cadence.
@@ -1333,6 +1342,10 @@ impl Default for DreamSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            scopes: Vec::new(),
+            llm_endpoint: None,
+            llm_model: None,
+            jev_model: None,
             // A conservative default cadence: the job wakes hourly to check
             // whether the box has been idle long enough to run.
             interval_secs: 3_600,
@@ -1348,7 +1361,7 @@ impl Default for DreamSettings {
 impl DreamSettings {
     /// The effective scheduler interval in seconds (never zero).
     #[must_use]
-    pub fn effective_interval_secs(self) -> u64 {
+    pub fn effective_interval_secs(&self) -> u64 {
         if self.interval_secs == 0 {
             3_600
         } else {
@@ -1363,7 +1376,7 @@ impl DreamSettings {
     /// clean no-op even with the flag on (there are no stored vectors).
     #[must_use]
     pub fn dream_config(
-        self,
+        &self,
         embedding: Option<ai_memory_consolidate::EmbeddingCoord>,
     ) -> ai_memory_consolidate::DreamConfig {
         ai_memory_consolidate::DreamConfig {
@@ -1374,7 +1387,54 @@ impl DreamSettings {
             max_clusters_per_run: self.max_clusters_per_run,
             min_cold_pages: self.min_cold_pages,
             idle_window_secs: self.idle_window_secs,
+            semantic_gate: None,
+            deadline: None,
         }
+    }
+
+    /// Reject incomplete opt-in settings and typoed safety controls.
+    pub fn validate(&self) -> Result<()> {
+        let mut seen = std::collections::BTreeSet::new();
+        for scope in &self.scopes {
+            if scope.workspace.trim().is_empty()
+                || scope.project.trim().is_empty()
+                || scope.workspace.trim() != scope.workspace
+                || scope.project.trim() != scope.project
+            {
+                anyhow::bail!(
+                    "dream.scopes names must be exact, nonempty, and without surrounding whitespace"
+                );
+            }
+            if !seen.insert((&scope.workspace, &scope.project)) {
+                anyhow::bail!("dream.scopes must not contain duplicates");
+            }
+        }
+        if self.enabled && self.scopes.is_empty() {
+            anyhow::bail!("dream.enabled requires a nonempty dream.scopes allowlist");
+        }
+        if let Some(endpoint) = self.llm_endpoint.as_deref() {
+            ai_memory_llm::validate_dream_local_endpoint(endpoint)
+                .context("dream.llm_endpoint must be a trusted literal loopback endpoint")?;
+        }
+        if self.llm_endpoint.is_some() != self.llm_model.is_some() {
+            anyhow::bail!("dream.llm_endpoint and dream.llm_model must be configured together");
+        }
+        for model in [&self.llm_model, &self.jev_model].into_iter().flatten() {
+            if model.trim().is_empty() || model.len() > 200 {
+                anyhow::bail!(
+                    "DREAM model names must be explicit, nonempty, and at most 200 bytes"
+                );
+            }
+        }
+        if self.enabled && (self.llm_endpoint.is_none() || self.jev_model.is_none()) {
+            anyhow::bail!(
+                "dream.enabled requires dedicated local LLM endpoint/model and jev_model"
+            );
+        }
+        if !self.max_eps.is_finite() || !(0.0..=1.0).contains(&self.max_eps) {
+            anyhow::bail!("dream.max_eps must be finite and between zero and one");
+        }
+        Ok(())
     }
 }
 
@@ -1605,6 +1665,31 @@ fn apply_fts_stopwords_env(config: &mut Config, raw: Option<&str>) {
 }
 
 impl Config {
+    fn validate_dream_providers(&self) -> anyhow::Result<()> {
+        self.dream.validate()?;
+        if self.dream.enabled || !self.dream.scopes.is_empty() {
+            if self.embedding_dim.is_some_and(|dim| dim == 0 || dim > 8192) {
+                anyhow::bail!("DREAM embedding dimensions must be between 1 and 8192");
+            }
+            match self.embedding_provider.as_deref() {
+                None if self.dream.enabled => {
+                    anyhow::bail!("enabled DREAM requires an explicit local embedding provider")
+                }
+                None | Some("local") => {}
+                Some("openai-compat" | "openai_compat") => {
+                    let endpoint = self.embedding_base_url.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("DREAM requires an explicit local embedding_base_url")
+                    })?;
+                    ai_memory_llm::validate_dream_local_endpoint(endpoint)
+                        .context("DREAM embeddings must use a trusted literal loopback endpoint")?;
+                }
+                _ => anyhow::bail!("DREAM requires local or local openai-compat embeddings"),
+            }
+        }
+
+        Ok(())
+    }
+
     /// Load the merged configuration: defaults → file → env → CLI.
     ///
     /// # Errors
@@ -1831,6 +1916,7 @@ impl Config {
             .llm_extra_headers()
             .context("parsing AI_MEMORY_LLM_HEADERS / llm_headers")?;
         validate_auth_secrets(&config.auth)?;
+        config.validate_dream_providers()?;
 
         // Validated and resolved eagerly, unlike the primary provider (which
         // stays lazily checked at `serve` startup): a fallback can otherwise
@@ -2938,6 +3024,91 @@ mod tests {
         assert!(!cfg.auto_improve.include_raw_fallback);
         assert_eq!(cfg.auto_improve.proposal_actor, "auto_improve");
         assert_eq!(cfg.auto_improve.pending_path, "_pending/auto-improve");
+    }
+
+    #[test]
+    fn dream_settings_reject_unknown_safety_knobs() {
+        let parsed = serde_json::from_value::<DreamSettings>(serde_json::json!({
+            "enabled": false,
+            "max_members": 2
+        }));
+        assert!(
+            parsed.is_err(),
+            "an unsupported safety knob must not be silently ignored"
+        );
+        assert!(
+            serde_json::from_value::<DreamSettings>(serde_json::json!({
+                "enabled": false
+            }))
+            .is_ok()
+        );
+        let config: Result<Config, figment::Error> =
+            Figment::from(Serialized::defaults(Config::default()))
+                .merge(Toml::string("[dream]\nmax_members = 2\n"))
+                .extract();
+        assert!(
+            config.is_err(),
+            "TOML configuration must also reject unknown safety knobs"
+        );
+    }
+
+    #[test]
+    fn dream_enabled_requires_explicit_local_embedder_and_bounded_dimension() {
+        let mut config = Config {
+            dream: DreamSettings {
+                enabled: true,
+                scopes: vec![ai_memory_mcp::dream::DreamScope {
+                    workspace: "fixture".into(),
+                    project: "app".into(),
+                }],
+                llm_endpoint: Some("http://127.0.0.1:8000/v1".into()),
+                llm_model: Some("fixture-qwen".into()),
+                jev_model: Some("fixture-jev".into()),
+                ..DreamSettings::default()
+            },
+            ..Config::default()
+        };
+        assert!(
+            config.validate_dream_providers().is_err(),
+            "enabled DREAM cannot rely on a best-effort default embedder"
+        );
+        config.embedding_provider = Some("local".into());
+        assert!(config.validate_dream_providers().is_ok());
+        config.embedding_dim = Some(8193);
+        assert!(config.validate_dream_providers().is_err());
+        config.embedding_dim = Some(8192);
+        assert!(config.validate_dream_providers().is_ok());
+        config.embedding_dim = None;
+        config.embedding_provider = Some("openai".into());
+        assert!(config.validate_dream_providers().is_err());
+        config.embedding_provider = Some("openai-compat".into());
+        config.embedding_base_url = Some("http://127.0.0.1:8001/v1".into());
+        assert!(config.validate_dream_providers().is_ok());
+        config.dream.enabled = false;
+        config.embedding_provider = None;
+        assert!(config.validate_dream_providers().is_ok());
+    }
+
+    #[test]
+    fn dream_enabled_requires_exact_scopes_and_local_models() {
+        let mut settings = DreamSettings {
+            enabled: true,
+            ..DreamSettings::default()
+        };
+        assert!(settings.validate().is_err());
+        settings.scopes.push(ai_memory_mcp::dream::DreamScope {
+            workspace: "fixture".into(),
+            project: "app".into(),
+        });
+        assert!(settings.validate().is_err());
+        settings.llm_endpoint = Some("https://external.invalid/v1".into());
+        settings.llm_model = Some("fixture-qwen".into());
+        settings.jev_model = Some("fixture-jev".into());
+        assert!(settings.validate().is_err());
+        settings.llm_endpoint = Some("http://127.0.0.1:8000/v1".into());
+        assert!(settings.validate().is_ok());
+        settings.scopes[0].project = " app".into();
+        assert!(settings.validate().is_err());
     }
 
     #[test]

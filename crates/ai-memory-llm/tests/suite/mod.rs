@@ -4,6 +4,7 @@
 
 mod copilot_embedder;
 mod copilot_provider;
+mod dream_local;
 mod extra_headers_on_the_wire;
 mod fallback_provider;
 mod openai_compat_embedder;

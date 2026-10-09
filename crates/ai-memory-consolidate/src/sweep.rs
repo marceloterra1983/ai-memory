@@ -816,8 +816,8 @@ pub(crate) struct ColdEntry {
 /// pinned page, or a page still above the threshold. TTL expiry is the caller's
 /// concern (the sweep hard-deletes those; the dream pass skips them).
 ///
-/// The single scoring path shared by the forget sweep's inline loop and
-/// [`materialize_cold_set`], so the cold set is defined once (invariant #2).
+/// The scoring path shared by the forget sweep and the bounded dream planner,
+/// so the cold set is defined once (invariant #2).
 pub(crate) fn cold_entry_for(
     c: &DecayCandidate,
     breadth: &HashMap<PageId, u32>,
@@ -852,41 +852,6 @@ pub(crate) fn cold_entry_for(
     } else {
         None
     }
-}
-
-/// Materialise the bounded cold set for a scope, reusing the sweep's exact
-/// retention scoring (invariant #2). TTL-expired pages are excluded — an expired
-/// page is the sweep's to hard-delete, never the dream pass's to rewrite.
-///
-/// # Errors
-/// Returns [`SweepError::InvalidBreadthWeight`] for a negative or non-finite
-/// coefficient, or a store error while reading candidates.
-pub(crate) async fn materialize_cold_set(
-    reader: &ReaderPool,
-    workspace_id: WorkspaceId,
-    project_id: ProjectId,
-    params: &DecayParams,
-    breadth_weight: f64,
-) -> Result<Vec<ColdEntry>, SweepError> {
-    if !breadth_weight.is_finite() || breadth_weight < 0.0 {
-        return Err(SweepError::InvalidBreadthWeight);
-    }
-    let candidates = reader.decay_candidates(workspace_id, project_id).await?;
-    let breadth =
-        access_breadth_for_scoring(reader, workspace_id, project_id, breadth_weight).await?;
-    let now_us = Timestamp::now().as_microsecond();
-    let mut cold = Vec::new();
-    for c in &candidates {
-        if let Some(expires_us) = c.expires_at_us
-            && expires_us <= now_us
-        {
-            continue;
-        }
-        if let Some(entry) = cold_entry_for(c, &breadth, breadth_weight, params, now_us) {
-            cold.push(entry);
-        }
-    }
-    Ok(cold)
 }
 
 /// The read-only output of the A3 dedup planner: what to report, which page ids

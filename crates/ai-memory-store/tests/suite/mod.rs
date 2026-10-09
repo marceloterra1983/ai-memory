@@ -10,6 +10,7 @@ mod audit_log;
 mod auto_improve_staging;
 mod belief_authority;
 mod client_activity;
+mod dream_cas;
 mod fts_drift_status;
 mod fts_stopwords_config;
 mod handoff_ownership;

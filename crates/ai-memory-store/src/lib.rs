@@ -18,6 +18,7 @@ mod api_credentials;
 mod auto_improve;
 pub mod belief;
 pub mod decay;
+mod dream;
 mod error;
 mod fts_query;
 mod grants;
@@ -53,6 +54,7 @@ pub use decay::{
     lambda_from_half_life_days, retention_score, retention_score_with_breadth,
     salience_after_feedback,
 };
+pub use dream::{DREAM_MAX_HEADS, DREAM_SOURCE_MAX_BYTES, DreamHead, dream_source_digest};
 pub use error::{StoreError, StoreResult};
 pub use grants::{GrantFilter, GrantListing, GrantOutcome, ProjectGrant};
 pub use maintenance::MaintenanceJob;

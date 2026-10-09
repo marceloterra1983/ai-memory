@@ -222,15 +222,7 @@ fn dedup_on() -> ColdClusterDedup {
 }
 
 fn dream_on() -> DreamConfig {
-    DreamConfig {
-        enabled: true,
-        embedding: Some(synthetic_coord()),
-        min_pts: 0,
-        max_eps: 0.0,
-        max_clusters_per_run: 0,
-        min_cold_pages: 0,
-        idle_window_secs: 0,
-    }
+    super::dream_pass::dream_on()
 }
 
 // Two near-duplicate episodic bodies: near-identical prose (so the bag-of-words

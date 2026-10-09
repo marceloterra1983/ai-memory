@@ -136,6 +136,12 @@ pub(crate) enum WriteCmd {
         pages: Vec<NewPage>,
         reply: oneshot::Sender<StoreResult<Vec<PageId>>>,
     },
+    UpsertDreamPageBatch {
+        pages: Vec<NewPage>,
+        heads: Vec<crate::DreamHead>,
+        cancel: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+        reply: oneshot::Sender<StoreResult<Vec<PageId>>>,
+    },
     DeletePage {
         workspace_id: WorkspaceId,
         project_id: ProjectId,
@@ -2380,6 +2386,28 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Apply a dream batch only when every source still matches within the
+    /// same writer transaction. Cancellation before commit rolls back all rows.
+    ///
+    /// # Errors
+    /// Refuses stale/ineligible sources, cancellation, or mismatched coordinates.
+    pub async fn upsert_dream_pages_batch(
+        &self,
+        pages: Vec<NewPage>,
+        heads: Vec<crate::DreamHead>,
+        cancel: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> StoreResult<Vec<PageId>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::UpsertDreamPageBatch {
+            pages,
+            heads,
+            cancel,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Upsert a page (creating it or superseding the existing latest
     /// version when the body has changed).
     ///
@@ -3334,6 +3362,20 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::UpsertPageBatch { pages, reply } => {
                 let result = ops::upsert_pages_batch(&mut conn, &pages);
                 send_or_warn(reply, result, "upsert_pages_batch");
+            }
+            WriteCmd::UpsertDreamPageBatch {
+                pages,
+                heads,
+                cancel,
+                reply,
+            } => {
+                let result = crate::dream::upsert_dream_pages_batch(
+                    &mut conn,
+                    &pages,
+                    &heads,
+                    cancel.as_ref(),
+                );
+                send_or_warn(reply, result, "upsert_dream_pages_batch");
             }
             WriteCmd::BeginSession { session, reply } => {
                 let result = ops::begin_session(&mut conn, &session);
@@ -4602,13 +4644,18 @@ mod tests {
             .await
             .expect("writer channel closed before Shutdown");
 
-        // FIFO guarantees Shutdown is processed first; whether the send
-        // itself fails or the reply oneshot is dropped, the caller sees
-        // WriterClosed either way.
-        let err = writer
-            .get_or_create_workspace("too-late")
+        // Sending only enqueues Shutdown. Wait for receiver closure to make
+        // this a post-shutdown probe instead of racing the actor's teardown.
+        tokio::time::timeout(std::time::Duration::from_secs(10), writer.inner.tx.closed())
             .await
-            .unwrap_err();
+            .expect("writer did not close after Shutdown");
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            writer.get_or_create_workspace("too-late"),
+        )
+        .await
+        .expect("closed writer command did not terminate")
+        .unwrap_err();
         assert!(
             matches!(err, StoreError::WriterClosed),
             "expected WriterClosed, got {err:?}"

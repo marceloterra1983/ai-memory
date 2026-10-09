@@ -10015,7 +10015,7 @@ pub struct DecayTombstone {
     pub path: PagePath,
 }
 
-fn row_to_decay_candidate(
+pub(crate) fn row_to_decay_candidate(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<StoreResult<DecayCandidate>> {
     let id_bytes: Vec<u8> = row.get(0)?;

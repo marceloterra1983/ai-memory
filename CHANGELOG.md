@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added the root-only local `dream` admin route and scoped thin CLI, with dry-run
+  by default and explicit apply, exact no-create allowlists, a globally bounded
+  native scheduler, conservative input limits, local semantic screening,
+  activity cancellation, all-source atomic CAS and verified premerge git
+  recovery. Reported source provenance and new heads requiring explicit scoped
+  embedding completion. Kept dream off by default and schema/version unchanged.
+  (local dream-safe-local patch; no upstream issue opened)
+
 ### Fixed
 - Scoped retrieval excludes the exact scoped project name from entity matches,
   preventing the scope label from adding an RRF vote to unrelated pages.

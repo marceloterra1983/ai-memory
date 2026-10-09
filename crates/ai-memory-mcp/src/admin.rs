@@ -635,6 +635,7 @@ pub fn admin_router_with_sweep_tuning(
         .route("/admin/backup", post(handle_backup))
         .route("/admin/export-okf", post(handle_export_okf))
         .route("/admin/bootstrap", post(handle_bootstrap))
+        .route("/admin/dream", post(crate::dream::handle_dream))
         .route("/admin/auto-improve", post(handle_auto_improve))
         .route(
             "/admin/auto-improve/report",
@@ -10455,6 +10456,68 @@ mod tests {
 
     fn admin_state_for_store(tmp: &TempDir, store: &Store, wiki: Wiki) -> AdminState {
         admin_state_for_store_with_llm(tmp, store, wiki, None)
+    }
+
+    #[tokio::test]
+    async fn dream_is_root_only_even_without_database_users() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let workspace = store
+            .writer
+            .get_or_create_workspace("fixture")
+            .await
+            .unwrap();
+        store
+            .writer
+            .get_or_create_project(workspace, "app", None)
+            .await
+            .unwrap();
+        let runtime = Arc::new(crate::dream::DreamRuntime::new(
+            store.reader.clone(),
+            wiki.clone(),
+            None,
+            DecayParams::default(),
+            0.0,
+            ai_memory_consolidate::DreamConfig {
+                embedding: Some(ai_memory_consolidate::EmbeddingCoord {
+                    provider: "synthetic".into(),
+                    model: "bag-of-words-v1".into(),
+                    dim: 64,
+                }),
+                ..ai_memory_consolidate::DreamConfig::default()
+            },
+            vec![crate::dream::DreamScope {
+                workspace: "fixture".into(),
+                project: "app".into(),
+            }],
+            ai_memory_consolidate::ActivityClock::default(),
+        ));
+        let router =
+            admin_router(admin_state_for_store(&tmp, &store, wiki)).layer(axum::Extension(runtime));
+        for (level, expected) in [
+            (
+                ai_memory_core::AuthLevel::Anonymous,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (ai_memory_core::AuthLevel::User, StatusCode::FORBIDDEN),
+            (ai_memory_core::AuthLevel::Root, StatusCode::OK),
+        ] {
+            let response = router
+                .clone()
+                .layer(axum::Extension(level))
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/admin/dream")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"workspace":"fixture","project":"app"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
     }
 
     fn admin_state_for_store_with_llm(

@@ -11,6 +11,7 @@
 pub mod actor;
 pub mod admin;
 pub mod auth;
+pub mod dream;
 pub mod human_auth;
 mod server;
 

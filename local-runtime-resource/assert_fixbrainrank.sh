@@ -25,7 +25,8 @@ if ! cargo test --locked -p ai-memory-store --lib "$FILTER" -- --exact "$@" >"$l
 fi
 
 grep -E "^test |test result" "$log"
-grep -q "1 passed; 0 failed" "$log" \
+grep -Fxq "test $FILTER ... ok" "$log" \
+    && grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
     || { echo "assert_fixbrainrank: expected exactly 1 passing test" >&2; exit 1; }
 
 echo "assert_fixbrainrank: ok (1 passed)"

@@ -57,6 +57,19 @@ async fn dream_cas_refuses_metadata_curation_of_survivor_or_loser_without_body_c
             "tags": ["preserve"], "abstract": "Synthetic abstract",
             "custom": {"nested": [1, true, null]}, "expires_at": "2099-01-01"
         });
+        // Equal TTLs admit the cluster, so stale metadata must reach CAS.
+        let other_path = if curated_path == "a.md" {
+            "b.md"
+        } else {
+            "a.md"
+        };
+        let other = wiki
+            .read_page(ws, proj, &PagePath::new(other_path).unwrap())
+            .unwrap();
+        let mut other_request = page(ws, proj, other_path, &other.body);
+        other_request.frontmatter = other.frontmatter;
+        other_request.frontmatter["expires_at"] = serde_json::json!("2099-01-01");
+        wiki.write_page(other_request).await.unwrap();
         wiki.write_page(original).await.unwrap();
         let sources = wiki
             .snapshot_dream_sources(
@@ -107,10 +120,16 @@ async fn dream_cas_refuses_metadata_curation_of_survivor_or_loser_without_body_c
             curated.head.eligibility_sha256,
             source.head.eligibility_sha256
         );
-        let drafts = vec![
-            page(ws, proj, "a.md", "synthetic reviewed merge\n"),
-            page(ws, proj, "b.md", "synthetic reviewed stub\n"),
-        ];
+        let full_copy = format!(
+            "{}\n\n{}",
+            current[0].markdown.body, current[1].markdown.body
+        );
+        let mut survivor = page(ws, proj, "a.md", &full_copy);
+        survivor.frontmatter = current[0].markdown.frontmatter.clone();
+        survivor.frontmatter["title"] = serde_json::json!("fact");
+        let mut loser = page(ws, proj, "b.md", "synthetic reviewed stub\n");
+        loser.frontmatter = current[1].markdown.frontmatter.clone();
+        let drafts = vec![survivor, loser];
         // First exercise the complete file guard. Then present current file
         // digests with stale SQL heads to independently exercise writer CAS and
         // rollback after files have been installed.

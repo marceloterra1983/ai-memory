@@ -27,8 +27,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="${MANIFEST:-/home/marce/.agents/tools/ai-memory/manifest.json}"
 OUT="${1:-/tmp/ai-memory-build-repro}"
 # The prebuilt ai-memory-integrate-lab:debian12-rust1.95 image can be supplied
-# here to skip the in-container rustup install; the default is the self-contained
-# debian:12 image the original resource used.
+# here; the script still installs its build prerequisites and pinned toolchain.
+# The default is the debian:12 image the original resource used.
 IMAGE="${AI_MEMORY_BUILD_IMAGE:-debian:12}"
 
 # --- read the manifest (expand `~` in local_checkout to the canonical path) ---
@@ -74,7 +74,8 @@ docker run --rm \
       exit 3
   fi
   grep -E "^test |test result" "$pos_log"
-  grep -q "1 passed; 0 failed" "$pos_log" \
+  grep -Fxq "test $FILTER ... ok" "$pos_log" \
+      && grep -Eq "^test result: ok\\. 1 passed; 0 failed;" "$pos_log" \
       || { echo "ERROR: expected exactly 1 passing test, got zero or more" >&2; exit 4; }
 
   echo "== negative (exclusion removed) =="
@@ -103,12 +104,18 @@ docker run --rm \
       exit 6
   fi
   grep -E "^test |test result" "$neg_log"
-  grep -q "FAILED. 0 passed; 1 failed" "$neg_log" \
+  grep -Fxq "test $FILTER ... FAILED" "$neg_log" \
+      && grep -Eq "^test result: FAILED\\. 0 passed; 1 failed;" "$neg_log" \
       || { echo "ERROR: negative was not 0 passed / 1 failed (compile error is not RED)" >&2; exit 7; }
   echo "ok: test fails without the exclusion patch (exit $neg_exit)"
 
   echo "== positive (restored) =="
-  run_test 2>&1 | grep -E "^test |test result"
+  restored_log="$(mktemp)"
+  run_test >"$restored_log" 2>&1
+  grep -E "^test |test result" "$restored_log"
+  grep -Fxq "test $FILTER ... ok" "$restored_log" \
+      && grep -Eq "^test result: ok\\. 1 passed; 0 failed;" "$restored_log" \
+      || { echo "ERROR: restored test was not the exact single passing case" >&2; exit 8; }
 '
 
 sha256sum "$OUT/target/release/ai-memory"

@@ -17,7 +17,7 @@ struct DreamRequest {
 /// Report IDs, digests and preservation metadata from one scoped run.
 ///
 /// # Errors
-/// Fails when the root-authenticated server refuses the scope or is unavailable.
+/// Fails when operational admin authorization or scope is refused, or the server is unavailable.
 pub async fn run(config: &Config, args: DreamArgs) -> Result<()> {
     if args.workspace.trim().is_empty() || args.project.trim().is_empty() {
         anyhow::bail!("DREAM requires explicit nonempty --workspace and --project");

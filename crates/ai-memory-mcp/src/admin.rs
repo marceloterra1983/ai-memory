@@ -7681,11 +7681,9 @@ fn curation_dry_run_default() -> bool {
 
 async fn handle_curate_relations(
     State(state): State<Arc<AdminState>>,
-    level_ext: Option<axum::Extension<ai_memory_core::AuthLevel>>,
     actor_ext: Option<axum::Extension<ai_memory_core::ActorContext>>,
     Json(req): Json<CurateRelationsAdminRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    require_root(level_ext.map_or(ai_memory_core::AuthLevel::Anonymous, |v| v.0))?;
     let (ws, proj) = lookup_ws_proj_no_create(&state, &req.workspace, &req.project).await?;
     let path = PagePath::new(req.path).map_err(|_| {
         (
@@ -10508,7 +10506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dream_is_root_only_even_without_database_users() {
+    async fn dream_bootstrap_uses_anonymous_identity_through_real_admin_auth() {
         let tmp = TempDir::new().unwrap();
         let store = Store::open(tmp.path()).unwrap();
         let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
@@ -10542,31 +10540,51 @@ mod tests {
             }],
             ai_memory_consolidate::ActivityClock::default(),
         ));
-        let router =
-            admin_router(admin_state_for_store(&tmp, &store, wiki)).layer(axum::Extension(runtime));
-        for (level, expected) in [
-            (
-                ai_memory_core::AuthLevel::Anonymous,
-                StatusCode::UNAUTHORIZED,
-            ),
-            (ai_memory_core::AuthLevel::User, StatusCode::FORBIDDEN),
-            (ai_memory_core::AuthLevel::Root, StatusCode::OK),
-        ] {
-            let response = router
-                .clone()
-                .layer(axum::Extension(level))
-                .oneshot(
-                    axum::http::Request::builder()
-                        .method("POST")
-                        .uri("/admin/dream")
-                        .header("content-type", "application/json")
-                        .body(Body::from(r#"{"workspace":"fixture","project":"app"}"#))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), expected);
-        }
+        let auth = Arc::new(crate::auth::AuthState::new(None));
+        let router = admin_router(admin_state_for_store(&tmp, &store, wiki))
+            .route(
+                "/auth-level",
+                axum::routing::get(
+                    |level: axum::Extension<ai_memory_core::AuthLevel>| async move {
+                        assert_eq!(level.0, ai_memory_core::AuthLevel::Anonymous);
+                        StatusCode::OK
+                    },
+                ),
+            )
+            .layer(axum::Extension(runtime))
+            .layer(axum::middleware::from_fn_with_state(
+                auth,
+                crate::human_auth::require_dual_auth,
+            ));
+        let probe = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/auth-level")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(probe.status(), StatusCode::OK);
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/dream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"workspace":"fixture","project":"app"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report["dry_run"], true);
+        assert_eq!(report["scopes"][0]["report"]["inference_requests"], 0);
     }
 
     fn admin_state_for_store_with_llm(

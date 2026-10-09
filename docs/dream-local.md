@@ -90,10 +90,19 @@ AI_MEMORY_SERVER_URL=http://127.0.0.1:49474 \
   dream --workspace default --project dev --apply
 ```
 
-`POST /admin/dream` requires root authorization even without database users.
-An unauthenticated single-operator server assigns its normal local-root identity
-at the HTTP boundary. On authenticated installations use a private curl header
-file containing the laboratory root Authorization header; never print it.
+`POST /admin/dream` and `POST /admin/curate-relations` follow the existing
+operational admin policy: Root when the installation distinguishes operators;
+the existing local bootstrap policy when no authority is configured. A no-auth
+single-operator request stays `AuthLevel::Anonymous`; it is not promoted to Root.
+The admin router checks database users on every request, so the first committed
+user closes bootstrap access without a restart. A configured trusted identity
+proxy requires Root even when the users table is empty; database errors fail
+closed. Client actor headers alone never confer Root.
+
+On authenticated installations use a private curl header file containing the
+laboratory root Authorization header; never print it. For a local bootstrap
+installation with no authority, omit that header-file option. No new global
+bearer is needed for these operational commands.
 
 ```bash
 curl --fail-with-body --silent --show-error \

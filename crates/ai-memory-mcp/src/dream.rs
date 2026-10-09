@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ai_memory_consolidate::{ActivityClock, DreamCancel, DreamConfig, DreamReport, run_dream_pass};
-use ai_memory_core::{AuthLevel, Capability};
 use ai_memory_llm::LlmProvider;
 use ai_memory_store::{DecayParams, ReaderPool, lookup_existing_scope};
 use ai_memory_wiki::Wiki;
@@ -300,7 +299,8 @@ impl Drop for RunCancellation<'_> {
     }
 }
 
-/// Root-only request. `apply` is the only way to admit inference and writes.
+/// Operational admin request; the router enforces the live operator policy.
+/// `apply` is the only way to admit inference and writes.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DreamRequest {
@@ -311,19 +311,9 @@ pub(crate) struct DreamRequest {
 }
 
 pub(crate) async fn handle_dream(
-    level: Option<Extension<AuthLevel>>,
     runtime: Option<Extension<Arc<DreamRuntime>>>,
     Json(request): Json<DreamRequest>,
 ) -> Response {
-    let level = level.map_or(AuthLevel::Anonymous, |v| v.0);
-    if let Err(error) = level.authorize(Capability::Admin, true) {
-        let status = if error.is_authentication_required() {
-            StatusCode::UNAUTHORIZED
-        } else {
-            StatusCode::FORBIDDEN
-        };
-        return (status, Json(serde_json::json!({"error": error.message()}))).into_response();
-    }
     let Some(Extension(runtime)) = runtime else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -799,12 +789,7 @@ mod tests {
                 apply: true,
             };
             let running = tokio::spawn(async move {
-                handle_dream(
-                    Some(Extension(AuthLevel::Root)),
-                    Some(Extension(running_driver)),
-                    Json(request),
-                )
-                .await
+                handle_dream(Some(Extension(running_driver)), Json(request)).await
             });
             tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
                 .await

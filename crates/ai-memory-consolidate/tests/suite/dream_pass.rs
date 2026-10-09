@@ -39,7 +39,7 @@ const DAY_US: i64 = 86_400_000_000;
 const COLD_DAYS: i64 = 400;
 const DIM: u32 = 64;
 
-/// Fake provider: returns a merged page whose body echoes the whole prompt (so
+/// Fake provider: returns a merged page whose body copies the complete sources (so
 /// the survivor demonstrably keeps every source fact). Records that it was
 /// handed a schema (invariant #7), counts calls, and — if given a cancel handle
 /// — flips it on its FIRST call to simulate the operator returning mid-pass.
@@ -149,9 +149,21 @@ impl LlmProvider for FakeMergeLlm {
                 .first()
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
+            let bodies: Vec<_> = prompt
+                .split("### Page: ")
+                .skip(1)
+                .map(|page| {
+                    page.split_once("\n\n")
+                        .unwrap()
+                        .1
+                        .strip_suffix("\n\n")
+                        .unwrap()
+                })
+                .collect();
+            let title: String = bodies[0].chars().take(40).collect();
             Ok(serde_json::json!({
-                "title": "Dream Merge",
-                "body_markdown": format!("Dream-merged coherent page.\n\n{prompt}"),
+                "title": title,
+                "body_markdown": bodies.join("\n\n"),
             }))
         })
     }
@@ -769,6 +781,96 @@ async fn invalid_empty_and_oversized_outputs_never_apply() {
         assert_eq!(report.skipped, 1);
         assert_eq!(superseded_row_count(&fx), 0);
     }
+}
+
+/// Literal preservation belongs to code even if the semantic double approves.
+/// Removing the driver check must make every destructive mutant apply.
+#[tokio::test]
+async fn literal_loss_invention_and_rebinding_refuse_before_apply_with_copy_control() {
+    let a =
+        format!("{DUP_A} Em 2026-01-10: 7 ciclos, 2 bar. Execute `cargo t --locked`. ID: amber-A.");
+    let b = format!("{DUP_B} Em 2026-02-10: 9 ciclos, 3 bar. Caminho: /tmp/aurora. ID: amber-B.");
+    let full = format!("{a}\n\n{b}");
+    let mutants = [
+        ("lost_date", full.replace("2026-01-10", "janeiro")),
+        ("lost_number", full.replace("7 ciclos", "ciclos")),
+        (
+            "invented_date",
+            format!("{full}\nEm 2026-03-10: revisão adicional."),
+        ),
+        ("invented_number", format!("{full}\nForam 8 ciclos.")),
+        (
+            "rebound_numbers",
+            full.replace("7 ciclos, 2 bar", "2 ciclos, 7 bar"),
+        ),
+        (
+            "rebound_dates",
+            full.replace("Em 2026-01-10: 7", "Em 2026-02-10: 7"),
+        ),
+        (
+            "changed_command",
+            full.replace("cargo t --locked", "cargo t --offline"),
+        ),
+        ("changed_path", full.replace("/tmp/aurora", "/tmp/pomar")),
+        ("changed_identifier", full.replace("amber-A", "amber-C")),
+        ("title_only_date", full.replace("2026-01-10", "janeiro")),
+        ("source_adjacency", full.replace("\n\n", "")),
+        ("copy_control", full),
+    ];
+    let mut violations = Vec::new();
+    for (name, body) in mutants {
+        let fx = seed_fixture(true).await;
+        write(&fx, "sessions/a.md", &a).await;
+        write(&fx, "sessions/b.md", &b).await;
+        // The existing adaptive elbow needs an outlier to form a cluster.
+        write(&fx, "sessions/far.md", K8S_A).await;
+        for path in ["sessions/a.md", "sessions/b.md", "sessions/far.md"] {
+            backdate_latest(&fx, path, COLD_DAYS);
+        }
+        let mut llm = FakeMergeLlm::new();
+        llm.response_override = Some(serde_json::json!({
+            "title": if name == "title_only_date" { "2026-01-10" } else { "Investigated the flaky retention sweep test failure" },
+            "body_markdown": body,
+        }));
+        let report = run_dream_pass(
+            &fx.store.reader,
+            &fx.wiki,
+            Some(&llm),
+            fx.ws,
+            fx.proj,
+            &DecayParams::default(),
+            0.0,
+            &dream_on(),
+            &DreamCancel::new(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.clusters_selected, 1,
+            "{name}: exercise the merge path"
+        );
+        assert_eq!(llm.calls.load(Ordering::SeqCst), 1, "{name}");
+        if name == "copy_control" {
+            assert_eq!(report.clusters_merged, 1, "{name}");
+            assert!(
+                latest_body(&fx, &report.merges[0].survivor)
+                    .contains("2026-01-10: 7 ciclos, 2 bar")
+            );
+        } else if report.clusters_merged != 0
+            || superseded_row_count(&fx) != 0
+            || latest_body(&fx, "sessions/a.md") != a
+            || latest_body(&fx, "sessions/b.md") != b
+            || report.merges[0].reason != "draft_literals_refused"
+            || report.inference_requests != 2
+        {
+            violations.push(name);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "literal mutants escaped refusal: {violations:?}"
+    );
 }
 
 #[tokio::test]

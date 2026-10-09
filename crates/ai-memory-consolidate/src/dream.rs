@@ -792,6 +792,17 @@ async fn merge_one_cluster(
         report.skipped += 1;
         return;
     }
+    if crate::dream_semantics::validate_draft_literals(
+        &sources,
+        &merged.body_markdown,
+        Some(&merged.title),
+    )
+    .is_err()
+    {
+        merge.reason = "draft_literals_refused".into();
+        report.skipped += 1;
+        return;
+    }
     report.inference_requests += 1;
     let timeout =
         DREAM_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now()));

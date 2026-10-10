@@ -603,6 +603,7 @@ class IngressCase(unittest.TestCase):
         self.assertNotIn("PENDING", data.decode())
         self.backend.store.sleep_paths["/slow"] = 1.0
         outcomes = []
+        entered = self.relay.handlers_entered
 
         def hit():
             outcomes.append(request(self.relay.url, "GET", "/slow", timeout=3))
@@ -614,6 +615,7 @@ class IngressCase(unittest.TestCase):
             thread.join(4)
         codes = sorted(item[0] for item in outcomes)
         self.assertIn(503, codes)
+        self.assertEqual(self.relay.handlers_entered, entered + 1)
         self.backend.store.sleep_paths["/slow"] = 2.0
         started = time.monotonic()
         status, _, _data = request(self.relay.url, "GET", "/slow", timeout=3)

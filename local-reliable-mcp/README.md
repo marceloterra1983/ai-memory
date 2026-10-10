@@ -24,13 +24,15 @@ Escopo ausente, parcial ou diferente de `workspace`+`project` juntos ou
 `workspace=default` e `project=_global`, porque `memory_read_page` não
 tem campo `scope`.
 
-Jev não se aplica. O estado compara bytes do corpo, metadados e UUID.
-Não há classificação de texto livre nem chamada de modelo.
+Jev não se aplica: a decisão é igualdade de código tipado, bytes do corpo,
+metadados e UUID. Ausência de página é `error.data.code == "page_not_found"`;
+ausência de escopo é `error.data.code == "scope_not_found"`. Uma mensagem que
+só contém «not found» não é ausência. Não há chamada de modelo.
 
 ## Comandos
 
 ```text
-reliable-mcp serve --listen 127.0.0.1:49374 --backend http://127.0.0.1:49376
+reliable-mcp serve --listen 127.0.0.1:49374 --backend http://127.0.0.1:49376 --config CONFIG
 reliable-mcp worker --backend http://127.0.0.1:49376
 reliable-mcp ready --backend http://127.0.0.1:49376 --workspace NOME --project NOME
 reliable-mcp status --outbox CAMINHO

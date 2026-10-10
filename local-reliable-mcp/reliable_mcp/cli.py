@@ -26,6 +26,7 @@ def main(argv=None) -> int:
     serve.add_argument("--backend", default="http://127.0.0.1:49376")
     serve.add_argument("--outbox", default=None)
     serve.add_argument("--max-body", type=int, default=10 * 1024 * 1024)
+    serve.add_argument("--config", default=None)
     serve.set_defaults(func=_serve)
 
     worker = sub.add_parser("worker")
@@ -93,12 +94,15 @@ def _serve(args) -> int:
     assert_not_root()
     from reliable_mcp.relay import Relay
 
+    # Config is validated inside Relay before the outbox directory exists.
+    outbox = Path(args.outbox) if args.outbox else DEFAULT_OUTBOX
     relay = Relay(
         listen=args.listen,
         backend=args.backend,
-        outbox=_box(args.outbox),
+        outbox=outbox,
         auto_drain_seconds=0,
         max_body=args.max_body,
+        config_path=args.config,
     )
     relay.start()
     print(f"listen {relay.url}", flush=True)

@@ -1,25 +1,47 @@
---- a/install-ai-memory.sh	2026-10-09 23:01:58.866728590 -0300
-+++ b/install-ai-memory.sh	2026-10-09 23:01:58.866771141 -0300
-@@ -153,11 +153,17 @@
+--- a/install-ai-memory.sh	2026-10-09 23:35:40.149261445 -0300
++++ b/install-ai-memory.sh	2026-10-09 23:35:40.149295660 -0300
+@@ -153,9 +153,42 @@
  systemctl --user enable --now ai-memory.service
  have loginctl && loginctl enable-linger "$USER" >/dev/null 2>&1 || true
  ready=0
--for _ in $(seq 1 20); do
--  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "$SERVER_ORIGIN/handoff" || true)"
--  [[ "$code" =~ ^[1-5][0-9][0-9]$ ]] && { ready=1; break; }
--  sleep 0.4
--done
 +RELIABLE_MCP="${RELIABLE_MCP:-$HOME/.agents/tools/ai-memory/reliable-mcp/reliable-mcp}"
 +BACKEND_ORIGIN="${AI_MEMORY_BACKEND_URL:-http://127.0.0.1:49376}"
-+if [[ -n "${AI_MEMORY_READY_WORKSPACE:-}" && -n "${AI_MEMORY_READY_PROJECT:-}" ]]; then
-+  for _ in $(seq 1 20); do
-+    if "$RELIABLE_MCP" ready --backend "$BACKEND_ORIGIN" --workspace "$AI_MEMORY_READY_WORKSPACE" --project "$AI_MEMORY_READY_PROJECT"; then
-+      ready=1
-+      break
-+    fi
-+    sleep 0.4
-+  done
++if [[ -n "${AI_MEMORY_READY_WORKSPACE+x}" || -n "${AI_MEMORY_READY_PROJECT+x}" ]]; then
++  READY_WS="${AI_MEMORY_READY_WORKSPACE-}"
++  READY_PR="${AI_MEMORY_READY_PROJECT-}"
++  if [[ -z "${READY_WS//[[:space:]]/}" || -z "${READY_PR//[[:space:]]/}" ]]; then
++    die "override de prontidão incompleto: AI_MEMORY_READY_WORKSPACE e AI_MEMORY_READY_PROJECT têm de vir juntos e não vazios"
++  fi
++else
++  read_pair="$(python3 - "$MANIFEST" <<'PY'
++import json, sys
++path = sys.argv[1]
++try:
++    data = json.load(open(path, encoding="utf-8"))
++except Exception as exc:
++    sys.exit("manifest ilegível: %s" % exc)
++scope = data.get("service") if isinstance(data, dict) else None
++scope = scope.get("readiness_scope") if isinstance(scope, dict) else None
++if not isinstance(scope, dict):
++    sys.exit("service.readiness_scope ausente no manifest")
++ws, pr = scope.get("workspace"), scope.get("project")
++if not isinstance(ws, str) or not ws.strip() or not isinstance(pr, str) or not pr.strip():
++    sys.exit("service.readiness_scope precisa de workspace e project não vazios")
++print(ws.strip())
++print(pr.strip())
++PY
++)" || die "prontidão sem escopo: registre service.readiness_scope no manifest (workspace e project) ou defina o override completo AI_MEMORY_READY_WORKSPACE e AI_MEMORY_READY_PROJECT"
++  READY_WS="$(printf '%s\n' "$read_pair" | sed -n '1p')"
++  READY_PR="$(printf '%s\n' "$read_pair" | sed -n '2p')"
++  [[ -n "${READY_WS}" && -n "${READY_PR}" ]] || die "prontidão sem escopo: service.readiness_scope não tem workspace e project"
 +fi
+ for _ in $(seq 1 20); do
+-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "$SERVER_ORIGIN/handoff" || true)"
+-  [[ "$code" =~ ^[1-5][0-9][0-9]$ ]] && { ready=1; break; }
++  if "$RELIABLE_MCP" ready --backend "$BACKEND_ORIGIN" --workspace "$READY_WS" --project "$READY_PR"; then
++    ready=1
++    break
++  fi
+   sleep 0.4
+ done
  [[ "$ready" -eq 1 ]] || { systemctl --user status --no-pager ai-memory.service || true; die "servidor não respondeu"; }
- ok "servidor em $SERVER_ORIGIN"
- 

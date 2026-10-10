@@ -21,8 +21,11 @@ def _tool(rpc_id, payload, is_error=False):
     }
 
 
-def _rpc_error(rpc_id, code, message):
-    return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": message}}
+def _rpc_error(rpc_id, code, message, data=None):
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": rpc_id, "error": error}
 
 
 class Store:
@@ -48,6 +51,9 @@ class Store:
         self.durable_before_write = False
         self.seen_bad_cas = False
         self.redirects = {}
+        self.require_authorization = False
+        self.accepted_authorization = None
+        self.read_failure = None
 
     def force_put(self, workspace, project, path, body, **meta):
         title = meta.get("title") or _title(body, path)
@@ -199,6 +205,9 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             )
             return
+        if method in {"tools/list", "tools/call"} and not self._auth_ok():
+            self._send(401, json.dumps(_rpc_error(rpc_id, -32001, "unauthorized")))
+            return
         if method == "tools/list":
             self._send(200, json.dumps({"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": self._tools()}}))
             return
@@ -221,6 +230,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(_tool(rpc_id, {"hits": ["QUERY-HIT"]})))
             return
         self._send(200, json.dumps(_rpc_error(rpc_id, -32602, "unknown tool")))
+
+    def _auth_ok(self) -> bool:
+        if not self.store.require_authorization:
+            return True
+        accepted = self.store.accepted_authorization
+        if not isinstance(accepted, str) or not accepted:
+            return False
+        return self.headers.get("Authorization") == accepted
 
     def _tools(self):
         props = {
@@ -331,8 +348,26 @@ class Handler(BaseHTTPRequestHandler):
         if pending_fail:
             self._send(500, b"read failed")
             return
+        failure = self.store.read_failure
+        if failure is not None:
+            code, message, data = failure
+            self._send(200, json.dumps(_rpc_error(rpc_id, code, message, data)))
+            return
         workspace, project = self._scope_key(args)
         path = args.get("path")
+        if (workspace, project) not in self.store.known_scopes:
+            self._send(
+                200,
+                json.dumps(
+                    _rpc_error(
+                        rpc_id,
+                        -32602,
+                        f"project '{project}' not found in workspace '{workspace}'",
+                        {"code": "scope_not_found"},
+                    )
+                ),
+            )
+            return
         with self.store.lock:
             page = self.store.pages.get((workspace, project, path))
         if page is None:
@@ -341,8 +376,9 @@ class Handler(BaseHTTPRequestHandler):
                 json.dumps(
                     _rpc_error(
                         rpc_id,
-                        -32602,
+                        -32603,
                         f"page {path} not found in resolved scope {workspace}/{project}",
+                        {"code": "page_not_found"},
                     )
                 ),
             )

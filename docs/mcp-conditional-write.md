@@ -42,7 +42,8 @@ is the live head, or null only when no live row exists.
 The disk check runs while an exclusive `flock` is held, and it runs before
 replace. The writer transaction then rechecks the SQL head. The flock
 serializes the snapshot, the install, that transaction, and rollback for the
-path across `Store` handles and processes. It is acquired on a blocking
+path across `Store` handles and processes for page-writing operations;
+delete/evict operations do not participate in this lock. It is acquired on a blocking
 thread, after the mutation lock and the in-process per-path mutex, in the
 same sorted order a batch uses. The lock file is
 `data_dir/page-locks/<sha256>`, outside the git wiki, because the page file

@@ -2,9 +2,9 @@
 
 > Provider configuration for consolidation and embeddings. Moved verbatim from the README front page.
 
-ai-memory runs without an LLM: hooks still capture sessions, search uses
-FTS5 + declared entities + graph neighbors, and summaries fall back to
-rule-based output. Add an LLM provider
+ai-memory runs without an LLM: hooks still capture sessions, search combines
+FTS5, declared entities, and graph neighbors with local vectors when the
+default embedder loads, and summaries fall back to rule-based output. Add an LLM provider
 when you want LLM consolidation (on PreCompact, on demand via
 `memory_consolidate`, or opt-in at session end with
 `AI_MEMORY_CONSOLIDATE_ON_SESSION_END`), richer linting, and bootstrap.
@@ -232,7 +232,7 @@ alone does not redirect embeddings — set `AI_MEMORY_EMBEDDING_BASE_URL` too.
   that ai-memory will treat as first-class evidence on subsequent
   reads. This is a known cost of running a smaller / cheaper model on
   the consolidation prompt. Spot-check
-  `<data_dir>/wiki/<workspace>/<project>/decisions/` during the first
+  `<data_dir>/wiki/<workspace-uuid>/<project-uuid>/decisions/` during the first
   week on a new model for pages you do not recognize; if any appear,
   either raise the provider tier for consolidation only (keep the
   cheaper model for retrieval reranking) or unset
@@ -285,10 +285,11 @@ also set `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` on the server.
 > Haiku/mini-class model is plenty and is much easier on subscription rate
 > limits. Save the high-effort thinking models for your coding agent. Per backend:
 > - `anthropic-oauth`: set `claude-haiku-4-5`.
-> - `openai-oauth` / `codex`: leave the provider default (`gpt-5.5`). The
->   Codex/ChatGPT backend only accepts a small server-defined set of model ids
->   and rejects others (e.g. `gpt-5-mini`) with a deterministic 400, so do not
->   override the model here.
+> - `openai-oauth`: the configured default is `gpt-5.5`.
+> - `codex`: the configured default is `gpt-5.6-luna`.
+>   These backends accept a server-defined set of model ids; unsupported ids
+>   can fail with a deterministic 400. Keep the respective default unless
+>   you have verified another id with that backend.
 > - `copilot`: a mini-class id such as `gpt-5-mini` may work, but Copilot's
 >   accepted model set is unverified — check before relying on it, and fall back
 >   to the default if the endpoint rejects your choice.
@@ -340,10 +341,12 @@ preserves the normal order. `global=true` and supplemental global-preference
 hits keep their existing non-RRF ranking. Concurrent provider calls are capped
 at four; saturated queries keep their local ranking without waiting.
 
-Embeddings are optional and separate from the LLM provider. Set
-`AI_MEMORY_EMBEDDING_PROVIDER=openai`, `voyage`, `google`/`gemini`,
-`openai-compat`, or `copilot` when you want vector retrieval in addition to
-FTS5 + entity + graph-neighbor retrieval. `openai-compat` targets self-hosted
+Embeddings are separate from the LLM provider. An unset embedding provider
+selects in-process `local` embeddings on a best-effort basis; if the model
+cannot be fetched or loaded, search keeps its FTS5, entity, and graph-neighbor
+streams. Set `AI_MEMORY_EMBEDDING_PROVIDER=none` to disable vectors, or choose
+`openai`, `voyage`, `google`/`gemini`, `openai-compat`, or `copilot` to replace
+the local default. `openai-compat` targets self-hosted
 engines (Ollama, LM Studio, vLLM): it needs no API key and requires explicit
 `AI_MEMORY_EMBEDDING_BASE_URL`, `AI_MEMORY_EMBEDDING_MODEL`, and
 `AI_MEMORY_EMBEDDING_DIM`. The optional `EMBEDDING_API_KEY` credentials the

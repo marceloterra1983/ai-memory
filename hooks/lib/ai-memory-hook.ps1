@@ -43,7 +43,7 @@ function Resolve-AiMemoryCwd {
 }
 
 function Get-AiMemoryMarkerToml {
-    param([string] $Cwd)
+    param([string] $Cwd, [switch] $Settings)
     if (-not $Cwd) { return $null }
     $dir = $Cwd
     $userHome = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
@@ -72,7 +72,10 @@ function Get-AiMemoryMarkerToml {
     }
     while ($dir -and (Test-Path $dir)) {
         $candidate = Join-Path $dir ".ai-memory.toml"
-        if (Test-Path $candidate -PathType Leaf) { return $candidate }
+        if ((Test-Path $candidate -PathType Leaf) -and
+            (-not $Settings -or (Test-AiMemoryMarkerDeclaresSettings -File $candidate))) {
+            return $candidate
+        }
         if ($boundary -and $dir -eq $boundary) { return $null }
         $parent = Split-Path $dir -Parent
         if (-not $parent -or $parent -eq $dir) { return $null }
@@ -141,6 +144,25 @@ function Get-AiMemoryTomlFlag {
     return $null
 }
 
+# Capture-only markers keep their local exclusions but do not replace an
+# ancestor's scope/briefing settings. Mirror the native and POSIX settings walk.
+function Test-AiMemoryMarkerDeclaresSettings {
+    param([string] $File)
+    foreach ($Key in @("workspace", "project", "project_strategy", "drop_subagent_captures", "identity")) {
+        if (Get-AiMemoryTomlKey -File $File -Key $Key) { return $true }
+    }
+    try {
+        $Text = [IO.File]::ReadAllText($File)
+    } catch {
+        return $true
+    }
+    if ([regex]::IsMatch($Text, '(?m)^[\s﻿]*server\s*=')) { return $true }
+    foreach ($Key in @("default_global", "inject_on_session_start", "max_chars")) {
+        if (Get-AiMemoryTomlFlag -File $File -Key $Key) { return $true }
+    }
+    return $false
+}
+
 function Test-AiMemoryTruthy {
     param([string] $Value)
     if (-not $Value) { return $false }
@@ -156,7 +178,7 @@ function Test-AiMemoryTruthy {
 function Get-AiMemoryBriefingQuery {
     param([string] $Cwd)
     if (-not $Cwd) { return "" }
-    $marker = Get-AiMemoryMarkerToml -Cwd $Cwd
+    $marker = Get-AiMemoryMarkerToml -Cwd $Cwd -Settings
     if (-not $marker) { return "" }
     $briefing = Get-AiMemoryTomlFlag -File $marker -Key "inject_on_session_start"
     if (-not (Test-AiMemoryTruthy -Value $briefing)) { return "" }
@@ -302,7 +324,7 @@ function Get-AiMemoryMarkerQuery {
     # latter may yield to session-sticky attribution (#394).
     $projSrc = $null
     $explicitIdentity = $null
-    $marker = Get-AiMemoryMarkerToml -Cwd $Cwd
+    $marker = Get-AiMemoryMarkerToml -Cwd $Cwd -Settings
     if ($marker) {
         $ws = Get-AiMemoryTomlKey -File $marker -Key "workspace"
         $proj = Get-AiMemoryTomlKey -File $marker -Key "project"

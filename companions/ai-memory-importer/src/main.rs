@@ -540,8 +540,20 @@ fn plan_external_conversation(
     }
     let bytes = fs::read(file).with_context(|| format!("read {}", file.display()))?;
     let source_sha256 = sha256_hex(&bytes);
-    let mut envelope: ConversationEnvelope =
-        serde_json::from_slice(&bytes).context("parse generic conversation JSON")?;
+    let mut envelope: ConversationEnvelope = serde_json::from_slice(&bytes).map_err(|error| {
+        // Schema diagnostics can quote source values before credential redaction.
+        anyhow!(
+            "parse generic conversation JSON: {} error at line {}, column {}",
+            match error.classify() {
+                serde_json::error::Category::Io => "io",
+                serde_json::error::Category::Syntax => "syntax",
+                serde_json::error::Category::Data => "schema",
+                serde_json::error::Category::Eof => "truncated input",
+            },
+            error.line(),
+            error.column()
+        )
+    })?;
 
     envelope.project = validate_label(&envelope.project, "project", 128)?.to_owned();
     envelope.source = validate_source_name(&envelope.source)?.to_owned();
@@ -1707,6 +1719,34 @@ mod tests {
         assert!(!serialized.contains(secret));
         assert!(!serialized.contains("abcdefghijklmnop"));
         assert!(serialized.contains("REDACTED"));
+    }
+
+    #[test]
+    fn malformed_conversation_errors_do_not_echo_source_values() {
+        let td = tempdir().unwrap();
+        let marker = "synthetic-private-conversation-value";
+        let malformed = [
+            serde_json::json!({
+                "project": "p", "source": "chatgpt", "session_id": "s",
+                "messages": [{"role": marker, "content": "fixture"}]
+            }),
+            serde_json::json!({
+                "project": "p", "source": "chatgpt", "session_id": "s",
+                "messages": marker
+            }),
+        ];
+        for input in malformed {
+            let file = write_conversation(td.path(), input);
+            let error = plan_external_conversation(&file, "w", DEFAULT_SERVER_URL).unwrap_err();
+            let diagnostic = format!("{error:#}");
+            assert!(diagnostic.contains("parse generic conversation JSON"));
+            assert!(
+                !diagnostic.contains(marker),
+                "schema errors must not quote private source values: {diagnostic}"
+            );
+        }
+        let file = write_conversation(td.path(), sample_conversation());
+        assert!(plan_external_conversation(&file, "w", DEFAULT_SERVER_URL).is_ok());
     }
 
     #[tokio::test]

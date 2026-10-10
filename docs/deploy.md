@@ -223,7 +223,7 @@ data/
 ├── raw/    # immutable session log archive
 ├── db/     # memory.sqlite (FTS5 + entities + page_embeddings)
 ├── logs/   # daily rolling tracing
-└── models/ # reserved for future local embedders
+└── models/ # local embedding model cache
 ```
 
 For point-in-time consistency:
@@ -272,7 +272,7 @@ share it, and unscoped **writes** resolve through it too. See
 Every write goes through a single writer actor — the right design for SQLite,
 and the obvious question it raises is when that becomes the ceiling. Measured
 rather than estimated, with
-`cargo test -p ai-memory-store --test writer_throughput -- --ignored --nocapture`:
+`cargo test -p ai-memory-store --lib integration::stress_writer_throughput::writer_throughput_under_concurrent_load -- --ignored --nocapture`:
 
 | concurrent writers | throughput | mean latency |
 |---|---|---|
@@ -378,17 +378,24 @@ a guarantee that content is unrecoverable. See
 
 ## Rolling back
 
+Keep the previous release's immutable image reference before each deploy.
+Set `OLD_IMAGE` to that repository and digest, and make sure `IMAGE` matches
+`services.ai-memory.image` in the deployed Compose file.
+
 ```bash
-ssh "$SERVER" "cd $DEPLOY_DIR && \
-               docker tag $IMAGE $IMAGE-rollback && \
-               docker pull $IMAGE@sha256:<old-digest>"
-ssh "$SERVER" "cd $DEPLOY_DIR && docker compose up -d"
+OLD_IMAGE="registry.example.com/owner/ai-memory@sha256:<old-digest>"
+ssh "$SERVER" "cd \"$DEPLOY_DIR\" && \
+               docker pull \"$OLD_IMAGE\" && \
+               docker tag \"$IMAGE\" \"$IMAGE-rollback\" && \
+               docker tag \"$OLD_IMAGE\" \"$IMAGE\" && \
+               docker compose up -d --pull never --force-recreate ai-memory"
 ```
 
-The simplest rollback is to bring back an older image by digest. We
-don't ship a `bin/rollback` because the right way is to keep the
-prior image tag handy before each deploy (Docker Hub keeps every
-push by digest for free).
+Pulling a digest alone does not change the tag Compose uses. Retagging it as
+`IMAGE` selects the older image; `--pull never` keeps Compose from replacing
+that local tag with the registry's current image. This restores the executable,
+not wiki or database state; use the [backup/restore workflow](backup.md) when
+state must also be recovered.
 
 ## Watching logs
 

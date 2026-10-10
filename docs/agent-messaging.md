@@ -10,8 +10,8 @@ about B (wasted tokens, polluted memory). Instead Kimi writes a self-contained
 request and drops it into B's inbox through ai-memory; later, in B, you tell
 Claude to check its inbox, it pops the message, and works from it.
 
-This is the one place ai-memory deliberately crosses its per-project isolation
-boundary. The crossing is explicit and bidirectionally scoped: a project only
+Messaging explicitly crosses project boundaries; cross-project retrieval is
+also available separately. Message reads remain bidirectionally scoped: a project only
 ever sees mail addressed **to** it (its inbox) or sent **from** it (its outbox).
 
 ## The model
@@ -120,9 +120,9 @@ each message records who sent it for audit.
 
 ## On-start "hot context" and the inbox notice
 
-ai-memory already gives a resuming agent a hot start: every agent's SessionStart
-hook (or, for clients that discard SessionStart output like Kimi, its first
-user-prompt hook) fetches `GET /handoff`, which returns any pending single-use
+For agents whose hook output can inject context, ai-memory gives a resuming
+agent a hot start: its SessionStart hook, Kimi's user-prompt hook, or Grok's
+first PostToolUse fetches `GET /handoff`, which returns any pending single-use
 **handoff** plus — when the project's `.ai-memory.toml` opts in with
 `[briefing] inject_on_session_start = true` — a compiled **project brief** of
 pinned / `_rules/` / `_slots/` pages and recent-page pointers. That block is

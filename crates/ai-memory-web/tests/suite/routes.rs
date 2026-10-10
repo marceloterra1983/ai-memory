@@ -2606,6 +2606,141 @@ async fn api_responses_set_cache_control_private() {
 }
 
 #[tokio::test]
+async fn grant_scoped_api_cache_revalidates_credentials_and_revocation() {
+    use ai_memory_core::{AuthorizedViewer, NewUser, UserRole};
+    use ai_memory_store::GrantLevel;
+
+    let (_tmp, store, wiki) = setup().await;
+    store
+        .writer
+        .set_new_project_mode(ai_memory_store::AccessMode::Restricted)
+        .await
+        .unwrap();
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let project = store
+        .writer
+        .get_or_create_project(ws, "client", None)
+        .await
+        .unwrap();
+    wiki.write_page(wiki_req(
+        ws,
+        project,
+        "private.md",
+        "# Private\n\nSynthetic confidential note.",
+    ))
+    .await
+    .unwrap();
+    let alice = store
+        .writer
+        .create_human_user(
+            NewUser {
+                username: "alice".into(),
+                name: None,
+                email: None,
+            },
+            UserRole::User,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let bob = store
+        .writer
+        .create_human_user(
+            NewUser {
+                username: "bob".into(),
+                name: None,
+                email: None,
+            },
+            UserRole::User,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    store
+        .writer
+        .grant_memory(alice, project, GrantLevel::Read, None)
+        .await
+        .unwrap();
+    let app = api_router(store.reader.clone(), wiki.clone());
+    let page = "/workspaces/default/projects/client/pages/private.md";
+    let request = |uri, user, etag: Option<axum::http::HeaderValue>| {
+        let mut req = Request::builder()
+            .uri(uri)
+            .extension(AuthorizedViewer(user));
+        if let Some(etag) = etag {
+            req = req.header(header::IF_NONE_MATCH, etag);
+        }
+        req.body(Body::empty()).unwrap()
+    };
+    let first = app
+        .clone()
+        .oneshot(request(page, alice, None))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = first.headers()[header::ETAG].clone();
+
+    // Even a matching validator from Alice cannot authorize Bob's read.
+    let denied = app
+        .clone()
+        .oneshot(request(page, bob, Some(etag.clone())))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("Synthetic confidential note"));
+    let unchanged = app
+        .clone()
+        .oneshot(request(page, alice, Some(etag.clone())))
+        .await
+        .unwrap();
+    assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+    // A browser must reach that authorization path on both fresh and 304 bodies.
+    for response in [&first, &unchanged] {
+        let cache = response.headers()[header::CACHE_CONTROL].to_str().unwrap();
+        assert!(
+            cache.split(',').any(|part| part.trim() == "no-cache"),
+            "credential-dependent response may bypass authorization: {cache}"
+        );
+    }
+    for uri in [
+        "/workspaces",
+        "/projects",
+        "/workspaces/default/projects/client/pages",
+        "/workspaces/default/projects/client/recent",
+        "/search?q=confidential",
+        "/graph?workspace=default&project=client",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(uri, alice, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let cache = response.headers()[header::CACHE_CONTROL].to_str().unwrap();
+        assert!(
+            cache.split(',').any(|part| part.trim() == "no-cache"),
+            "{uri}: {cache}"
+        );
+    }
+    store
+        .writer
+        .revoke_memory(alice, project, None)
+        .await
+        .unwrap();
+    let revoked = app.oneshot(request(page, alice, Some(etag))).await.unwrap();
+    assert_eq!(revoked.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn actor_scoped_api_responses_are_never_reused_across_credentials() {
     let (_tmp, store, wiki) = setup().await;
     let ws = store

@@ -4,8 +4,10 @@
 > native `aim_` API credentials are the current shipped contract.
 
 ai-memory is **single-tenant wiki data** with **optional multi-user
-attribution**. Every authenticated request sees the same wiki pages —
-there is no per-page RBAC or group permission model. Operational handoffs and
+attribution**. Projects are `open` by default, and every admitted user sees
+the same pages within that project. Operators can enable
+[per-project access](#per-project-access) with read/write grants; there is no
+per-page RBAC or group permission model. Operational handoffs and
 open-session recovery are owner-scoped so one operator cannot accidentally
 consume or finalize another's live context. What multi-user mode also adds is
 *who-did-this*: every write
@@ -44,11 +46,9 @@ You probably **don't** need it when:
 
 - You're the sole human user of your install. Single-user mode (no user rows)
   remains compatible whether or not `init` has generated `[auth].token_pepper`.
-- You need permissions / access control. v1 of ai-memory does
-  not implement RBAC by design (see
-  [`design-decisions.md`](design-decisions.md) §13). Attribution
-  records *who* did a write; it does not gate *whether* they
-  could.
+- You need per-page permissions or independent tenant isolation. Project
+  access modes and grants gate entry to a project, while admitted users share
+  its pages. Use separate servers for independent trust domains.
 
 ## The four resolution rungs
 
@@ -556,11 +556,12 @@ page produce a version chain, not a conflict; the later write becomes latest and
 the earlier one stays reachable. There is no merge, and none is claimed — but
 nothing is destroyed either.
 
-**Isolation of the "current project" pointer is automatic** since v1.39. Unscoped
-calls (the normal case — the MCP tools default to the current project) resolve
-through a pointer keyed by the caller's identity and session, so two operators,
-or one operator with two harnesses, do not overwrite each other. Confirm what a
-server is running with the startup line:
+**The "current project" pointer uses `per_actor` by default** since v1.39.
+It separates operators and separates one operator's concurrent sessions when
+the MCP client forwards the real lifecycle-hook session id. A static client
+with only that operator's bearer uses their identity-only latest-project slot;
+concurrent windows must pass explicit `workspace` + `project`, or use a
+session-aware bridge. Confirm the server's mode with the startup line:
 
 ```
 active-project isolation mode mode=PerActor session_ttl_secs=3600 max_entries=4096
@@ -585,8 +586,7 @@ If you're upgrading a machine-bearer-only install:
   `user rotate-token` commands remain available for compatibility. They manage
   the migrated `legacy-user-token` credential; new automation should use
   `api-key` commands, and new people should use `user add-human`.
-  The V53 mirror triggers are load-bearing for those shims and remain until the
-  shims are removed in 2.0.
+  The V53 mirror triggers remain load-bearing for those compatibility shims.
 - Before any human password or completed bootstrap exists, GET-only browser
   routes continue to accept the root bearer through HTTP Basic and the
   HttpOnly `ai_memory_auth` cookie. Human activation disables that path
@@ -685,8 +685,9 @@ $ ai-memory install-hooks --apply --agent claude-code \
 `--as-user` is **metadata only**: it labels the install for the
 operator's records and prints a confirmation line so you can verify
 which identity the next session's writes will attribute to. The
-actual token wired into the hook env block is whatever you pass via
-`--auth-token`. Mismatching the two (e.g. `--as-user alice
+actual credential is the bearer selected by `--auth-token`; current
+`--apply` installs store it in the private data-dir files described above.
+Mismatching the two (e.g. `--as-user alice
 --auth-token <bob's token>`) is permitted at the CLI layer; the
 server will resolve to bob at runtime. The flag is there to keep the
 operator honest, not to enforce.

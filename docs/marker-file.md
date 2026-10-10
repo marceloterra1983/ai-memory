@@ -704,13 +704,16 @@ hook events that arrive without a usable one.
 
 ## What the marker file does NOT do
 
-- ❌ No glob patterns. Walk-up by literal ancestry only.
-- ❌ No merge of ancestor markers. Closest wins. (`server` is the one key
-  inherited from the nearest marker that declares it; see above.)
+- ❌ No glob patterns in marker lookup. Walk-up uses literal ancestry;
+  `[capture] ignore_paths` supports the bounded glob syntax documented above.
+- ❌ No general merge of ancestor markers. Scope/settings skip capture-only
+  markers; capture uses the nearest marker, and `server` uses the nearest
+  marker that declares it, as described above.
 - ❌ No automatic migration of `default`-workspace projects.
-- ❌ No automatic repo-root collapsing. Worktrees and subdirectories only
-  share a project when `project_strategy = "repo-root"` is explicitly set
-  (per marker, or baked install-wide — see above).
+- ❌ No automatic repo-root normalization of derived project names.
+  `project_strategy = "repo-root"` selects that naming strategy. Repository
+  identity or an existing `repo_path` match can still route worktrees and
+  subdirectories into one project without that setting.
 - ❌ No URL or token in the marker. `server = "<name>"` selects a server
   profile registered locally with `ai-memory server add`; it cannot introduce a
   new destination or carry a credential. Otherwise use the existing env vars
@@ -718,10 +721,11 @@ hook events that arrive without a usable one.
   *default* can still be baked into an install without a marker via
   `install-hooks --project-strategy repo-root`, but that is install-time
   config, not a runtime override the user sets in their shell.)
-- ❌ No reach outside the trust boundary. The walk stops at `$HOME`; a
-  checkout outside it stops at that checkout's root and needs a marker inside
-  the checkout. A non-git directory outside `$HOME` needs a marker in its
-  exact cwd.
+- ❌ No unrestricted scope/capture walk outside the trust boundary. With
+  `$HOME` available, those lookups stop there, or at the checkout root for a
+  checkout outside it; a non-git directory outside `$HOME` checks only its
+  exact cwd. The `server` lookup can continue above an outside checkout to
+  select an operator-registered profile, whose roots still gate routing.
 
 ## Troubleshooting
 

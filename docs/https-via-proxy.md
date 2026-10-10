@@ -451,9 +451,10 @@ location / {
 ```
 
 This only matters for the long-held `bootstrap` POST; ordinary MCP and
-`/api/v1` requests are short and unaffected. (A genuinely failed chunk still
-loses the run today — the durable-progress/`--resume` question is tracked
-separately; see #614.)
+`/api/v1` requests are short and unaffected. After a chunk failure, rerun
+`ai-memory bootstrap --resume` with unchanged inputs and chunk settings to reuse
+the durable, completed chunk prefix. Changed inputs get a different fingerprint
+and start a new run (#621).
 
 ---
 
@@ -478,13 +479,12 @@ because your host already trusts that root; the container does not.
 
 **Fix.** Give the container a CA bundle that includes the interception root.
 
-1. Export the interception root your gateway presents (from a trusted host),
-   or — better — get it from your IT team, which is the authoritative source:
-
-   ```bash
-   openssl s_client -showcerts -connect api.openai.com:443 </dev/null 2>/dev/null \
-     | openssl x509 -outform PEM > corp-root.crt
-   ```
+1. Obtain the interception root CA certificate from your IT team, or export
+   the approved root from a trusted machine's certificate store, as PEM in
+   `corp-root.crt`. Verify its fingerprint through the approved channel.
+   `openssl s_client -showcerts | openssl x509` selects the first certificate
+   presented, usually the server leaf; it does not identify or export the
+   interception root, which the server may omit from the chain.
 
 2. Build a combined bundle = the container's public roots **plus** your root.
    `SSL_CERT_FILE` *replaces* the default file, so it must contain both:

@@ -534,10 +534,10 @@ validation.
 The reviewer does not see every page. Two limits shape what durable knowledge it
 can notice already exists, and therefore what it may redundantly re-propose:
 
-- **Only `_rules/` and `procedures/` page *bodies* are loaded** for patch
-  context (`load_patchable_pages`). Durable pages in other families
-  (`decisions/`, `gotchas/`, `concepts/`, `notes/`) are not sent to the reviewer
-  in full.
+- **By default, only `_rules/` and `procedures/` page *bodies* are loaded**
+  for patch context (`load_patchable_pages`). `patchable_page_prefixes` can
+  include other families such as `decisions/` and `gotchas/`; families outside
+  the configured list are not sent to the reviewer in full.
 - **The "recent pages" list is recency-ordered, one line per page** (path,
   title, kind, updated_at), drawn from the project briefing. Because it is a flat
   bounded list, a project with many pages only shows the reviewer the most
@@ -557,8 +557,6 @@ prevented at review time.
 
 Deferred improvements (future work, not in this line):
 
-- **Configurable patchable prefixes**, so `decisions/`/`gotchas/` bodies can
-  reach the reviewer without hard-coding the family list.
 - **Embedding-nearest dedup**, replacing the recency-ordered flat list with a
   retrieval of the pages semantically closest to the session under review, so
   relevant durable pages are surfaced regardless of recency.

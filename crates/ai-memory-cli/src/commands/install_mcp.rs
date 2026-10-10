@@ -2,9 +2,9 @@
 //! snippet for any supported client.
 //!
 //! The snippet format and the config-file location differ across
-//! clients. We render the *content* the user needs to paste; we
-//! deliberately do not auto-edit their config (formats are evolving
-//! upstream and a bad merge is very user-visible).
+//! clients. By default we render the content without changing files.
+//! `--apply` merges the registration through each supported client's
+//! configuration writer while preserving sibling settings.
 //!
 //! For clients that don't support remote MCP servers in their JSON
 //! config (Claude Desktop today), the rendered snippet uses the

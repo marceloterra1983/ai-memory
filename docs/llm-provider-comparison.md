@@ -724,7 +724,7 @@ The canonical 2-side invocation (the harness compares two
 providers per run):
 
 ```bash
-cargo run -p ai-memory-eval --release -- \
+cargo run -p ai-memory-eval --release -- ab \
     --baseline-provider  openai-compat \
     --baseline-base-url  https://openrouter.ai/api/v1 \
     --baseline-model     moonshotai/kimi-k2.6 \

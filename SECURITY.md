@@ -17,9 +17,10 @@ maintainer will follow up; do not put vulnerability details in that issue.
 ## Threat model
 
 ai-memory is a **single-tenant workstation/homelab service**. It supports
-multiple attributed users, but every authenticated user belongs to the same
-trust domain and can read the same project memory. The following describes
-what the project is and is not designed to defend against.
+multiple attributed users. Projects default to shared `open` access; operators
+can opt them into `restricted` access with per-user read/write grants. Pages
+remain shared among users admitted to the same project. The following
+describes what the project is and is not designed to defend against.
 
 ### In scope
 
@@ -140,9 +141,10 @@ what the project is and is not designed to defend against.
 
 ### Out of scope for v1
 
-- **Tenant isolation and per-user ACLs.** Database users provide attribution,
-  not private memory. There are no per-user or per-project ACLs; run separate
-  servers/data directories for users who must not see one another's data.
+- **Per-page ACLs and independent tenant isolation.** Restricted projects
+  support per-user read/write grants, but all admitted users share that
+  project's pages and root retains access. For independent trust domains, run
+  separate servers/data directories. See [`docs/users.md`](docs/users.md#per-project-access).
 - **Encryption at rest.** The data directory is a plain filesystem tree.
 - **Remote sync security.** If you push the wiki git repository to a remote,
   securing that channel is your responsibility (SSH keys, GitHub access

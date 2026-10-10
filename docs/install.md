@@ -139,9 +139,11 @@ installed block is absent from context at session start. See
 
 ## Configuring the CLI URL and auth
 
-The `ai-memory` binary is a thin HTTP client. It never opens the wiki
-or SQLite directly; state-touching commands go through the running
-server, which is the sole writer.
+Commands that read or mutate live server state use thin HTTP clients, keeping
+the running server as the sole writer. Offline lifecycle commands (`reset`,
+`restore`, `reindex`, and `uninstall --purge-data`) access the data directory
+directly and require the server to be stopped; see
+[`lifecycle-ops.md`](lifecycle-ops.md).
 
 Configuration is two optional environment variables:
 
@@ -207,7 +209,7 @@ Download the `x86_64` or `aarch64` RPM from the
 and install it with `sudo dnf install ./ai-memory-*.rpm`. The package includes
 the binary, hook sources, system and user systemd units, and system service
 configuration. Follow the [user-level service](#user-level-service) or
-[system service](#system-service) steps below to initialize and start it.
+[system service](#system-level-service) steps below to initialize and start it.
 
 ## Arch Linux native packages (AUR)
 
@@ -598,8 +600,10 @@ opt-in** — enable the server first, then the client:
 The client sanitizes (built-in patterns) and truncates the excerpt before it
 touches the spool or wire; the server re-scrubs with its `[sanitize]` patterns
 before storing. If either side is off — or the marker is malformed — the Stop
-stays empty. Re-running `install-hooks` without `--capture-assistant` removes
-the flag (idempotent). `--capture-assistant` is Claude Code, Codex and
+stays empty. A bare `install-hooks --apply` preserves an existing assistant
+capture opt-in, including during automatic refresh. To disable assistant
+capture at the server boundary, set `capture_assistant = false` and restart
+the server; omitting the installer flag alone does not disable it. `--capture-assistant` is Claude Code, Codex and
 OpenCode 2 (`--agent opencode2`) on a native hook platform only; on any other agent or the script fallback the
 installer refuses it rather than enabling something that cannot take effect. Assistant text is
 privacy-sensitive — read the `SECURITY.md` notes on what it can contain and where
@@ -681,7 +685,10 @@ sudo systemctl stop ai-memory.service
 journalctl -u ai-memory.service -n 100
 ```
 
-Backups still use the same CLI, just point it at the service data dir:
+Backups use the running server selected by `AI_MEMORY_SERVER_URL` and the
+CLI's resolved credentials. `--data-dir` selects local client configuration
+and credential storage; it does not select which remote database is backed up.
+Ensure these commands target the intended service and have its root credential:
 
 ```bash
 # User service
@@ -1194,8 +1201,10 @@ ai-memory finalize-session --agent zcode
 ai-memory finalize-session --agent zcode --session-id <uuid>
 ```
 
-No first-party `install-mcp` client and no managed workstream
-(`ai-memory run zcode`) are claimed yet.
+MCP registration is also supported: `ai-memory install-mcp --client zcode
+--apply` merges a native HTTP entry into `mcp.servers` in the same
+`~/.zcode/cli/config.json`, preserving sibling servers. No managed workstream
+(`ai-memory run zcode`) is claimed yet.
 
 ### Hermes Agent (Nous Research)
 
@@ -1537,9 +1546,8 @@ so those hooks do not accept the handoff. The first `PostToolUse` prints
 `hookSpecificOutput.additionalContext` (pending handoff, plus an opted-in
 `[briefing]`). The model sees it after that tool result, not before the
 first prompt. A session with no tool call leaves the handoff for
-`memory_handoff_accept`. Claude Desktop, VS Code Copilot, Zed,
-and ZCode
-are MCP-only here, so you'll need to nudge the model to call
+`memory_handoff_accept`. Claude Desktop, VS Code Copilot, and Zed are MCP-only here, so you'll need to
+nudge the model to call
 `memory_query` / `memory_handoff_accept` itself.
 For clients with `install-hooks` support, the capture path handles
 handoff injection at session start or the client's closest equivalent, except
@@ -1716,7 +1724,7 @@ ai-memory works in three intensity tiers:
 
 | Tier | What you get | Env vars | Cost |
 |---|---|---|---|
-| **Zero-LLM** (default) | FTS5 + manually declared entity + graph search, rule-based session summaries, auto-handoffs from prompt + tool-call history | (none) | $0 |
+| **Zero-LLM** (default) | FTS5 + manually declared entity + graph search, local vector search when the default model is available, rule-based session summaries, auto-handoffs from prompt + tool-call history | (none) | $0 |
 | **+ LLM consolidation** | LLM rewrites session pages as coherent narratives; PreCompact checkpoints; LLM-driven contradiction lint | `AI_MEMORY_LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` | ~$0.01–0.05 / session |
 | **+ Anthropic via subscription** | Same LLM features using a Claude Pro/Max subscription instead of an API key | `AI_MEMORY_LLM_PROVIDER=anthropic-oauth` + `ANTHROPIC_OAUTH_TOKEN` | Uses your Claude subscription |
 | **+ ChatGPT/Codex OAuth** | Same LLM features using a ChatGPT Pro/Plus login instead of an OpenAI Platform key | `AI_MEMORY_LLM_PROVIDER=openai-oauth` + `ai-memory auth login openai-oauth` | Uses your ChatGPT subscription |
@@ -2149,12 +2157,13 @@ docker run --rm akitaonrails/ai-memory:latest --help     # full subcommand tree
 | `status` | `docker exec` | Counts, paths, derived-index diagnostics, and passive LLM/embedding provider health |
 | `search "<query>"` | `docker exec` | Wiki FTS5 search + bounded source authority; use MCP `memory_query` for entity/graph/vector RRF |
 | `write-page` | `docker exec` | Manual page write (atomic + indexed) |
-| `backup --to` / `restore --from` | `docker exec` | Snapshot or restore the data dir |
+| `backup --to` | `docker exec` or thin HTTP client | Snapshot wiki and SQLite through the running server's online backup API |
+| `restore --from` | Native binary or one-shot container with the server stopped | Restore the selected local data directory; see [`lifecycle-ops.md`](lifecycle-ops.md) |
 | `checkpoints` / `restore-page` | `docker exec` | List wiki git checkpoints or restore one markdown page and reindex it |
 | `audit-contamination` | `docker exec` | Read-only structural audit for likely cross-project contamination |
 | `forget-sweep` / `lint` / `embed` | `docker exec` | Manual maintenance; sweep + lint also run on the server schedule by default |
 | `commit -m "…"` | `docker exec` | Stage + commit the wiki tree |
-| `reset --confirm` | `docker exec` | Wipe data (refuses while siblings alive) |
+| `reset --confirm` | Native binary or one-shot container with the server stopped | Wipe the selected local data directory (refuses while sibling processes are alive) |
 | `generate-auth-token` | `docker run --rm` | Print a random hex bearer token |
 | `user add-human` / `list` / `reset-password` / `disable` / `enable` / `patch` | `docker exec` or native binary | Human identities and temporary passwords; never issues an API key |
 | `user add` / `expire` / `revive` / `rotate-token` | `docker exec` or native binary | Deprecated 1.x compatibility-token lifecycle backed by `legacy-user-token` |

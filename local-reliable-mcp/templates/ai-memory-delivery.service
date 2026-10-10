@@ -1,0 +1,12 @@
+[Unit]
+Description=ai-memory durable write delivery
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.agents/tools/ai-memory/reliable-mcp/reliable-mcp worker --backend http://127.0.0.1:49376
+Restart=on-failure
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

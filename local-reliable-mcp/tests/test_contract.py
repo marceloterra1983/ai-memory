@@ -477,14 +477,14 @@ class InstallerReadiness(unittest.TestCase):
         import hashlib
         import shutil
 
-        installer = Path("/home/marce/.agents/tools/ai-memory/install-ai-memory.sh")
-        if not installer.is_file():
-            self.skipTest("personal installer is absent")
+        installer = ROOT / "tests" / "fixtures" / "install-ai-memory-before-ready.sh"
+        self.assertTrue(installer.is_file(), "fixed unpatched installer fixture is absent")
         before = hashlib.sha256(installer.read_bytes()).hexdigest()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             copied = root / "install-ai-memory.sh"
             shutil.copy(installer, copied)
+            copied.chmod(0o700)
             patch = (ROOT / "patches" / "install-ai-memory-ready.patch").read_text(encoding="utf-8")
             applied = subprocess.run(["patch", "-p1"], cwd=root, input=patch, text=True, capture_output=True, check=False)
             self.assertEqual(applied.returncode, 0, applied.stderr)

@@ -52,6 +52,7 @@ def ensure_outbox(path: Path, data_dir: Path | None = None) -> Path:
         if path.parent.is_symlink() or not path.parent.is_dir():
             raise OutboxError("outbox parent is missing or a symlink")
         path.mkdir(mode=0o700)
+        _fsync_dir(path.parent)
     _nofollow_dir(path)
     os.chmod(path, 0o700)
     for name in ("ops", "staging", "cache"):
@@ -61,6 +62,7 @@ def ensure_outbox(path: Path, data_dir: Path | None = None) -> Path:
         child.mkdir(mode=0o700, exist_ok=True)
         os.chmod(child, 0o700)
         _nofollow_dir(child)
+    _fsync_dir(path)
     return path
 
 

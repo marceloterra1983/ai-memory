@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.agents/tools/ai-memory/reliable-mcp/reliable-mcp serve --listen 127.0.0.1:49374 --backend http://127.0.0.1:49376
+ExecStart=%h/.agents/tools/ai-memory/reliable-mcp/reliable-mcp serve --listen 127.0.0.1:49374 --backend http://127.0.0.1:49376 --config %h/.local/share/ai-memory/config.toml
 Restart=on-failure
 NoNewPrivileges=true
 

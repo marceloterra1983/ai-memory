@@ -26,9 +26,12 @@ O stage contém:
 - `source/` — lançador e pacote Python, para instalar em
   `~/.agents/tools/ai-memory/reliable-mcp/`. Não se corre a partir do worktree.
 - `patches/install-ai-memory-ready.patch` — troca o bloco `ready=0` do
-  instalador para chamar `ready --backend`. Exige
-  `AI_MEMORY_READY_WORKSPACE` e `AI_MEMORY_READY_PROJECT`. Sem os dois, a
-  prontidão fica em 0.
+  instalador para chamar `ready --backend`. O par vem de
+  `manifest.json` `service.readiness_scope` (`workspace` e `project`).
+  Override só quando `AI_MEMORY_READY_WORKSPACE` e
+  `AI_MEMORY_READY_PROJECT` vêm os dois, não vazios. Um só é erro.
+  Sem manifest e sem o par completo, o instalador para com erro claro.
+  Não infere o último projeto. `--check` continua só leitura.
 
 Sem `--stage`, o comando só imprime o plano e diz «não instala».
 
@@ -52,14 +55,14 @@ Sem `--stage`, o comando só imprime o plano e diz «não instala».
 9. Prontidão contra o backend, não contra o ingress:
 
 ```text
-AI_MEMORY_READY_WORKSPACE=... AI_MEMORY_READY_PROJECT=... \
-  ~/.agents/tools/ai-memory/reliable-mcp/reliable-mcp ready \
-  --backend http://127.0.0.1:49376 --workspace "$AI_MEMORY_READY_WORKSPACE" \
-  --project "$AI_MEMORY_READY_PROJECT"
+~/.agents/tools/ai-memory/reliable-mcp/reliable-mcp ready \
+  --backend http://127.0.0.1:49376 --workspace WORKSPACE --project PROJECT
 ```
 
-O par tem de ser um escopo que já existe. Não adivinhar pelo último
-projeto do servidor.
+O par é o `service.readiness_scope` do manifest (nesta máquina o operador
+confirmou `workspace=default` e `project=dev`). Para um corte pontual,
+exporte os dois `AI_MEMORY_READY_*` juntos. O par tem de ser um escopo que
+já existe. Não adivinhar pelo último projeto do servidor.
 
 ## Rollback
 

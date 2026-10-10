@@ -1,7 +1,8 @@
 """JSON-RPC and the deterministic write contract.
 
 CAS and the status enum compare bytes, metadata, and UUIDs. Jev does not
-apply: nothing here classifies free text.
+apply: there is no model call. Page and scope absence are equality on a
+typed error code, not a search through free text.
 """
 
 from __future__ import annotations
@@ -88,6 +89,16 @@ def parse_scope(args: dict):
     return {"kind": "project", "workspace": workspace.strip(), "project": project.strip()}, None
 
 
+def _optional_string(args: dict, key: str):
+    """Mirror serde Option<String>: missing and null are absent; other types are refused."""
+    if key not in args or args[key] is None:
+        return None, None
+    value = args[key]
+    if not isinstance(value, str):
+        return None, f"refused: {key} must be a string"
+    return value, None
+
+
 def normalize_write(args: dict):
     if not isinstance(args, dict):
         return None, "refused: arguments must be an object"
@@ -100,44 +111,55 @@ def normalize_write(args: dict):
     scope, error = parse_scope(args)
     if error:
         return None, error
-    tier = args.get("tier")
-    if _blank(tier):
+    if "tier" not in args or args.get("tier") is None:
         tier = "semantic"
-    elif not isinstance(tier, str) or tier.strip() not in TIERS:
+    elif not isinstance(args.get("tier"), str) or args.get("tier") not in TIERS:
         return None, "refused: unknown tier"
     else:
-        tier = tier.strip()
-    pinned = args.get("pinned", False)
-    if pinned is None:
+        tier = args["tier"]
+    if "pinned" not in args:
         pinned = False
-    if not isinstance(pinned, bool):
+    elif not isinstance(args.get("pinned"), bool):
         return None, "refused: pinned must be a boolean"
-    tags = args.get("tags", [])
-    if tags is None:
+    else:
+        pinned = args["pinned"]
+    if "tags" not in args:
         tags = []
-    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
-        return None, "refused: tags must be a list of strings"
-    title = args.get("title")
-    if title is not None and not isinstance(title, str):
-        return None, "refused: title must be a string"
-    if isinstance(title, str) and title.strip() == "":
-        title = None
-    expires = args.get("expires_at")
-    if expires is not None and not isinstance(expires, str):
-        return None, "refused: expires_at must be a string"
+    else:
+        tags = args.get("tags")
+        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+            return None, "refused: tags must be a list of strings"
+        tags = list(tags)
+    title, error = _optional_string(args, "title")
+    if error:
+        return None, error
+    expires, error = _optional_string(args, "expires_at")
+    if error:
+        return None, error
     if isinstance(expires, str):
+        # The backend trims expires_at and ignores an empty value.
         expires = expires.strip() or None
-    create_only = args.get("create_only")
-    expected = args.get("expected_page_id")
-    has_expected = isinstance(expected, str) and expected.strip() != ""
-    if create_only is True and has_expected:
-        return None, "refused: create_only and expected_page_id are mutually exclusive"
-    if has_expected and not _uuid(expected):
+    if "create_only" not in args:
+        create_only = False
+    elif not isinstance(args.get("create_only"), bool):
+        return None, "refused: create_only must be a boolean"
+    else:
+        create_only = args["create_only"]
+    if "expected_page_id" not in args or args.get("expected_page_id") is None:
+        expected = None
+    elif not isinstance(args.get("expected_page_id"), str):
         return None, "refused: expected_page_id must be a UUID"
-    if create_only is True:
+    else:
+        expected = args["expected_page_id"].strip()
+        if not _uuid(expected):
+            return None, "refused: expected_page_id must be a UUID"
+        expected = str(uuid.UUID(expected))
+    if create_only and expected:
+        return None, "refused: create_only and expected_page_id are mutually exclusive"
+    if create_only:
         cas = {"mode": "create_only"}
-    elif has_expected:
-        cas = {"mode": "expected_page_id", "expected_page_id": str(uuid.UUID(expected))}
+    elif expected:
+        cas = {"mode": "expected_page_id", "expected_page_id": expected}
     else:
         cas = {"mode": "auto"}
     return {
@@ -164,8 +186,11 @@ def derive_title(body: str, path: str) -> str:
 
 
 def expected_title(intent: dict) -> str:
-    if intent.get("title"):
-        return intent["title"]
+    title = intent.get("title")
+    # A present empty title is stored as-is. The read path still derives a
+    # heading when the stored title is blank, so recognition follows that.
+    if isinstance(title, str) and title != "":
+        return title
     return derive_title(intent["body"], intent["path"])
 
 

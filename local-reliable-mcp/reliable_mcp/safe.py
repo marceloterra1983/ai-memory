@@ -5,7 +5,11 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
+import tomllib
+from pathlib import Path
 from urllib.parse import urlsplit
+
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
 class ConfigError(ValueError):
@@ -61,6 +65,56 @@ def parse_listen(value: str) -> tuple[str, int]:
     if not 0 <= port <= 65535:
         raise ConfigError("listen port is out of range")
     return host, port
+
+
+def host_without_port(host: str) -> str:
+    value = host.strip()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[1:end] if end != -1 else value
+    if value.count(":") == 1:
+        return value.split(":", 1)[0]
+    return value
+
+
+def host_allowed(host: str, allowed_hosts) -> bool:
+    candidate = host.strip()
+    bare = host_without_port(candidate)
+    for allowed in allowed_hosts:
+        if not isinstance(allowed, str):
+            continue
+        if candidate.lower() == allowed.lower() or bare.lower() == allowed.lower():
+            return True
+    return False
+
+
+def origin_allowed(origin: str, allowed_hosts, allowed_origins) -> bool:
+    if origin in allowed_origins:
+        return True
+    parts = urlsplit(origin)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return False
+    if parts.username or parts.password:
+        return False
+    return host_allowed(parts.hostname, allowed_hosts)
+
+
+def load_public_allowlist(path) -> tuple[list[str], list[str]]:
+    """Read host and origin names only. Never return secrets from the file."""
+    file = Path(path)
+    if not file.is_file():
+        raise ConfigError(f"config not found: {file}")
+    with file.open("rb") as handle:
+        data = tomllib.load(handle)
+    hosts = list(LOOPBACK_HOSTS)
+    for item in data.get("allowed_hosts") or []:
+        if isinstance(item, str) and item.strip() and item.strip() not in hosts:
+            hosts.append(item.strip())
+    origins = []
+    for item in data.get("cors_allow_origins") or []:
+        if isinstance(item, str) and item.strip() and item.strip() not in origins:
+            origins.append(item.strip())
+    return hosts, origins
 
 
 def safe_fields(**fields):

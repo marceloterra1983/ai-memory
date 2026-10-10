@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import socketserver
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,9 +34,13 @@ from reliable_mcp.protocol import (
     rpc_result,
 )
 from reliable_mcp.safe import (
+    LOOPBACK_HOSTS,
     ConfigError,
     assert_loopback_host,
     assert_not_root,
+    host_allowed,
+    load_public_allowlist,
+    origin_allowed,
     parse_listen,
     parse_origin,
     safe_fields,
@@ -57,6 +63,11 @@ class Relay:
         acquire_timeout: float = 2.0,
         forward_timeout: float = 8.0,
         data_dir=None,
+        read_timeout: float = 8.0,
+        max_header: int = 8192,
+        allowed_hosts=None,
+        allowed_origins=None,
+        config_path=None,
     ):
         assert_not_root()
         self.listen_host, self.listen_port = parse_listen(listen)
@@ -67,9 +78,6 @@ class Relay:
         ):
             raise ConfigError("listen and backend must differ")
         self._backend_origin = f"http://{self.backend_host}:{self.backend_port}"
-        from reliable_mcp.outbox import ensure_outbox
-
-        self.outbox = ensure_outbox(Path(outbox), data_dir)
         self.auto_drain_seconds = auto_drain_seconds
         self.log = log
         self.max_body = max_body
@@ -77,6 +85,18 @@ class Relay:
         self.acquire_timeout = acquire_timeout
         self.forward_timeout = forward_timeout
         self.client = Client(self._backend_origin, timeout=forward_timeout, max_body=max_body)
+        self.read_timeout = read_timeout
+        self.max_header = max_header
+        self.handlers_entered = 0
+        # Reject a bad config before the outbox directory is created.
+        if config_path:
+            self.allowed_hosts, self.allowed_origins = load_public_allowlist(config_path)
+        else:
+            self.allowed_hosts = list(allowed_hosts or LOOPBACK_HOSTS)
+            self.allowed_origins = list(allowed_origins or [])
+        from reliable_mcp.outbox import ensure_outbox
+
+        self.outbox = ensure_outbox(Path(outbox), data_dir)
         self._cache = load_cache(self.outbox)
         self._slots = threading.BoundedSemaphore(max_inflight)
         self._httpd = None
@@ -233,6 +253,9 @@ class Relay:
 
     def _write(self, message: dict, header_items):
         rpc_id = message.get("id", None)
+        if not _json_mime(_header(header_items, "content-type")):
+            self._log(method="POST", path="/mcp", error_class="refused")
+            return 415, [("Content-Type", "text/plain; charset=utf-8")], b"unsupported media type\n"
         arguments = arguments_of(message)
         normalized, error = normalize_write(arguments)
         if error:
@@ -449,6 +472,44 @@ def _cached_tools(cache, rpc_id):
     return {"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": cache["tools"]}}
 
 
+class HeaderTooLarge(Exception):
+    pass
+
+
+class _BoundedReader:
+    def __init__(self, raw, max_header: int):
+        self.raw = raw
+        self.left = max_header
+        self.headers_done = False
+
+    def readline(self, size=-1):
+        line = self.raw.readline(size)
+        if not self.headers_done:
+            self.left -= len(line)
+            if self.left < 0:
+                raise HeaderTooLarge()
+            if line in (b"\r\n", b"\n", b""):
+                self.headers_done = True
+        return line
+
+    def read(self, size=-1):
+        return self.raw.read(size)
+
+    def __getattr__(self, name):
+        return getattr(self.raw, name)
+
+
+_BUSY = (
+    b"HTTP/1.1 503 Service Unavailable\r\n"
+    b"Content-Type: text/plain\r\n"
+    b"Content-Length: 5\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+    b"busy\n"
+)
+_BODYLESS = {"GET", "HEAD", "OPTIONS"}
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -457,12 +518,94 @@ class _Server(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         return
 
+    def process_request(self, request, client_address):
+        relay: Relay = self.relay
+        if relay is None or not relay._acquire():
+            try:
+                request.settimeout(1)
+                request.sendall(_BUSY)
+            except OSError:
+                pass
+            request.close()
+            return
+        try:
+            request.settimeout(relay.read_timeout)
+        except Exception:
+            relay._release()
+            raise
+
+        def _run():
+            try:
+                self.process_request_thread(request, client_address)
+            finally:
+                relay._release()
+
+        thread = threading.Thread(target=_run, name="reliable-mcp-conn")
+        thread.daemon = self.daemon_threads
+        if self.block_on_close:
+            vars(self).setdefault("_threads", socketserver._Threads())
+        self._threads.append(thread)
+        try:
+            thread.start()
+        except Exception:
+            relay._release()
+            raise
+
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         return
+
+    def setup(self):
+        super().setup()
+        relay: Relay = self.server.relay
+        self.connection.settimeout(relay.read_timeout)
+        self.rfile = _BoundedReader(self.rfile, relay.max_header)
+
+    def handle(self):
+        relay: Relay = self.server.relay
+        relay.handlers_entered += 1
+        self.close_connection = True
+        try:
+            self.handle_one_request()
+        except HeaderTooLarge:
+            self._plain(431, b"headers too large\n")
+        except (TimeoutError, socket.timeout):
+            try:
+                self._plain(408, b"timeout\n")
+            except Exception:
+                return
+
+    def handle_one_request(self):
+        # The stdlib swallows TimeoutError and closes with no status. A read
+        # timeout has to be visible to the client.
+        try:
+            self.raw_requestline = self.rfile.readline(65537)
+            if len(self.raw_requestline) > 65536:
+                self.requestline = ""
+                self.request_version = ""
+                self.command = ""
+                self._plain(414, b"uri too long\n")
+                return
+            if not self.raw_requestline:
+                self.close_connection = True
+                return
+            if not self.parse_request():
+                return
+            method_name = "do_" + self.command
+            if not hasattr(self, method_name):
+                self._plain(501, b"unsupported\n")
+                return
+            getattr(self, method_name)()
+            self.wfile.flush()
+        except (TimeoutError, socket.timeout):
+            self.close_connection = True
+            try:
+                self._plain(408, b"timeout\n")
+            except Exception:
+                return
 
     def do_GET(self):
         self._dispatch()
@@ -485,37 +628,67 @@ class _Handler(BaseHTTPRequestHandler):
     def _dispatch(self):
         relay: Relay = self.server.relay
         target = self.path
-        if target.startswith("http://") or target.startswith("https://"):
-            self._plain(400, b"absolute-form refused\n")
-            return
-        transfer = self.headers.get("Transfer-Encoding") or ""
-        if "chunked" in transfer.lower():
-            self._plain(411, b"chunked refused\n")
-            return
-        raw_length = self.headers.get("Content-Length")
-        if raw_length is None:
-            self._plain(411, b"content-length required\n")
-            return
         try:
-            size = int(raw_length)
-        except ValueError:
-            self._plain(400, b"bad content-length\n")
-            return
-        if size < 0 or size > relay.max_body:
-            self._plain(413, b"payload too large\n")
-            return
-        if not relay._acquire():
-            self._plain(503, b"busy\n")
-            return
-        try:
-            body = self.rfile.read(size) if size else b""
-            status, headers, payload = relay.handle(self.command, target, list(self.headers.items()), body)
-            self._send(status, headers, payload)
+            self._dispatch_checked(relay, target)
+        except HeaderTooLarge:
+            self._plain(431, b"headers too large\n")
+        except (TimeoutError, socket.timeout):
+            self._plain(408, b"timeout\n")
         except Exception as exc:
             relay._log(method=self.command, path=target.split("?", 1)[0], error_class=type(exc).__name__)
             self._plain(500, b"error\n")
-        finally:
-            relay._release()
+
+    def _dispatch_checked(self, relay: Relay, target: str):
+        if target.startswith("http://") or target.startswith("https://"):
+            self._plain(400, b"absolute-form refused\n")
+            return
+        if _repeated(self.headers, "host"):
+            self._plain(400, b"duplicate host\n")
+            return
+        if _repeated(self.headers, "authorization"):
+            self._plain(400, b"duplicate authorization\n")
+            return
+        host_value = _single(self.headers, "host")
+        if not host_value:
+            self._plain(400, b"missing host\n")
+            return
+        if not host_allowed(host_value, relay.allowed_hosts):
+            self._plain(403, b"forbidden host\n")
+            return
+        if _repeated(self.headers, "origin"):
+            self._plain(400, b"duplicate origin\n")
+            return
+        origin = _single(self.headers, "origin")
+        if origin and not origin_allowed(origin, relay.allowed_hosts, relay.allowed_origins):
+            self._plain(403, b"forbidden origin\n")
+            return
+        if _repeated(self.headers, "transfer-encoding") or _single(self.headers, "transfer-encoding"):
+            self._plain(411, b"transfer-encoding refused\n")
+            return
+        lengths = _all(self.headers, "content-length")
+        if len(lengths) > 1:
+            self._plain(400, b"ambiguous content-length\n")
+            return
+        if not lengths:
+            if self.command not in _BODYLESS:
+                self._plain(411, b"content-length required\n")
+                return
+            body = b""
+        else:
+            raw_length = lengths[0].strip()
+            if not raw_length.isdigit():
+                self._plain(400, b"bad content-length\n")
+                return
+            size = int(raw_length)
+            if size > relay.max_body:
+                self._plain(413, b"payload too large\n")
+                return
+            body = self.rfile.read(size) if size else b""
+            if len(body) != size:
+                self._plain(400, b"incomplete body\n")
+                return
+        status, headers, payload = relay.handle(self.command, target, list(self.headers.items()), body)
+        self._send(status, headers, payload)
 
     def _plain(self, status: int, payload: bytes) -> None:
         self._send(status, [("Content-Type", "text/plain; charset=utf-8")], payload)
@@ -540,3 +713,32 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(payload)
+
+
+def _all(headers, name: str) -> list:
+    values = headers.get_all(name)
+    return list(values) if values else []
+
+
+def _single(headers, name: str):
+    values = _all(headers, name)
+    return values[0] if values else None
+
+
+def _repeated(headers, name: str) -> bool:
+    return len(_all(headers, name)) > 1
+
+
+def _header(items, name: str):
+    name = name.lower()
+    for key, value in items:
+        if str(key).lower() == name:
+            return value
+    return None
+
+
+def _json_mime(value) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    media = value.split(";", 1)[0].strip().lower()
+    return media == "application/json"

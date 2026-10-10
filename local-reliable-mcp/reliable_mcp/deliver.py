@@ -1,7 +1,8 @@
 """Deterministic delivery. Unknown baselines never overwrite a divergent head.
 
 Jev does not apply. Status and CAS compare body bytes, metadata, and UUIDs.
-Nothing here classifies free text or calls a model.
+Page and scope absence come from typed error codes in the backend client.
+Nothing here calls a model or treats the words "not found" as absence.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ def attempt(box, operation_id: str, client: Client) -> dict:
             intent["attempts"] = intent.get("attempts", 0) + 1
             save_intent(box, intent)
             return intent
-        advertised = client.cas_available()
+        advertised = client.cas_available(_auth(box, intent), _extra(box, intent))
         if advertised is None:
             return _hold(box, intent, unknown=intent.get("baseline") is None)
         if advertised is False:
@@ -73,6 +74,23 @@ def _hold(box, intent: dict, unknown: bool) -> dict:
     return intent
 
 
+def _explicit_guard_blocks(intent: dict, kind: str, page) -> bool:
+    """Honor create_only and expected_page_id before any content dedup.
+
+    A write that already started may still be recognized from a full readback.
+    A probe, a read, or backend unavailability does not count as that start.
+    """
+    if intent.get("write_started"):
+        return False
+    mode = intent["cas"]["mode"]
+    if mode == "create_only":
+        return kind == "present"
+    if mode == "expected_page_id":
+        expected = intent["cas"]["expected_page_id"]
+        return kind != "present" or page["page_id"] != expected
+    return False
+
+
 def _online(box, intent: dict, client: Client) -> dict:
     kind, page = client.read_page(read_arguments(intent), _auth(box, intent), _extra(box, intent))
     if kind == "transport":
@@ -80,20 +98,41 @@ def _online(box, intent: dict, client: Client) -> dict:
     if kind == "rejected":
         intent["reason"] = "read_rejected"
         return _hold(box, intent, unknown=False)
+    if kind == "scope_absent":
+        return _scope_absent(box, intent, client)
     was_unknown = isinstance(intent.get("baseline"), dict) and intent["baseline"].get("state") == "unknown"
     if intent.get("baseline") is None or was_unknown:
         intent["baseline"] = {"state": "absent"} if kind == "absent" else summarize_page(page)
         save_intent(box, intent)
         if was_unknown:
-            if kind == "absent":
-                return _send_observed(box, intent, client, kind, page)
-            if kind == "present" and matches(intent, page):
+            if kind == "present" and matches(intent, page) and not _explicit_guard_blocks(intent, kind, page):
                 return _deliver(box, intent, page["page_id"], None)
-            return _conflict(box, intent, page["page_id"] if kind == "present" else None)
+            if kind == "present":
+                return _conflict(box, intent, page["page_id"])
     return _send_observed(box, intent, client, kind, page)
 
 
+def _scope_absent(box, intent: dict, client: Client) -> dict:
+    """A missing scope may be created only with create_only.
+
+    expected_page_id never creates a scope. Forbidden, IO, and other errors
+    never reach here. The wiki guard on the backend keeps orphan markdown;
+    this path does not delete or overwrite it.
+    """
+    if intent.get("write_started"):
+        save_intent(box, intent)
+        return intent
+    if intent["cas"]["mode"] == "expected_page_id":
+        return _conflict(box, intent, None)
+    if intent.get("baseline") is None:
+        intent["baseline"] = {"state": "absent"}
+        save_intent(box, intent)
+    return _send(box, intent, client, {"mode": "create_only"})
+
+
 def _send_observed(box, intent: dict, client: Client, kind: str, page) -> dict:
+    if _explicit_guard_blocks(intent, kind, page):
+        return _conflict(box, intent, page["page_id"] if kind == "present" else None)
     if kind == "present" and matches(intent, page):
         return _deliver(box, intent, page["page_id"], None)
     mode = intent["cas"]["mode"]
@@ -125,9 +164,12 @@ def _send_observed(box, intent: dict, client: Client, kind: str, page) -> dict:
 def _send(box, intent: dict, client: Client, cas: dict) -> dict:
     intent["body"] = read_body(box, intent["operation_id"])
     arguments = write_arguments(intent, cas)
-    response = client.write_page(arguments, _auth(box, intent), _extra(box, intent))
+    # The marker has to hit disk before the socket call so a crash still
+    # knows a write was attempted. Probes and reads do not set it.
+    intent["write_started"] = True
     intent["attempts"] = intent.get("attempts", 0) + 1
     save_intent(box, intent)
+    response = client.write_page(arguments, _auth(box, intent), _extra(box, intent))
     if response.transport_failed or response.status != 200:
         return _reconcile(box, intent, client)
     message = parse_message(response.body)
@@ -148,7 +190,7 @@ def _send(box, intent: dict, client: Client, cas: dict) -> dict:
 
 def _reconcile(box, intent: dict, client: Client) -> dict:
     kind, page = client.read_page(read_arguments(intent), _auth(box, intent), _extra(box, intent))
-    if kind in {"transport", "rejected"}:
+    if kind in {"transport", "rejected", "scope_absent"}:
         save_intent(box, intent)
         return intent
     if kind == "present" and matches(intent, page):

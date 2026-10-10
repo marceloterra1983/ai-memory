@@ -1,4 +1,10 @@
-"""Loopback HTTP. Redirects are never followed."""
+"""Loopback HTTP. Redirects are never followed.
+
+Absence is equality on error.data.code (`page_not_found` or
+`scope_not_found`). A message that merely contains "not found" is not
+absence: unknown scope, IO, and authorization stay distinguishable.
+Jev does not apply. No model is called.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +14,6 @@ from http.client import HTTPConnection, HTTPException
 
 from reliable_mcp.protocol import (
     cas_advertised,
-    error_text,
     page_view,
     parse_message,
     tool_payload,
@@ -75,8 +80,12 @@ class Client:
             headers["Authorization"] = authorization
         return self.exchange("POST", "/mcp", headers, body)
 
-    def cas_available(self) -> bool | None:
-        response = self.rpc({"jsonrpc": "2.0", "id": "cas", "method": "tools/list", "params": {}})
+    def cas_available(self, authorization: str | None = None, extra: dict | None = None) -> bool | None:
+        response = self.rpc(
+            {"jsonrpc": "2.0", "id": "cas", "method": "tools/list", "params": {}},
+            authorization,
+            extra,
+        )
         message = _json_message(response)
         if message is None or response.status != 200 or "error" in message:
             return None if message is None or response.status != 200 else False
@@ -101,10 +110,12 @@ class Client:
         message = parse_message(response.body)
         if message is None:
             return "transport", None
-        text = error_text(message)
-        if text and "not found" in text.lower():
-            return "absent", None
         if "error" in message or (isinstance(message.get("result"), dict) and message["result"].get("isError") is True):
+            code = _typed_code(message)
+            if code == "page_not_found":
+                return "absent", None
+            if code == "scope_not_found":
+                return "scope_absent", None
             return "rejected", None
         payload = tool_payload(message)
         page = page_view(payload) if payload else None
@@ -123,6 +134,17 @@ class Client:
             authorization,
             extra,
         )
+
+
+def _typed_code(message: dict) -> str | None:
+    error = message.get("error")
+    if not isinstance(error, dict):
+        return None
+    data = error.get("data")
+    if not isinstance(data, dict):
+        return None
+    code = data.get("code")
+    return code if isinstance(code, str) else None
 
 
 def _json_message(response: Exchange):

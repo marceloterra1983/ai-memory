@@ -354,7 +354,13 @@ embedder alone and is checked before `OPENAI_API_KEY` and `LLM_API_KEY`, so
 embeddings can run on a different provider than the LLM. Because the two
 endpoints are independent, `AI_MEMORY_LLM_BASE_URL` redirects only the LLM;
 set `AI_MEMORY_EMBEDDING_BASE_URL` as well or embedding traffic still goes to
-the embedding provider's default endpoint. Both the FTS-only and
+the embedding provider's default endpoint. For `openai-compat` only,
+`AI_MEMORY_EMBEDDING_QUERY_BASE_URL` (`embedding_query_base_url`) sends
+`embed_query` to a second endpoint of the same model while document
+embeddings stay on `AI_MEMORY_EMBEDDING_BASE_URL`. Leave it unset to keep
+both on the base URL. The stored `{provider, model, dim}` identity does not
+change, and a query-endpoint error is not sent to the document endpoint.
+Other providers reject the setting. Both the FTS-only and
 hybrid paths apply the same bounded page-authority adjustment after candidate
 generation; embeddings improve relevance recall but do not decide which source
 is canonical.

@@ -223,6 +223,17 @@ pub struct EmbedderConfig {
     /// Nemotron-3-Embed / base E5 — not every model needs one; see
     /// `query_prefix`'s doc comment).
     pub document_prefix: String,
+    /// Optional `openai-compat` endpoint used only by [`Embedder::embed_query`].
+    /// `None` or blank keeps queries on [`Self::base_url`]. Ignored storage for
+    /// other providers is refused in [`build_embedder`]. Not derived from the
+    /// text being embedded. In dream-local mode the endpoint must be a
+    /// literal loopback URL: [`build_embedder`] validates it before
+    /// constructing, and queries go through the same bounded local client
+    /// as documents.
+    pub query_base_url: Option<String>,
+    /// Build the `openai-compat` embedder with the dream local client.
+    /// `serve` sets this when dream scopes are non-empty. Not an operator key.
+    pub local_only: bool,
 }
 
 /// Construct an `Arc<dyn Embedder>` from the config.
@@ -235,6 +246,28 @@ pub fn build_embedder(config: EmbedderConfig) -> LlmResult<Arc<dyn Embedder>> {
         return Err(LlmError::NotConfigured(
             "AI_MEMORY_EMBEDDING_DIM must be greater than zero".into(),
         ));
+    }
+    if config
+        .query_base_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty())
+        && config.provider != EmbedderChoice::OpenAiCompat
+    {
+        return Err(LlmError::NotConfigured(
+            "AI_MEMORY_EMBEDDING_QUERY_BASE_URL is only supported for openai-compat".into(),
+        ));
+    }
+    // Dream-local mode keeps queries on the same bounded local client as
+    // documents: the operator endpoint is validated before anything is
+    // built, so a remote or non-literal query URL fails here rather than
+    // reaching the ordinary remote path at query time.
+    if config.local_only
+        && let Some(url) = config
+            .query_base_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+    {
+        crate::validate_dream_local_endpoint(url)?;
     }
     let arc: Arc<dyn Embedder> = match config.provider {
         EmbedderChoice::OpenAi => {
@@ -264,10 +297,17 @@ pub fn build_embedder(config: EmbedderConfig) -> LlmResult<Arc<dyn Embedder>> {
                 .base_url
                 .ok_or_else(|| LlmError::NotConfigured("AI_MEMORY_EMBEDDING_BASE_URL".into()))?;
             let api_key = (!config.api_key.expose_secret().is_empty()).then_some(config.api_key);
-            Arc::new(
+            let embedder = if config.local_only {
+                OpenAiCompatEmbedder::new_local(base, config.model, config.dim)?
+            } else {
                 OpenAiCompatEmbedder::new(base, api_key, config.model, config.dim)?
-                    .with_prefixes(config.query_prefix, config.document_prefix),
-            )
+            };
+            let embedder = embedder.with_prefixes(config.query_prefix, config.document_prefix);
+            let embedder = match config.query_base_url {
+                Some(url) if !url.trim().is_empty() => embedder.with_query_base_url(url),
+                _ => embedder,
+            };
+            Arc::new(embedder)
         }
         #[cfg(feature = "local-embeddings")]
         EmbedderChoice::Local => {

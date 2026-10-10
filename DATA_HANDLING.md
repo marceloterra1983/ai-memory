@@ -32,7 +32,7 @@ to its configured endpoint rather than necessarily to a cloud service.
 | path | what reaches the configured endpoint |
 |---|---|
 | Cloud LLM provider | bounded observations, page context, requested answers/digests, and bootstrap source material used by the selected operation |
-| `embedding_provider = openai\|voyage\|google\|openai-compat` | page text needing a vector and eligible search queries |
+| `embedding_provider = openai\|voyage\|google\|openai-compat` | page text needing a vector and eligible search queries; with `embedding_query_base_url` set, `openai-compat` query text goes to that endpoint and page text stays on `embedding_base_url`. In dream-local mode both endpoints must be literal loopback and query text stays within the bounded local client |
 | `AI_MEMORY_RERANKER=llm` | each eligible live query + bounded page titles/snippets |
 | Admission webhooks | page frontmatter/body and actor context for the configured write operations |
 

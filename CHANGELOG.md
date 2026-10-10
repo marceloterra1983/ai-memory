@@ -47,6 +47,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagnostics while retaining the error category and input location.
   (local-20261009; private integration, no upstream issue opened)
 
+- Isolated `openai-compat` query embeddings onto the optional
+  `embedding_query_base_url` (`AI_MEMORY_EMBEDDING_QUERY_BASE_URL`). Unset,
+  queries keep using `embedding_base_url`. Document embeddings, the stored
+  provider/model/dimension identity, prefixes, and the dream local document
+  client stay on the original endpoint. A failing query endpoint is not
+  retried against the document endpoint. Other providers reject the key.
+  In dream-local mode the query URL is validated as a literal loopback
+  endpoint before the embedder is built, and dream queries are served by
+  the same bounded local client as documents instead of the ordinary
+  remote helper: no input truncation, no 429 retry, no redirect
+  following, and the same 8 KiB request cap, dim check, and
+  non-finite/degenerate vector refusal.
+  (local-20261009; private integration, no upstream issue opened)
+
 - Replaced redundant dream ML support judgments with shared-driver proof of exactly two complete literal source records and no new body text. Kept local Jev relatedness mandatory at 0.95 and real Qwen drafting; refused rewritten output and counted only actual inference attempts/HTTP requests. (local-20261009; private integration, no upstream issue opened)
 - Refused dream clusters with different expiration instants (including an absent TTL), and required unchanged expiration on new versions; equal TTLs remain eligible and expiry is rechecked by CAS. (local-20261009; private integration, no upstream issue opened)
 - Fixed free titles and no-target sentinels being promoted to typed wiki links;

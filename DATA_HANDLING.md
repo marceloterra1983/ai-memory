@@ -33,7 +33,7 @@ and each requires a deliberate config change to turn on.
 
 | path | what leaves the host |
 |---|---|
-| `embedding_provider = openai\|voyage\|google\|openai-compat` | the text of every stored page |
+| `embedding_provider = openai\|voyage\|google\|openai-compat` | the text of every stored page; with `embedding_query_base_url` set, `openai-compat` query text goes to that endpoint and page text stays on `embedding_base_url`. In dream-local mode both endpoints must be literal loopback and query text never leaves the bounded local client |
 | `capture_assistant` (double opt-in) | the assistant's final-turn text |
 | `AI_MEMORY_RERANKER=llm` | each live query + bounded page titles/snippets |
 

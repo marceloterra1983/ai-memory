@@ -458,6 +458,14 @@ pub struct Config {
     pub embedding_dim: Option<u32>,
     /// Optional embedding base URL override.
     pub embedding_base_url: Option<String>,
+    /// Optional `openai-compat` base URL used only for query embeddings
+    /// (`Embedder::embed_query`). Unset, queries use `embedding_base_url`.
+    /// The operator sets the URL explicitly; it is not derived from memory
+    /// text. Other providers reject a non-empty value at embedder
+    /// construction. Set with `AI_MEMORY_EMBEDDING_QUERY_BASE_URL` or
+    /// `embedding_query_base_url` in config.toml. Does not change the stored
+    /// `{provider, model, dim}` identity, so existing vectors stay valid.
+    pub embedding_query_base_url: Option<String>,
     /// Optional prefix prepended to every embedding **query** before it is
     /// sent to the `openai` or `openai-compat` embedder, ahead of the
     /// existing truncation. Unset (the default) is a no-op — no behaviour
@@ -967,6 +975,7 @@ impl Default for Config {
             embedding_model: None,
             embedding_dim: None,
             embedding_base_url: None,
+            embedding_query_base_url: None,
             embedding_query_prefix: None,
             embedding_document_prefix: None,
             decay: DecaySettings::default(),
@@ -2352,6 +2361,10 @@ impl Config {
         // figment's `Env` provider trimming unquoted values.
         let query_prefix = self.embedding_query_prefix.clone().unwrap_or_default();
         let document_prefix = self.embedding_document_prefix.clone().unwrap_or_default();
+        // Blank is unset. The factory is the only place that applies this URL,
+        // and only for openai-compat query embeddings.
+        let query_base_url =
+            non_empty(self.embedding_query_base_url.as_deref()).map(str::to_string);
         Ok(Some(EmbedderConfig {
             provider,
             model,
@@ -2363,6 +2376,8 @@ impl Config {
             defaulted,
             query_prefix,
             document_prefix,
+            query_base_url,
+            local_only: false,
         }))
     }
 
@@ -4194,6 +4209,56 @@ mod tests {
         let embedder = set.embedder_config().unwrap().unwrap();
         assert_eq!(embedder.query_prefix, "query: ");
         assert_eq!(embedder.document_prefix, "passage: ");
+    }
+
+    #[test]
+    fn embedding_query_base_url_reaches_embedder_config() {
+        let compat = Config {
+            embedding_provider: Some("openai-compat".into()),
+            embedding_model: Some("nomic-embed-text".into()),
+            embedding_dim: Some(768),
+            embedding_base_url: Some("http://127.0.0.1:8002/v1".into()),
+            embedding_query_base_url: Some("http://127.0.0.1:18003/v1".into()),
+            ..Config::default()
+        };
+        let embedder = compat.embedder_config().unwrap().unwrap();
+        assert_eq!(
+            embedder.base_url.as_deref(),
+            Some("http://127.0.0.1:8002/v1")
+        );
+        assert_eq!(
+            embedder.query_base_url.as_deref(),
+            Some("http://127.0.0.1:18003/v1")
+        );
+        assert!(!embedder.local_only);
+
+        let blank = Config {
+            embedding_query_base_url: Some("   ".into()),
+            ..compat.clone()
+        };
+        assert_eq!(
+            blank.embedder_config().unwrap().unwrap().query_base_url,
+            None
+        );
+
+        let openai = Config {
+            embedding_provider: Some("openai".into()),
+            embedding_model: None,
+            embedding_dim: None,
+            embedding_base_url: None,
+            embedding_query_base_url: Some("http://127.0.0.1:18003/v1".into()),
+            runtime_env: RuntimeEnv {
+                openai_api_key: Some(SecretString::from("sk-test")),
+                ..RuntimeEnv::default()
+            },
+            ..Config::default()
+        };
+        let embedder = openai.embedder_config().unwrap().unwrap();
+        assert_eq!(embedder.provider, EmbedderChoice::OpenAi);
+        assert_eq!(
+            embedder.query_base_url.as_deref(),
+            Some("http://127.0.0.1:18003/v1")
+        );
     }
 
     /// Pure unit tests for `overlay_embedding_prefixes`: no process env or

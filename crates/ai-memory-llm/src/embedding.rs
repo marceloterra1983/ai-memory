@@ -382,6 +382,10 @@ pub struct OpenAiCompatEmbedder {
     /// Document-side counterpart of `query_prefix` (e.g. `"passage: "` for
     /// Nemotron-3-Embed / base E5 — not every model needs one).
     document_prefix: String,
+    /// Operator endpoint for [`Embedder::embed_query`] only. `None` uses
+    /// [`Self::base_url`] (and the dream local client, when that is how this
+    /// embedder was built). Never inferred from the text.
+    query_base_url: Option<String>,
 }
 
 impl OpenAiCompatEmbedder {
@@ -410,6 +414,7 @@ impl OpenAiCompatEmbedder {
             dim,
             query_prefix: String::new(),
             document_prefix: String::new(),
+            query_base_url: None,
         })
     }
 
@@ -442,6 +447,11 @@ impl OpenAiCompatEmbedder {
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
+                // Same ceiling as `new`. The local path never reaches this
+                // client: documents use `DreamLocalClient` and a configured
+                // query endpoint is validated and served by its own
+                // `DreamLocalClient` (see `embed_query`).
+                .timeout(Duration::from_secs(120))
                 .build()?,
             local_client: Some(local_client),
             api_key: None,
@@ -450,6 +460,7 @@ impl OpenAiCompatEmbedder {
             dim,
             query_prefix: String::new(),
             document_prefix: String::new(),
+            query_base_url: None,
         })
     }
 
@@ -465,42 +476,7 @@ impl OpenAiCompatEmbedder {
             )
             .await;
         };
-        let response = client
-            .post_json(&serde_json::json!({"model":self.model,"input":text}))
-            .await?;
-        let data = response
-            .get("data")
-            .and_then(serde_json::Value::as_array)
-            .filter(|data| data.len() == 1)
-            .ok_or_else(|| {
-                LlmError::UnexpectedShape("dream embedding requires exactly one result".into())
-            })?;
-        let vector = data[0]
-            .get("embedding")
-            .and_then(serde_json::Value::as_array)
-            .filter(|vector| vector.len() == self.dim as usize)
-            .ok_or_else(|| {
-                LlmError::UnexpectedShape("dream embedding dimension mismatch".into())
-            })?;
-        let values: Option<Vec<f32>> = vector
-            .iter()
-            .map(|number| {
-                number
-                    .as_f64()
-                    .map(|value| value as f32)
-                    .filter(|value| value.is_finite())
-            })
-            .collect();
-        let values = values.ok_or_else(|| {
-            LlmError::UnexpectedShape("dream embedding values must be finite numbers".into())
-        })?;
-        let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
-        if !norm.is_finite() || norm <= 0.0 {
-            return Err(LlmError::UnexpectedShape(
-                "dream embedding has a degenerate norm".into(),
-            ));
-        }
-        Ok(normalise(values))
+        dream_local_embed(client, &self.model, self.dim, text).await
     }
 
     /// Set the strings prepended to query / document text before embedding,
@@ -520,6 +496,27 @@ impl OpenAiCompatEmbedder {
     ) -> Self {
         self.query_prefix = query_prefix.into();
         self.document_prefix = document_prefix.into();
+        self
+    }
+
+    /// Send [`Embedder::embed_query`] to `url` instead of the document endpoint.
+    ///
+    /// A blank string clears the override. The URL is whatever the operator
+    /// configured; it is not derived from the text. Document embedding,
+    /// identity, and the dream local client stay on the original endpoint.
+    /// In dream-local mode the URL must itself be a literal loopback
+    /// endpoint: it is validated before any network and served by the same
+    /// bounded local client as documents (no truncate, no retry, no
+    /// redirect).
+    #[must_use]
+    pub fn with_query_base_url(mut self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        let trimmed = url.trim();
+        self.query_base_url = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
         self
     }
 }
@@ -553,8 +550,75 @@ impl Embedder for OpenAiCompatEmbedder {
 
     async fn embed_query(&self, text: &str) -> LlmResult<Vec<f32>> {
         let prefixed = prepend_prefix(&self.query_prefix, text);
+        if let Some(url) = self.query_base_url.as_deref() {
+            // The typed method routes the endpoint; the URL is an operator
+            // setting, never parsed out of the query text. Dream-local mode
+            // keeps the query on the same bounded local client: the URL is
+            // validated before any network and the request never truncates
+            // or retries.
+            if self.local_client.is_some() {
+                let endpoint = normalize_openai_base(url, "embeddings");
+                let client = crate::DreamLocalClient::new(&endpoint)?;
+                return dream_local_embed(&client, &self.model, self.dim, &prefixed).await;
+            }
+            return openai_style_embed(
+                &self.client,
+                url,
+                self.api_key.as_ref(),
+                &self.model,
+                self.dim,
+                &prefixed,
+            )
+            .await;
+        }
         self.embed_text(&prefixed).await
     }
+}
+
+/// Shared bounded-local embedding post behind [`OpenAiCompatEmbedder`]'s
+/// document path and its query-endpoint override: the dream local client
+/// caps the request at 8 KiB, checks the dim, refuses non-finite or
+/// degenerate vectors, and never truncates, retries or follows redirects.
+async fn dream_local_embed(
+    client: &crate::DreamLocalClient,
+    model: &str,
+    dim: u32,
+    text: &str,
+) -> LlmResult<Vec<f32>> {
+    let response = client
+        .post_json(&serde_json::json!({"model":model,"input":text}))
+        .await?;
+    let data = response
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .filter(|data| data.len() == 1)
+        .ok_or_else(|| {
+            LlmError::UnexpectedShape("dream embedding requires exactly one result".into())
+        })?;
+    let vector = data[0]
+        .get("embedding")
+        .and_then(serde_json::Value::as_array)
+        .filter(|vector| vector.len() == dim as usize)
+        .ok_or_else(|| LlmError::UnexpectedShape("dream embedding dimension mismatch".into()))?;
+    let values: Option<Vec<f32>> = vector
+        .iter()
+        .map(|number| {
+            number
+                .as_f64()
+                .map(|value| value as f32)
+                .filter(|value| value.is_finite())
+        })
+        .collect();
+    let values = values.ok_or_else(|| {
+        LlmError::UnexpectedShape("dream embedding values must be finite numbers".into())
+    })?;
+    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if !norm.is_finite() || norm <= 0.0 {
+        return Err(LlmError::UnexpectedShape(
+            "dream embedding has a degenerate norm".into(),
+        ));
+    }
+    Ok(normalise(values))
 }
 
 /// Voyage Embeddings API.

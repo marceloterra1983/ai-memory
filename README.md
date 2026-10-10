@@ -427,6 +427,9 @@ any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM) are supported
 for consolidation; OpenAI, Voyage, Gemini, and keyless OpenAI-compatible
 endpoints for embeddings. Configuration lives in
 [`docs/llm-providers.md`](docs/llm-providers.md).
+The restricted local OpenAI-compatible embedder covers oversized documents
+with complete UTF-8 chunks and normalized pooling, keeping the encoded
+request guard, document prefix, stored identity and wiki/FTS content intact.
 
 ## Architecture
 

@@ -423,7 +423,9 @@ impl OpenAiCompatEmbedder {
     /// The original provider identity remains `openai-compat` so matching
     /// stored vectors keeps the same provider/model/dimension coordinate.
     /// Unlike the ordinary compat path, this never truncates or retries, and
-    /// cannot follow a redirect, proxy setting or remote endpoint.
+    /// cannot follow a redirect, proxy setting or remote endpoint. Oversized
+    /// documents use complete UTF-8 chunks and a source-byte-weighted pool;
+    /// each request retains the local wire cap. Queries remain single requests.
     ///
     /// # Errors
     /// Refuses non-local endpoints, empty models or zero dimensions.
@@ -476,7 +478,7 @@ impl OpenAiCompatEmbedder {
             )
             .await;
         };
-        dream_local_embed(client, &self.model, self.dim, text).await
+        dream_local_embed_document(client, &self.model, self.dim, "", text).await
     }
 
     /// Set the strings prepended to query / document text before embedding,
@@ -484,6 +486,8 @@ impl OpenAiCompatEmbedder {
     /// the whole request body (prefix included). Pass empty strings for no
     /// prefix (the default); safe to call unconditionally with a possibly
     /// unset operator setting.
+    /// The restricted local path repeats the document prefix on every
+    /// complete source chunk and counts its encoded bytes against the cap.
     ///
     /// Publisher-specified prefixes are exact strings, often with a
     /// significant trailing space (e.g. Nemotron-3-Embed / the E5 family
@@ -544,6 +548,16 @@ impl Embedder for OpenAiCompatEmbedder {
     }
 
     async fn embed_document(&self, text: &str) -> LlmResult<Vec<f32>> {
+        if let Some(client) = &self.local_client {
+            return dream_local_embed_document(
+                client,
+                &self.model,
+                self.dim,
+                &self.document_prefix,
+                text,
+            )
+            .await;
+        }
         let prefixed = prepend_prefix(&self.document_prefix, text);
         self.embed_text(&prefixed).await
     }
@@ -571,8 +585,82 @@ impl Embedder for OpenAiCompatEmbedder {
             )
             .await;
         }
+        if let Some(client) = &self.local_client {
+            return dream_local_embed(client, &self.model, self.dim, &prefixed).await;
+        }
         self.embed_text(&prefixed).await
     }
+}
+
+/// Pool complete, nonoverlapping source chunks; prefix bytes never increase a
+/// chunk's weight. The transport independently enforces the wire cap on every
+/// request. A short source keeps its original single-request vector/identity.
+async fn dream_local_embed_document(
+    client: &crate::DreamLocalClient,
+    model: &str,
+    dim: u32,
+    prefix: &str,
+    text: &str,
+) -> LlmResult<Vec<f32>> {
+    let overhead = serde_json::to_vec(&serde_json::json!({"model":model,"input":prefix}))
+        .map_err(|_| LlmError::Schema("dream embedding serialization failed".into()))?
+        .len();
+    let budget = crate::dream_local::DREAM_LOCAL_MAX_INPUT_BYTES
+        .checked_sub(overhead)
+        .ok_or_else(|| LlmError::Schema("dream embedding prefix exceeds wire budget".into()))?;
+    if text.is_empty() {
+        return dream_local_embed(client, model, dim, prefix).await;
+    }
+    let mut remaining = text;
+    let mut pool = vec![0.0_f64; dim as usize];
+    while !remaining.is_empty() {
+        let end = dream_embedding_chunk_end(remaining, budget)?;
+        let input = prepend_prefix(prefix, &remaining[..end]);
+        let vector = dream_local_embed(client, model, dim, &input).await?;
+        if end == text.len() {
+            return Ok(vector);
+        }
+        // Original UTF-8 byte mass, rather than repeated instructions or JSON
+        // escapes, prevents a short final chunk from outweighing a full window.
+        let weight = end as f64 / text.len() as f64;
+        for (pooled, value) in pool.iter_mut().zip(vector) {
+            *pooled += weight * f64::from(value);
+        }
+        remaining = &remaining[end..];
+    }
+    let norm = pool.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if !norm.is_finite() || norm <= 0.0 {
+        return Err(LlmError::UnexpectedShape(
+            "dream embedding pool has a degenerate norm".into(),
+        ));
+    }
+    Ok(pool
+        .into_iter()
+        .map(|value| (value / norm) as f32)
+        .collect())
+}
+
+fn dream_embedding_chunk_end(text: &str, budget: usize) -> LlmResult<usize> {
+    let mut used = 0;
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        // Use the wire serializer's escaping, including controls, rather than
+        // a token estimate or a raw-byte slice that could exceed the guard.
+        let encoded = serde_json::to_vec(&character)
+            .map_err(|_| LlmError::Schema("dream embedding serialization failed".into()))?;
+        let bytes = encoded.len() - 2; // JSON string quotes belong to overhead.
+        if bytes > budget - used {
+            break;
+        }
+        used += bytes;
+        end = index + character.len_utf8();
+    }
+    if end == 0 {
+        return Err(LlmError::Schema(
+            "dream embedding prefix leaves no room for a source character".into(),
+        ));
+    }
+    Ok(end)
 }
 
 /// Shared bounded-local embedding post behind [`OpenAiCompatEmbedder`]'s

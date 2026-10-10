@@ -7,5 +7,6 @@ mod copilot_provider;
 mod dream_local;
 mod extra_headers_on_the_wire;
 mod fallback_provider;
+mod local_embedding_chunks;
 mod openai_compat_embedder;
 mod openai_compat_strict;

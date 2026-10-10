@@ -2,14 +2,15 @@
 //! scanning, skip/dry-run/reembed semantics, and batched writes, using
 //! a temp-dir store + wiki and the deterministic `SyntheticEmbedder`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ai_memory_consolidate::{EmbedBackfillCounts, EmbedBackfillOptions, run_embedding_backfill};
 use ai_memory_core::{PagePath, ProjectId, Tier, WorkspaceId};
-use ai_memory_llm::{Embedder, SyntheticEmbedder};
+use ai_memory_llm::{Embedder, OpenAiCompatEmbedder, SyntheticEmbedder};
 use ai_memory_store::Store;
 use ai_memory_wiki::{Wiki, WritePageRequest};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 struct Fixture {
     _tmp: TempDir,
@@ -424,4 +425,378 @@ async fn force_rebuild_purges_first_and_counts_a_partial_failure_correctly() {
          operator to retry rather than looking either fully migrated or \
          still on the old prefix"
     );
+}
+
+/// Only the provider HTTP boundary is replaced; wiki, FTS and the writer actor
+/// remain real. Content-dependent vectors expose a lost tail, and the failure
+/// marker makes a late chunk fail after earlier chunks have succeeded.
+struct LocalEmbeddingServer {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl LocalEmbeddingServer {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let worker = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let (body_start, body_len) = loop {
+                    let mut buffer = [0u8; 1024];
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    assert_ne!(read, 0, "embedding request must contain a complete header");
+                    bytes.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header = std::str::from_utf8(&bytes[..end]).unwrap();
+                        assert!(header.starts_with("POST /v1/embeddings "));
+                        assert!(!header.to_ascii_lowercase().contains("authorization:"));
+                        let len = header
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        break (end + 4, len);
+                    }
+                };
+                while bytes.len() < body_start + body_len {
+                    let mut buffer = [0u8; 1024];
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    assert_ne!(read, 0, "embedding request must contain its complete body");
+                    bytes.extend_from_slice(&buffer[..read]);
+                }
+                assert!(
+                    body_len <= 8192,
+                    "every complete wire request must fit the guard"
+                );
+                let request: serde_json::Value =
+                    serde_json::from_slice(&bytes[body_start..body_start + body_len]).unwrap();
+                let input = request["input"].as_str().unwrap();
+                let embedding = if input.contains("LATEFAILMARKER") {
+                    serde_json::json!([1.0])
+                } else if input.contains("tailmarker") {
+                    serde_json::json!([0.0, 1.0])
+                } else {
+                    serde_json::json!([1.0, 0.0])
+                };
+                recorded.lock().unwrap().push(request);
+                let body = serde_json::json!({"data": [{"embedding": embedding}]}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        Self {
+            endpoint,
+            requests,
+            worker,
+        }
+    }
+
+    fn embedder(&self) -> Arc<dyn Embedder> {
+        Arc::new(
+            OpenAiCompatEmbedder::new_local(&self.endpoint, "synthetic-integral", 2)
+                .unwrap()
+                .with_prefixes("query: ", "passage: "),
+        )
+    }
+
+    fn inputs(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| {
+                assert_eq!(request["model"], "synthetic-integral");
+                request["input"].as_str().unwrap().to_string()
+            })
+            .collect()
+    }
+}
+
+impl Drop for LocalEmbeddingServer {
+    fn drop(&mut self) {
+        self.worker.abort();
+    }
+}
+
+type PageIndexSnapshot = (Vec<u8>, String, String, Vec<u8>, String, i64);
+
+fn page_index_snapshot(f: &Fixture) -> Vec<PageIndexSnapshot> {
+    let connection = rusqlite::Connection::open(f.store.db_path()).unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT id,path,body,body_sha256,frontmatter_json,is_latest FROM pages ORDER BY path",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn local_backfill_embeds_twenty_two_oversized_utf8_pages_without_changing_wiki_or_fts() {
+    let mut f = fixture().await;
+    let server = LocalEmbeddingServer::start().await;
+    f.embedder = server.embedder();
+    let mut pages = Vec::new();
+    for index in 0..22 {
+        let path = PagePath::new(format!("notes/integral-{index}.md")).unwrap();
+        let body = format!(
+            "PAGE{index}START {} tailmarker{index}",
+            "é🦀 quoted \"text\" \\ line\n\t".repeat(700)
+        );
+        assert!(body.len() > 16_384);
+        f.write_page(path.as_str(), &body).await;
+        let bytes = std::fs::read(f.wiki.abs_path(f.ws, f.proj, &path)).unwrap();
+        pages.push((path, body, bytes));
+    }
+    let before = page_index_snapshot(&f);
+    let first = f.backfill(false, false).await;
+    assert_eq!(
+        first.embedded, 22,
+        "all oversized latest pages must receive a vector"
+    );
+    assert_eq!(first.failed, 0);
+    assert_eq!(
+        f.embedded_count().await,
+        0,
+        "wire model alone must not match prefixed identity"
+    );
+    let embeddings = f
+        .store
+        .reader
+        .load_embeddings(
+            f.ws,
+            f.proj,
+            f.embedder.provider().to_string(),
+            f.embedder.model_identity(),
+            f.embedder.dim(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(embeddings.len(), 22);
+    for (provider, model, dim) in [
+        ("openai", f.embedder.model_identity(), 2),
+        ("openai-compat", f.embedder.model_identity(), 3),
+        ("openai-compat", "synthetic-integral".into(), 2),
+    ] {
+        let mismatched = f
+            .store
+            .reader
+            .load_embeddings(f.ws, f.proj, provider.into(), model, dim)
+            .await
+            .unwrap();
+        assert!(
+            mismatched.is_empty(),
+            "mismatched vector coordinates must stay ineligible"
+        );
+    }
+    for embedding in embeddings {
+        assert!(
+            embedding.vector[1] > 0.0,
+            "content after the first window must affect the vector"
+        );
+        let norm = embedding.vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+    }
+    assert_eq!(
+        page_index_snapshot(&f),
+        before,
+        "heads, bodies, hashes and metadata must remain identical"
+    );
+    let inputs = server.inputs();
+    assert!(inputs.len() > 22);
+    let complete = inputs
+        .iter()
+        .map(|input| {
+            input
+                .strip_prefix("passage: ")
+                .expect("each document chunk needs its prefix")
+        })
+        .collect::<String>();
+    assert_eq!(
+        complete.len(),
+        pages.iter().map(|(_, body, _)| body.len()).sum::<usize>()
+    );
+    for (path, body, bytes) in pages {
+        assert!(
+            complete.contains(&body),
+            "every byte of every document must reach the provider"
+        );
+        assert_eq!(
+            std::fs::read(f.wiki.abs_path(f.ws, f.proj, &path)).unwrap(),
+            bytes
+        );
+        let marker = body.split_whitespace().last().unwrap();
+        let hits = f
+            .store
+            .reader
+            .search_pages_for_project(f.ws, f.proj, marker.into(), 30, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the final content must remain searchable in FTS"
+        );
+        assert_eq!(hits[0].path, path);
+    }
+    let second = f.backfill(false, false).await;
+    assert_eq!(second.embedded, 0);
+    assert_eq!(second.failed, 0);
+    assert_eq!(second.skipped, 22);
+    assert_eq!(
+        server.inputs().len(),
+        inputs.len(),
+        "matching rows must suppress provider calls"
+    );
+}
+
+#[tokio::test]
+async fn local_backfill_late_chunk_failure_never_persists_a_partial_document_vector() {
+    let mut f = fixture().await;
+    let server = LocalEmbeddingServer::start().await;
+    f.embedder = server.embedder();
+    let failed_body = format!("{} LATEFAILMARKER", "synthetic é🦀\n".repeat(1500));
+    f.write_page("notes/failure.md", &failed_body).await;
+    f.write_page("notes/control.md", "short legitimate control tailmarker")
+        .await;
+    let before = page_index_snapshot(&f);
+    let report = f.backfill(false, false).await;
+    assert_eq!(report.embedded, 1);
+    assert_eq!(report.failed, 1);
+    let inputs = server.inputs();
+    assert!(
+        inputs.len() > 2,
+        "earlier chunks must reach the provider before the late failure"
+    );
+    assert!(inputs.iter().any(|input| input.contains("LATEFAILMARKER")));
+    let embeddings = f
+        .store
+        .reader
+        .load_embeddings(
+            f.ws,
+            f.proj,
+            f.embedder.provider().into(),
+            f.embedder.model_identity(),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(embeddings.len(), 1);
+    assert_eq!(embeddings[0].path.as_str(), "notes/control.md");
+    assert_eq!(page_index_snapshot(&f), before);
+    let failed_path = PagePath::new("notes/failure.md").unwrap();
+    assert_eq!(
+        f.wiki.read_page(f.ws, f.proj, &failed_path).unwrap().body,
+        failed_body
+    );
+    let hits = f
+        .store
+        .reader
+        .search_pages_for_project(f.ws, f.proj, "LATEFAILMARKER".into(), 10, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "failed embedding must preserve final source text in FTS"
+    );
+    assert_eq!(hits[0].path, failed_path);
+}
+
+#[tokio::test]
+async fn local_wiki_write_embeds_complete_oversized_body_and_abstract() {
+    let mut f = fixture().await;
+    let server = LocalEmbeddingServer::start().await;
+    f.embedder = server.embedder();
+    f.wiki = f.wiki.with_embedder(f.embedder.clone());
+    let path = PagePath::new("notes/eager.md").unwrap();
+    let body = format!("{} tailmarkerbody", "synthetic body é🦀\n".repeat(1100));
+    let abstract_text = format!(
+        "{} tailmarkerabstract",
+        "synthetic abstract é🦀 ".repeat(1000)
+    );
+    let id = f
+        .wiki
+        .write_page(WritePageRequest {
+            workspace_id: f.ws,
+            project_id: f.proj,
+            path: path.clone(),
+            frontmatter: serde_json::json!({"title": "eager", "abstract": abstract_text}),
+            body: body.clone(),
+            tier: Tier::Semantic,
+            pinned: false,
+            title: None,
+            admission_ctx: None,
+            author_id: None,
+            actor: ai_memory_core::ActorContext::anonymous(),
+            evidence: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let body_ids = f
+        .store
+        .reader
+        .embedded_page_ids(
+            f.ws,
+            f.proj,
+            f.embedder.provider().into(),
+            f.embedder.model_identity(),
+            2,
+        )
+        .await
+        .unwrap();
+    let abstract_ids = f
+        .store
+        .reader
+        .abstract_embedded_page_ids(
+            f.ws,
+            f.proj,
+            f.embedder.provider().into(),
+            f.embedder.model_identity(),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(body_ids, vec![id]);
+    assert_eq!(abstract_ids, vec![id]);
+    let stored = f.wiki.read_page(f.ws, f.proj, &path).unwrap();
+    assert_eq!(stored.body, body);
+    assert_eq!(stored.frontmatter["abstract"], abstract_text);
+    let complete = server
+        .inputs()
+        .into_iter()
+        .map(|input| input.strip_prefix("passage: ").unwrap().to_string())
+        .collect::<String>();
+    assert_eq!(complete, format!("{body}{abstract_text}"));
+    let hits = f
+        .store
+        .reader
+        .search_pages_for_project(f.ws, f.proj, "tailmarkerbody".into(), 10, None)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, path);
 }

@@ -147,7 +147,7 @@ async fn dream_embedding_local_control_refuses_redirect_retry_and_truncation() {
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"data":[{"embedding":[3.0,4.0]}]})),
         )
-        .expect(1)
+        .expect(3)
         .mount(&server)
         .await;
     let embedder = OpenAiCompatEmbedder::new_local(server.uri(), "synthetic", 2).unwrap();
@@ -157,9 +157,18 @@ async fn dream_embedding_local_control_refuses_redirect_retry_and_truncation() {
         .unwrap();
     assert!((vector[0] - 0.6).abs() < 0.0001);
     assert!((vector[1] - 0.8).abs() < 0.0001);
-    assert!(embedder.embed_document(&"x".repeat(8193)).await.is_err());
+    assert!(embedder.embed_document(&"x".repeat(8193)).await.is_ok());
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|request| request.body.len() <= 8192));
+    let reconstructed: String = requests[1..]
+        .iter()
+        .map(|request| {
+            let sent: Value = serde_json::from_slice(&request.body).unwrap();
+            sent["input"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(reconstructed, "x".repeat(8193));
     assert!(!requests[0].headers.contains_key("authorization"));
     let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(sent["input"], "complete synthetic source");

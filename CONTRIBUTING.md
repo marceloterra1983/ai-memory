@@ -124,8 +124,8 @@ trailing `([#NNN])` PR/issue reference) and place it under the right
 ## Workflow rules (condensed from AGENTS.md)
 
 The full authoritative rules are in [`AGENTS.md`](AGENTS.md) — the single
-canonical agent/contributor rules file (`CLAUDE.md` is just a pointer to
-it). Short version:
+canonical agent/contributor rules file. This repository does not keep a
+root `CLAUDE.md` bridge. Short version:
 
 1. Keep changes scoped to the current task; avoid adjacent feature work and
    speculative refactors.

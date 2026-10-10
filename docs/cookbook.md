@@ -96,14 +96,16 @@ compacted or merged stays in git and the supersession chain, recoverable with
 
 - **Keep something forever:** pin it. A pinned page is exempt from the
   forget-sweep regardless of tier or age. Semantic and procedural pages never
-  decay either — only working/episodic memory ages.
+  decay either. The sweep applies decay-based retention only to episodic pages;
+  working pages require a TTL or explicit deletion to remove them.
 - **Make a note expire on a deadline:** ask your agent to remember it "until
   <date>" (an `expires_at`); the forget-sweep deletes it when the time passes,
   no matter how often it was read. A TTL outranks pinning.
-- **Tune how long each tier lasts:** set per-tier half-lives in the server's
-  `config.toml` under `[decay.half_life_days]` (e.g. keep episodic history longer,
-  working-tier scratch shorter). This setting applies to the server, rather than
-  a project's scope marker. Omit it for the default single curve.
+- **Tune episodic retention:** set `episodic` in the server's `config.toml`
+  under `[decay.half_life_days]` to change how quickly episodic pages become
+  cold. This setting applies to the server, rather than a project's scope
+  marker. Other tier keys affect the score formula but do not make those tiers
+  eligible for decay-based eviction or compaction. Omit it for the default curve.
 - **Compact instead of evict, and de-duplicate:** `[decay] compact_cold_episodic`
   keeps a cold page's durable facts (paths, error codes, decisions) and drops the
   prose; `[decay] dedup_cold_clusters` collapses near-duplicate cold pages into

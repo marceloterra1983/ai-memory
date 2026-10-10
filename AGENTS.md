@@ -74,10 +74,10 @@ Many projects use CLAUDE.md for Claude Code and
 AGENTS.md for Codex / OpenCode / OpenCode 2 / Cursor / Gemini CLI / Grok Build CLI / Kimi Code / Kiro CLI / Command Code,
 but if the project says one file is canonical, use that file.
 
-Claude Code loads `CLAUDE.md` and does not read `AGENTS.md`. In a project
-where `AGENTS.md` is canonical, give `CLAUDE.md` a bare `@AGENTS.md` import
-line. Without it a rule written to `AGENTS.md` is absent from context at
-session start and reaches Claude Code only if the agent opens the file.
+This repository uses only `AGENTS.md` for agent instructions, by the owner's
+policy. Do not create a root `CLAUDE.md` bridge here. Other repositories may
+choose a Claude import bridge; the product's generic installer supports their
+choice without imposing it on this checkout.
 
 If the rule is a standing *user/team* preference that should apply to
 every project (tech choices, code style, personal conventions), save it
@@ -111,8 +111,8 @@ start/end HTML-comment markers, without disturbing the rest of the file.
 
 This file is the single canonical instruction file for AI coding agents
 working in this repository (Claude Code, Codex, OpenCode, OpenCode 2, Cursor, Gemini
-CLI, Kimi Code, Command Code, and other AGENTS-aware harnesses). `CLAUDE.md` is only a
-short pointer here — do not duplicate rules into it.
+CLI, Kimi Code, Command Code, and other AGENTS-aware harnesses). Keep this
+repository's instructions here; do not create a root `CLAUDE.md`.
 
 ## Project overview
 
@@ -582,7 +582,7 @@ Additional boundary rules:
   tag from the branch, then let the branch go dormant — no standing
   develop/gitflow branches. Bucket incoming work at triage with the
   `breaking-change` label and version milestones.
-- Keep `CLAUDE.md` as a pointer to this file.
+- Keep repository agent instructions exclusively in `AGENTS.md`.
 
 ## Documentation map
 

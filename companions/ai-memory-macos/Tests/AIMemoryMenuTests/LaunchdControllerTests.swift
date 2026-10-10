@@ -62,6 +62,32 @@ struct LaunchdControllerTests {
         )
         #expect(rendered.contains("/tmp/a&amp;b&lt;c&gt;"))
     }
+
+    @Test(arguments: ["ordinary", "A&B", "A<B>", "A\"B", "A&amp;B"])
+    func renderedPathsRoundTripThroughPropertyList(component: String) throws {
+        let template = try String(
+            contentsOf: repoRoot().appending(path: "packaging/launchd/com.github.akitaonrails.ai-memory.plist"),
+            encoding: .utf8
+        )
+        let binary = URL(fileURLWithPath: "/tmp/\(component)/ai-memory")
+        let home = URL(fileURLWithPath: "/tmp/\(component)/home")
+        let dataDir = URL(fileURLWithPath: "/tmp/\(component)/data")
+        let rendered = LaunchdController.renderTemplate(template, binary: binary, home: home, dataDir: dataDir)
+        let plist = try #require(PropertyListSerialization.propertyList(
+            from: Data(rendered.utf8), options: [], format: nil
+        ) as? [String: Any])
+        let arguments = try #require(plist["ProgramArguments"] as? [String])
+        #expect(arguments.first == binary.path)
+        #expect(LaunchdController.programArgumentsBinary(inPlist: rendered) == binary.path)
+        #expect(plist["StandardOutPath"] as? String == home.path + "/Library/Logs/ai-memory/stdout.log")
+        #expect(plist["StandardErrorPath"] as? String == home.path + "/Library/Logs/ai-memory/stderr.log")
+        #expect((plist["EnvironmentVariables"] as? [String: String])?["AI_MEMORY_DATA_DIR"] == dataDir.path)
+    }
+
+    @Test(arguments: ["not a plist", "<plist><dict></dict></plist>", "<plist><dict><key>ProgramArguments</key><string>wrong type</string></dict></plist>"])
+    func malformedArgumentsHaveNoBinary(plist: String) {
+        #expect(LaunchdController.programArgumentsBinary(inPlist: plist) == nil)
+    }
 }
 
 private func repoRoot(file: String = #filePath) -> URL {

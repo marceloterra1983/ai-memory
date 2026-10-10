@@ -752,14 +752,14 @@ dedup_cold_clusters = false        # A3 opt-in: cluster near-duplicate cold
 # dedup_max_eps = 0.15             # conservative eps ceiling (cosine distance;
                                    # 0 ⇒ default). Lower = merges less.
 
-[decay.half_life_days]             # opt-in per-tier retention curves (all keys
+[decay.half_life_days]             # opt-in per-tier score curves (all keys
                                    # optional). Half-life in DAYS; converted to
                                    # λ = ln(2)/days. An omitted key falls back to
                                    # the scalar `lambda` above, so the default
                                    # (no keys) is byte-identical to today — no
                                    # score change or mass-eviction on upgrade.
-# working = 7                      # e.g. keep scratch short…
-# episodic = 365                   # …and session history long
+# working = 7                      # score only; no decay eviction for working
+# episodic = 365                   # slower decay-based episodic retention
 # semantic = 180
 # procedural = 90
 

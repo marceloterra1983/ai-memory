@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Refused importer HTTP redirects before forwarding imported content, escaped
+  binary/home paths in the Mac app's LaunchAgent plist, and drained both command
+  output pipes with bounded termination and child reaping on timeout. Corrected
+  working-tier retention guidance to require TTL or explicit deletion.
+  (local-20261009; private integration, no upstream issue opened)
 - Required project write access before hook admission changed a session's
   original scope or linked a managed run, and before drifted session-end or
   turn-checkpoint events wrote artifacts there. Revalidated grants inside the

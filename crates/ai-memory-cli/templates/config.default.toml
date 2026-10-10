@@ -106,6 +106,8 @@ log_level = "info"
 #   embedding_provider = "openai"         # or voyage | google | openai-compat
 #   embedding_model    = "..."            # provider-specific override
 #   embedding_dim      = 384              # must match the model
+#   embedding_query_base_url = "http://127.0.0.1:18003/v1"
+#                                # openai-compat only; queries only. Unset = embedding_base_url
 
 [decay]
 lambda = 0.02

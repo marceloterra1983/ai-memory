@@ -1031,6 +1031,17 @@ Copilot chat endpoint.
 AI_MEMORY_EMBEDDING_PROVIDER   openai | voyage | google | gemini | openai-compat | copilot
 AI_MEMORY_EMBEDDING_MODEL      e.g. text-embedding-3-small, gemini-embedding-001
 AI_MEMORY_EMBEDDING_BASE_URL   optional override; required for openai-compat
+AI_MEMORY_EMBEDDING_QUERY_BASE_URL
+                               optional; openai-compat only. `embed_query`
+                               uses this endpoint and `embed_document` stays
+                               on `AI_MEMORY_EMBEDDING_BASE_URL`. Unset, both
+                               use the base URL. Same model, dimension, and
+                               stored identity; a query failure is not retried
+                               on the document endpoint. In dream-local mode
+                               the URL must be a literal loopback endpoint:
+                               the factory validates it before building and
+                               queries go through the same bounded local
+                               client as documents
 AI_MEMORY_EMBEDDING_DIM        1536 (OpenAI, Copilot), 1024 (Voyage), 768 (Google);
                                required explicitly for openai-compat
 AI_MEMORY_EMBEDDING_QUERY_PREFIX     optional; prepended to query text before

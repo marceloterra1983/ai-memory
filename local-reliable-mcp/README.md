@@ -2,7 +2,8 @@
 
 Clientes continuam em `127.0.0.1:49374/mcp`. Este processo só encaminha.
 `memory_write_page` é a única chamada interceptada: a intenção é gravada
-na outbox **antes** de qualquer envio ao backend (`127.0.0.1:49376`).
+na outbox **antes** de qualquer envio ao backend configurado (nesta máquina,
+`127.0.0.1:49377`).
 
 A outbox fica fora do diretório de dados do ai-memory. O padrão é
 `~/.local/share/ai-memory-delivery` (intenções e recibos, não a base).
@@ -32,9 +33,9 @@ só contém «not found» não é ausência. Não há chamada de modelo.
 ## Comandos
 
 ```text
-reliable-mcp serve --listen 127.0.0.1:49374 --backend http://127.0.0.1:49376 --config CONFIG
-reliable-mcp worker --backend http://127.0.0.1:49376
-reliable-mcp ready --backend http://127.0.0.1:49376 --workspace NOME --project NOME
+reliable-mcp serve --listen 127.0.0.1:49374 --backend http://127.0.0.1:49377 --config CONFIG
+reliable-mcp worker --backend http://127.0.0.1:49377
+reliable-mcp ready --backend http://127.0.0.1:49377 --workspace NOME --project NOME
 reliable-mcp status --outbox CAMINHO
 reliable-mcp replay --operation ID --backend URL --outbox CAMINHO
 reliable-mcp reconcile --operation ID --accept-current-head --backend URL --outbox CAMINHO
@@ -52,6 +53,12 @@ erro JSON-RPC, `isError`, 405, 500 ou corpo malformado não contam.
 `/healthz` isolado não conta. O cache de schema não responde prontidão.
 O instalador também exige ingress e delivery ativos e repete a leitura
 MCP pela entrada; backend pronto sozinho não conclui a instalação.
+O patch do instalador prioriza `AI_MEMORY_BACKEND_URL`; sem override,
+transforma `service.backend_bind` do manifest em origin HTTP, validada por
+`ready`. Só a ausência desse campo permite o fallback legado `:49376`.
+O stage ainda gera `:49376`; nesta máquina essa porta pertence a
+`farol-firecrawl-mcp.service`. Ajuste o stage para `:49377` conforme
+`PROCEDURE.md` antes da instalação.
 
 ## Limites
 

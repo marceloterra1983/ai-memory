@@ -1170,10 +1170,15 @@ class InstallCase(unittest.TestCase):
             self.assertTrue((stage / "source" / "reliable-mcp").is_file())
             self.assertTrue((stage / "patches" / "install-ai-memory-ready.patch").is_file())
             copied = Path(tmp) / "install-ai-memory.sh"
-            shutil.copy(INSTALLER, copied)
+            shutil.copy(ROOT / "tests" / "fixtures" / "install-ai-memory-before-ready.sh", copied)
             patch = (ROOT / "patches" / "install-ai-memory-ready.patch").read_text()
+            dry_run = subprocess.run(
+                ["patch", "--fuzz=0", "--dry-run", "-p1"],
+                cwd=tmp, input=patch, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stdout + dry_run.stderr)
             applied = subprocess.run(
-                ["patch", "-p1"],
+                ["patch", "--fuzz=0", "-p1"],
                 cwd=tmp,
                 input=patch,
                 text=True,

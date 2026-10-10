@@ -58,6 +58,10 @@ pub enum StoreError {
     #[error("session collision")]
     SessionCollision,
 
+    /// A database user's hook attempted to write a project without write access.
+    #[error("project access is restricted; write access is required")]
+    ProjectWriteForbidden,
+
     /// A `spawn_blocking` task panicked or was cancelled.
     #[error("reader pool task did not complete: {0}")]
     PoolPanic(String),

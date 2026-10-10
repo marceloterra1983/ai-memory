@@ -74,13 +74,13 @@ pub(crate) fn build(state: Arc<WebState>) -> Router {
         .with_state(state)
 }
 
-/// Attach `Cache-Control: private, max-age=N` to a successful response.
+/// Permit private caching only after authorization is revalidated.
 ///
-/// Applied only to 2xx bodies — error paths return their responses
-/// directly without calling this, so error responses stay uncached.
+/// Applied to successful bodies and authorized 304 responses. Error paths
+/// return directly without calling this, so error responses stay uncached.
 fn with_cache(resp: Response, max_age: u32) -> Response {
     let mut resp = resp;
-    if let Ok(val) = HeaderValue::from_str(&format!("private, max-age={max_age}")) {
+    if let Ok(val) = HeaderValue::from_str(&format!("private, no-cache, max-age={max_age}")) {
         resp.headers_mut().insert(header::CACHE_CONTROL, val);
     }
     resp
@@ -260,10 +260,7 @@ async fn page_handler(
             .body(axum::body::Body::empty())
             .expect("static builder cannot fail");
         resp.headers_mut().insert(header::ETAG, etag_header.clone());
-        if let Ok(cc) = HeaderValue::from_str(&format!("private, max-age={PAGE_CACHE_MAX_AGE}")) {
-            resp.headers_mut().insert(header::CACHE_CONTROL, cc);
-        }
-        return Ok(resp);
+        return Ok(with_cache(resp, PAGE_CACHE_MAX_AGE));
     }
 
     let mut resp = with_cache(

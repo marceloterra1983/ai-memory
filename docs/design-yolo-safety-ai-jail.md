@@ -363,7 +363,7 @@ directly.
 | already-jailed detect | hostname `ai-sandbox` | `PS1` `(jail) ` | always "no" |
 | `--network` loopback reach | shared net ns | profile-allowed | n/a |
 | warning prompt | ✓ | ✓ | ✓ |
-| true-yolo env vars | ✓ | ✓ | ✓ (incl. powershell var) |
+| true-yolo `--settings` argument | ✓ | ✓ | ✓ |
 
 ## Code shape
 
@@ -403,8 +403,8 @@ directly.
 - `run.rs`: prompt gate is off without a TTY; decline aborts before launch;
   already-jailed skips the prompt; the ai-jail offer is absent when ai-jail is
   not found.
-- `harness.rs`: `apply_claude_true_yolo` sets the three env vars + the
-  `--settings` arg for Claude and is a no-op for other harnesses.
+- `harness.rs`: `apply_claude_true_yolo` adds the `--settings` argument that
+  selects `bypassPermissions` for Claude and is a no-op for other harnesses.
 - CHANGELOG `### Added` (minor); support-matrix + cookbook updated in the same
   change.
 - §5: `jail.rs` unit tests cover list parsing, support detection against

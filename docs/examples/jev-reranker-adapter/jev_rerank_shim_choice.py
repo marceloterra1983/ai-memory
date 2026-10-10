@@ -10,18 +10,14 @@ first balanced JSON object in the reply content to be
 order).
 
 This adapter recognises exactly that request (by the system-prompt prefix),
-scores every candidate with one batched Jev `score` question whose rubric
-mirrors the reranker prompt's own 1.0 / 0.7 / 0.3 / 0.0 guidance, and returns
-the judgement as plain chat content. Everything else — consolidation, lint,
-bootstrap — is reverse-proxied unchanged to the configured upstream, so only
-reranking rides the Jev endpoint.
+compares candidates with one Jev `choice` question and returns each
+candidate's choice probability as relevance in plain chat content. Everything
+else — consolidation, lint, bootstrap — is reverse-proxied unchanged to the
+configured upstream, so only reranking rides the Jev endpoint.
 
 Why: a hosted reranker model that answers in tens of seconds dwarfs the rest
-of a `memory_query`. A judge endpoint that scores a fixed rubric answers in
-well under a second, which keeps `AI_MEMORY_RERANKER=llm` usable in
-interactive sessions. On a 102-query golden set (see
-docs/jev-reranker-adapter.md) this adapter matched the hosted reranker's
-hit@1 / MRR / NDCG@10 while cutting mean rerank latency from ~20s to ~0.2s.
+of a `memory_query`. The measured choice and historical rubric runs, including
+their quality and latency limits, are documented in docs/jev-reranker-adapter.md.
 
 Env:
   JEV_URL     Jev systemone endpoint      (default http://127.0.0.1:18095/v1/systemone)
@@ -33,6 +29,7 @@ Stdlib only. No secrets are stored: Authorization headers are forwarded
 verbatim to the upstream.
 """
 import json
+import math
 import os
 import sys
 import time
@@ -48,14 +45,6 @@ LISTEN = os.environ.get("LISTEN", "127.0.0.1:18097")
 # Fixed prefix of the reranker's system prompt; see
 # crates/ai-memory-llm/src/reranker.rs in the ai-memory tree.
 RERANK_SYSTEM_PREFIX = "You are a retrieval reranker for a software project's memory wiki."
-
-# Mirrors the four grades of the reranker prompt (1.0 / 0.7 / 0.3 / 0.0).
-RUBRIC = [
-    "0.0 unrelated — does not address the query at all",
-    "0.3 tangential — loosely related to the query",
-    "0.7 same topic — same subsystem or topic, useful supporting context",
-    "1.0 direct answer — directly answers the query",
-]
 
 
 def log(msg):
@@ -106,10 +95,12 @@ def jev_rerank(payload):
     scores = []
     for c in cands:
         n = c["candidate"]
-        p = probs.get(f"c{n}", 0.0)
-        p = float(p) if isinstance(p, (int, float)) else 0.0
+        p = probs.get(f"c{n}")
+        if (isinstance(p, bool) or not isinstance(p, (int, float))
+                or not math.isfinite(p) or not 0.0 <= p <= 1.0):
+            raise ValueError("incomplete or invalid choice probabilities")
         scores.append({"candidate": n, "relevance": round(p, 4)})
-    log(f"jev-choice {len(cands)} candidates in {dt:.3f}s query={query[:60]!r}")
+    log(f"jev-choice {len(cands)} candidates in {dt:.3f}s")
     return {"scores": scores}
 
 
@@ -147,8 +138,8 @@ class Handler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as e:
             self._reply(e.code, e.read())
         except Exception as e:  # transport failure upstream
-            log(f"forward error {self.command} {self.path}: {e}")
-            self._reply(502, json.dumps({"error": str(e)[:200]}).encode())
+            log(f"forward transport failed: {type(e).__name__}")
+            self._reply(502, json.dumps({"error": "upstream transport failure"}).encode())
 
     def _reply_finish(self, body):
         # headers besides Content-Length were already sent by the caller
@@ -188,7 +179,7 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(200, json.dumps(out).encode())
         except Exception as e:
             # The server treats any failure as "keep the original order".
-            log(f"jev rerank failed: {e}")
+            log(f"jev rerank failed: {type(e).__name__}")
             self._reply(500)
 
     def do_GET(self):

@@ -41,14 +41,16 @@ canonicalize accidental aliases without changing published commits.
 
 ## Required gates before push/merge
 
-All of these must pass; CI enforces them and so does `bin/release`. The build
+All of these must pass before push/merge. CI requires the dependency-policy
+checks; `bin/release` enforces formatting, diff, lint and tests, but currently
+reports dependency-policy failures as warnings for operator review. The build
 is self-contained, so none of them needs an environment variable.
 
 ```bash
 cargo fmt --all -- --check
 git diff --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo tf                            # every test (alias: cargo nextest run -P full)
+cargo tf                            # every test (alias: cargo nextest run --workspace -P full)
 cargo deny check                    # dependency policy
 ```
 
@@ -93,12 +95,6 @@ the block's shell options stay inside it; a failing test run still fails the
 hook even when your own commands follow the block without `set -e`.
 Run the installer again to update an existing installation.
 
-The managed test block clears Git's repository environment and disables global
-and system Git configuration for Cargo and its children. Fixture commands can
-then use their own repositories without inheriting the checkout being pushed.
-The publishing Git process and other hook code retain their configuration.
-Run the installer again to update an existing installation.
-
 Companions have separate Cargo workspaces. Check each changed companion with
 `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`, passing
 its `--manifest-path`. Changes to the lifecycle relay also need the real-server
@@ -131,29 +127,29 @@ The full authoritative rules are in [`AGENTS.md`](AGENTS.md) — the single
 canonical agent/contributor rules file (`CLAUDE.md` is just a pointer to
 it). Short version:
 
-1. Work milestone by milestone. Do not start M(n+1) until every "Done when"
-   bullet in M(n) passes (see `docs/design-decisions.md`).
-2. No dead code, no half-built features. Stubs are documented with
-   `// M<n> TODO` in the module doc-comment.
+1. Keep changes scoped to the current task; avoid adjacent feature work and
+   speculative refactors.
+2. No dead code or half-built public surface. Document future work in design
+   notes instead of shipping unreachable stubs.
 3. Write tests before claiming done. Parsers, ID derivation, and
    retention/decay math especially.
-4. Do not refactor outside the milestone. Only touch what the current
-   milestone requires.
+4. Match the surrounding conventions and use the smallest complete change.
 5. Comments explain *why*, never *what*. No comments that restate the line
    above them.
 
 ## Cross-cutting invariants
 
 Never violate any of the invariants in [`AGENTS.md`](AGENTS.md) (see the
-"Rust Engineering Rules" and "Project Maintenance Rules" sections).
+"Cross-cutting invariants" and "Project maintenance rules" sections).
 Highlights for contributors:
 
 - All SQLite writes go through the single writer actor (`WriterHandle`).
 - Config is read once at startup; never call `std::env::var` outside `Config::load`.
 - Atomic file writes only: tmp + rename + fsync; never write in-place.
 - Every wiki page is namespaced by `(workspace_id, project_id)`.
-- The CLI is always a thin HTTP client to the running server — it never
-  opens the SQLite file or the wiki directory directly.
+- Commands that use a live store remain thin HTTP clients. Offline lifecycle
+  operations (`reset`, `restore`, `reindex`, and `uninstall --purge-data`)
+  access disk directly and must retain the live-process guard.
 
 ## Versioning and deprecation policy
 

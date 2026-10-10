@@ -158,7 +158,7 @@ or prompt routing for learning review.
   workspace resolver 3. The authoritative workspace version is
   `workspace.package.version` in `Cargo.toml`.
 - **Async runtime:** `tokio` (full features).
-- **MCP/HTTP:** `rmcp` 1.7 (server SDK) + `axum` 0.8 for MCP HTTP, hooks,
+- **MCP/HTTP:** `rmcp` 2.2 (server SDK) + `axum` 0.8 for MCP HTTP, hooks,
   admin, `/api/v1`, and the built-in `/web` UI; `tower` / `tower-http`.
 - **Store:** `rusqlite` (bundled SQLite, backup API), `refinery`
   migrations, FTS5, `parking_lot`.
@@ -311,6 +311,7 @@ no tiers.
 
 - Shell-level checks: `tests/hooks/test_lib.sh`,
   `tests/e2e/handoff_smoke.sh`, `scripts/check-native-packaging.sh`.
+- Offline Jev adapter contract: `python3 -B -m unittest discover -s tests/examples -v`.
 - CI additionally runs `cargo build --release --bin ai-memory` on
   Linux/macOS, a Docker image smoke test, `cargo audit` (with the ignores
   listed in `ci.yml`), and differential gitleaks scanning.
@@ -364,9 +365,9 @@ prior-art bug (see `docs/ARCHITECTURE.md` and `docs/issues-*.md`):
 5. **Hooks are fire-and-forget and bounded.** Script hooks hard-timeout
    at ≤200 ms; the server returns 202 immediately or 429 when saturated.
    No unbounded `tokio::spawn` fan-out or queues on hook paths.
-6. **Privacy strip is a typed boundary.** `Sanitized<NewObservation>` has
-   no constructor other than `sanitize()`; the hook router's sanitizer is
-   the only path from untrusted text into the store.
+6. **Privacy strip is a typed boundary.** `Sanitized<NewObservation>` is
+   constructed only by `Sanitized::new`, which scrubs and bounds the title
+   and body with the configured sanitizer before the store accepts them.
 7. **JSON-schema structured outputs only** for LLM calls; no XML or
    wrapper libraries.
 8. **`{provider, model, dim}` denormalized next to every embedding**;
@@ -412,7 +413,7 @@ prior-art bug (see `docs/ARCHITECTURE.md` and `docs/issues-*.md`):
 
     Unit tests do not cover this: they exercise one session at a time, which
     is the exact shape that cannot see a collaboration or concurrency defect.
-    `crates/ai-memory-store/tests/multi_session.rs` and the pointer tests in
+    `crates/ai-memory-store/tests/suite/multi_session.rs` and the pointer tests in
     `ai-memory-core::active_project` are the guards. Any change to scope
     resolution, page supersession, session identity, handoff acceptance, the
     writer actor, or owner filters must be argued against this invariant
@@ -476,7 +477,7 @@ Additional boundary rules:
   root, DB-user, and anonymous cases — now recorded against the inventory.
 - New disk+SQL mutations need recovery/rollback tests.
 - The recall-eval framework lives at
-  `crates/ai-memory-consolidate/tests/recall_eval.rs`.
+  `crates/ai-memory-consolidate/tests/suite/recall_eval.rs`.
 - Tests run with `cargo t` locally and `cargo test --workspace --all-targets`
   in CI (plus `cargo test --workspace --doc`, which `--all-targets` excludes,
   for doc-comment code blocks).

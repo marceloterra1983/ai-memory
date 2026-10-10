@@ -100,9 +100,10 @@ compacted or merged stays in git and the supersession chain, recoverable with
 - **Make a note expire on a deadline:** ask your agent to remember it "until
   <date>" (an `expires_at`); the forget-sweep deletes it when the time passes,
   no matter how often it was read. A TTL outranks pinning.
-- **Tune how long each tier lasts:** set per-tier half-lives in the project's
-  `.ai-memory.toml` `[decay.half_life_days]` (e.g. keep episodic history longer,
-  working-tier scratch shorter). Omit it for the default single curve.
+- **Tune how long each tier lasts:** set per-tier half-lives in the server's
+  `config.toml` under `[decay.half_life_days]` (e.g. keep episodic history longer,
+  working-tier scratch shorter). This setting applies to the server, rather than
+  a project's scope marker. Omit it for the default single curve.
 - **Compact instead of evict, and de-duplicate:** `[decay] compact_cold_episodic`
   keeps a cold page's durable facts (paths, error codes, decisions) and drops the
   prose; `[decay] dedup_cold_clusters` collapses near-duplicate cold pages into

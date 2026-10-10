@@ -11,9 +11,10 @@ introducing a new mode.
 The build is self-contained (`CONTRIBUTING.md`, "Dev setup"): SQLite is
 bundled via `rusqlite`'s `bundled` feature and `libgit2` is vendored via
 `git2`'s `vendored-libgit2` feature. No system libraries beyond a standard C
-toolchain are required, and nothing is fetched from the network during
-`cargo build`. Building from a vendored/mirrored crates.io cache (standard
-practice for air-gapped Rust builds, e.g. `cargo vendor`) works the same way.
+toolchain are required. Stage the pinned Rust toolchain and a vendored or
+mirrored crates.io dependency cache on a connected machine first, then use
+`cargo build --offline --locked` in the air-gapped environment. The committed
+Tailwind stylesheet needs no download unless `TAILWIND_BUILD=1` is set.
 
 If you'd rather not build at all, tagged GitHub Releases publish prebuilt
 binaries for Linux (`linux/amd64`, `linux/arm64`), macOS
@@ -23,19 +24,24 @@ Windows (`ai-memory-windows-x86_64.zip`), each with a SHA-256 checksum
 network-connected machine, verify the checksum, and transfer the artifact
 into the air-gapped environment.
 
-## Runtime: no network calls unless you configure one
+## Runtime: local storage and configured network endpoints
 
 Covered in full in [`DATA_HANDLING.md`](../DATA_HANDLING.md), summarized
 here: ai-memory has no telemetry, analytics, or phone-home behavior. The
-server, CLI, and lifecycle hooks run entirely against the local data
-directory. The only things that make a network call are things you
-explicitly configure:
+server stores data locally; the CLI and lifecycle hooks communicate with the
+configured server endpoint. Keep that endpoint local and avoid remote providers
+and integrations for offline operation:
 
 - **A cloud LLM/embedding provider**, if you want AI-assisted consolidation,
   search, or provider-based embeddings. Skip this and use the `local`
   embedding provider (below) to stay fully offline.
-- **`capture_assistant`** and **`AI_MEMORY_RERANKER=llm`**, both off by
-  default — see `DATA_HANDLING.md`.
+- **`AI_MEMORY_RERANKER=llm`** and **admission webhooks**, both off by
+  default, can send query/page content to their configured endpoints.
+  `capture_assistant` adds captured text; it does not initiate provider calls
+  on its own. See `DATA_HANDLING.md`.
+
+The best-effort local embedding default can download model files on its first
+start. Stage those files before starting offline, as described below.
 
 ## Local embeddings without a network dependency
 

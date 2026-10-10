@@ -21,6 +21,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Required project write access before hook admission changed a session's
+  original scope or linked a managed run, and before drifted session-end or
+  turn-checkpoint events wrote artifacts there. Revalidated grants inside the
+  writer transaction. (local-20261009; private integration, no upstream issue opened)
+- Required authorization revalidation before browser caches reused grant-scoped
+  API responses, including conditional page responses.
+  (local-20261009; private integration, no upstream issue opened)
+- Installed the shared helper with verified standalone hook bundles and made
+  capture-only markers transparent to PowerShell scope/settings discovery.
+  (local-20261009; private integration, no upstream issue opened)
+- Refused large multi-architecture manifests before local deploy builds,
+  removed unused Tailwind skip configuration, and made the AUR check execute
+  the CLI tests instead of its empty binary shim.
+  (local-20261009; private integration, no upstream issue opened)
+- Rejected incomplete or invalid Jev Choice probabilities without inventing
+  scores, and omitted raw queries and provider exception messages from adapter
+  logs. (local-20261009; private integration, no upstream issue opened)
+- Omitted private source values from invalid conversation-import JSON
+  diagnostics while retaining the error category and input location.
+  (local-20261009; private integration, no upstream issue opened)
+
 - Replaced redundant dream ML support judgments with shared-driver proof of exactly two complete literal source records and no new body text. Kept local Jev relatedness mandatory at 0.95 and real Qwen drafting; refused rewritten output and counted only actual inference attempts/HTTP requests. (local-20261009; private integration, no upstream issue opened)
 - Refused dream clusters with different expiration instants (including an absent TTL), and required unchanged expiration on new versions; equal TTLs remain eligible and expiry is rechecked by CAS. (local-20261009; private integration, no upstream issue opened)
 - Fixed free titles and no-target sentinels being promoted to typed wiki links;
@@ -39,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source page's own scope now keeps its typed relation, index edge and
   frontmatter declaration, while bare `none`/`nenhuma`/`N/A` markers still mean
   absence and curation only removes an absent `.md` form it can provably verify.
+  (local-20261009; private integration, no upstream issue opened)
+
+### Changed
+- Corrected current capture, project grants, local embedding defaults, supported
+  harnesses, test targets, configuration, backup and rollback documentation;
+  preserved historical benchmarks and their limitations.
   (local-20261009; private integration, no upstream issue opened)
 
 ## [2.5.2] - 2026-10-01

@@ -40,7 +40,8 @@ rather than either alone.
 **agentmemory (rohitg00)** - actively maintained and maturing along the
 trajectory the May report predicted. Notable since then: a real-workload
 benchmark ("coding-agent-life-v1", 635 requests / 888K tokens / 35 hours,
-R@5 = 0.967 for the hybrid retriever), `AGENT_ID` multi-agent isolation
+R@5 = 0.967 for the hybrid retriever; this is not its LongMemEval-S result,
+which the dated parity audit records as 0.952), `AGENT_ID` multi-agent isolation
 with an opt-in isolated recall scope, and runtime cost warnings when a
 premium model is configured for compression. Still on the iii-engine +
 JSON-in-KV substrate the May report identified as its structural
@@ -583,8 +584,13 @@ consolidation-as-belief-strength (evidence count + quotes, strengthen/
 weaken/extend) also points at how R3/R4 could carry *confidence*, not
 just supersession order.
 
-**R6 - Local embeddings via ONNX (medium; already reserved).**
-`models/` has been reserved for exactly this since M9.5 planning.
+**R6 - Local embeddings via ONNX (original recommendation).**
+Local embeddings now ship through pure-Rust Candle with a checksum-pinned
+`all-MiniLM-L6-v2` cache in `models/`; see [local embeddings](local-embeddings.md).
+The original ONNX recommendation below is retained as research history, rather
+than an unimplemented local-embedding requirement.
+
+`models/` had been reserved for exactly this since M9.5 planning.
 Competitors ship all-MiniLM locally by default; it removes the provider
 dependency from vector search and makes hybrid retrieval a zero-config
 default rather than an opt-in. The `ort` crate is the known path.

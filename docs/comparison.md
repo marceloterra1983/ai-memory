@@ -39,11 +39,14 @@ What actually distinguishes it:
 
 And it publishes numbers: **LongMemEval-S hit@5 0.823** (local-embeddings
 default; 0.668 zero-LLM), produced by the in-repo harness with full provenance
-— not a marketing claim. For context on the same dataset, mcp-memory-service
-reports 0.804 R@5 and agentmemory 0.967 R@5 (hybrid + reranking); ai-memory is
-comparable to the former and honestly below the latter, and it documents *why*
-(the pipeline pays a real 2 KB privacy-capture cost the raw-log retrievers do
-not). See [where we're behind](#where-were-behind-or-different-by-choice).
+— not a marketing claim. The dated research records mcp-memory-service at
+0.804 turn-level and 0.860 session-level R@5, and agentmemory at 0.952 on
+LongMemEval-S (hybrid + reranking). agentmemory's 0.967 belongs to its separate
+`coding-agent-life-v1` workload. Compare matching evidence units: ai-memory's
+`hit@5` is session-level. These published runs are not controlled comparisons;
+our pipeline also imposes a 2 KB privacy cap on captured excerpts. See the
+[research record](research-2026-landscape.md) and
+[where we're behind](#where-were-behind-or-different-by-choice).
 
 ## By camp
 
@@ -256,9 +259,11 @@ operator turns it on.
 
 Fair means saying this plainly:
 
-- **Raw retrieval score, and no local reranker.** 0.823 hit@5 on LongMemEval-S
-  is comparable to mcp-memory-service and below agentmemory's 0.967 (hybrid +
-  reranking). Part is deliberate — a 2 KB privacy cap on captured excerpts puts
+- **Raw retrieval score, and no local reranker.** Our 0.823 session-level hit@5
+  on LongMemEval-S is below the cited session-level mcp-memory-service result
+  (0.860) and agentmemory's LongMemEval-S result (0.952, hybrid + reranking).
+  The runs differ in capture and retrieval methods. A 2 KB privacy cap on
+  captured excerpts puts
   evidence deep inside one long turn out of the index's reach; the benchmark
   measures the *shipped, sanitized* system, not an idealized retriever. The only
   reranker is LLM-as-judge, so the zero-LLM default path has none; the opt-in

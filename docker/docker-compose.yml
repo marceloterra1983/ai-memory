@@ -4,9 +4,8 @@
 #   docker compose up -d
 # Attach Claude Code (or any MCP HTTP client) at
 #   http://localhost:49374/mcp
-# State persists in the `ai-memory-data` volume; move it between hosts
-# by stopping the container, `docker volume export` (or rsync the
-# mountpoint), and importing on the target.
+# State persists in the `ai-memory-data` volume. Use the online backup CLI
+# for a server snapshot; see ../docs/backup.md for backup and restore steps.
 
 services:
   ai-memory:

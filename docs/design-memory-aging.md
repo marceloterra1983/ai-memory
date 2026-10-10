@@ -16,9 +16,18 @@ and the R2/R7 roadmap items in
 
 ---
 
-## Current state (verified against the code — do not rebuild this)
+## Original implementation baseline
 
-The aging machinery is further along than a first reading suggests. What exists:
+This baseline and the phased plan below preserve the design prepared for 2.4;
+they are not a current backlog. The per-tier curves, tier-down, dedup,
+contradiction findings, belief-strength option and read-path reinforcement have
+since shipped. See the [operational architecture](ARCHITECTURE.md) and
+[borrowed-ideas status](competitive-parity.md)
+for current behavior and remaining gates. In particular, C1's read-path gap is
+closed; its original diagnosis is retained here as rationale.
+
+At that baseline, the aging machinery was further along than a first reading
+suggested:
 
 ### The retention formula and its inputs
 
@@ -373,7 +382,7 @@ and is under-used. The only firm new column is A2's compaction marker.
 
 Ordering is cheapest-and-safest first. Each PR that touches LLM or changes ranking
 ships **opt-in / off-by-default** and does not default on until the **R2 harness**
-(now built, #771/#772; `crates/ai-memory-consolidate/tests/recall_eval.rs`) proves
+(now built, #771/#772; `crates/ai-memory-consolidate/tests/suite/recall_eval.rs`) proves
 a triple/QA delta.
 
 **Phase 1 — cheap, zero-LLM, safe (no ranking change):**
@@ -505,7 +514,7 @@ every new migration.
 ## R2 acceptance
 
 R2 is the reproducible LongMemEval-V2 recall-eval harness
-(`crates/ai-memory-consolidate/tests/recall_eval.rs`, built in #771/#772). It is
+(`crates/ai-memory-consolidate/tests/suite/recall_eval.rs`, built in #771/#772). It is
 the gate, not a formality:
 
 - **No-regression gate (mandatory for anything that changes stored content or

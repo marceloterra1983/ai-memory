@@ -178,9 +178,10 @@ not disable native harness transcript files or other vendors' hooks.
 Auth, owner checks, admission rules and sanitization still apply. All items in
 one batch share one authenticated identity; separate batches by operator when
 representing multiple users. `extension` is self-declared provenance and the
-capture variable grants no permissions. ai-memory has a shared single-tenant
-wiki with multi-user attribution, not per-project RBAC or producer isolation.
-See [multi-user attribution](users.md).
+capture variable grants no permissions. Pages are shared within each project,
+and multi-user servers support optional project read/write grants. Producer
+namespaces record provenance; they do not create access grants or additional
+isolation. See [multi-user attribution and project access](users.md).
 
 No framework adapter, workflow engine, generic plugin runtime or OpenTelemetry
 collector is introduced. A future OpenTelemetry adapter can map conversation

@@ -19,14 +19,69 @@ GLOBAL_PROJECT = "_global"
 TIERS = {"working", "episodic", "semantic", "procedural"}
 
 
-def parse_message(raw: bytes):
+# rmcp::model::NumberOrString is i64 or string. JSON booleans are bool, which
+# is an int in Python, and serde rejects them. Floats are not i64 either.
+_I64_MIN = -1 << 63
+_I64_MAX = (1 << 63) - 1
+
+
+def _load_object(raw: bytes):
+    duplicated = False
+
+    def pairs(items):
+        nonlocal duplicated
+        obj = {}
+        for key, value in items:
+            if key in obj:
+                duplicated = True
+            obj[key] = value
+        return obj
+
     try:
-        message = json.loads(raw.decode("utf-8"))
+        message = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(message, dict):
         return None
-    return message
+    return message, duplicated
+
+
+def parse_message(raw: bytes):
+    loaded = _load_object(raw)
+    if loaded is None or loaded[1]:
+        return None
+    return loaded[0]
+
+
+def request_id(value):
+    """Id rmcp will deserialize, or None when it will not."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, int) and _I64_MIN <= value <= _I64_MAX:
+        return value
+    return None
+
+
+def safe_echo_id(message):
+    """Echo only an id NumberOrString accepts. Anything else becomes null."""
+    if not isinstance(message, dict) or "id" not in message:
+        return None
+    return request_id(message["id"])
+
+
+def rpc_request_ok(message) -> bool:
+    if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or "id" not in message:
+        return False
+    return request_id(message["id"]) is not None
+
+
+def rpc_notification_ok(message) -> bool:
+    if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or "id" in message:
+        return False
+    method = message.get("method")
+    return isinstance(method, str) and method != ""
 
 
 def is_write(message) -> bool:
@@ -36,6 +91,14 @@ def is_write(message) -> bool:
     if not isinstance(params, dict):
         return False
     return params.get("name") == "memory_write_page"
+
+
+def duplicate_write(raw: bytes) -> bool:
+    """True when duplicate keys last-key-win into a write. Do not enqueue that view."""
+    loaded = _load_object(raw)
+    if loaded is None or not loaded[1]:
+        return False
+    return is_write(loaded[0])
 
 
 def arguments_of(message) -> dict:
@@ -384,16 +447,59 @@ def receipt(intent: dict) -> dict:
     return body
 
 
+def _boolean_schema(schema) -> bool:
+    return isinstance(schema, dict) and schema.get("type") == "boolean"
+
+
+def _string_or_null_schema(schema) -> bool:
+    """schemars Option<String> is type ["string","null"]. Gemini uses nullable.
+
+    anyOf string|null is the other nullable form the backend already emits.
+    A bare string is accepted because the fake and a non-null field use it.
+    Presence without a string type is not advertisement.
+    """
+    if not isinstance(schema, dict):
+        return False
+    kind = schema.get("type")
+    if kind == "string":
+        return True
+    if isinstance(kind, list) and kind and all(isinstance(item, str) and item in {"string", "null"} for item in kind):
+        return "string" in kind
+    branches = schema.get("anyOf")
+    if not isinstance(branches, list) or not branches:
+        return False
+    saw_string = False
+    for branch in branches:
+        if not isinstance(branch, dict):
+            return False
+        branch_type = branch.get("type")
+        if branch_type == "string":
+            saw_string = True
+            continue
+        if branch_type == "null":
+            continue
+        if (
+            isinstance(branch_type, list)
+            and "string" in branch_type
+            and all(isinstance(item, str) and item in {"string", "null"} for item in branch_type)
+        ):
+            saw_string = True
+            continue
+        return False
+    return saw_string
+
+
 def cas_advertised(tools) -> bool:
     if not isinstance(tools, list):
         return False
     for tool in tools:
         if not isinstance(tool, dict) or tool.get("name") != "memory_write_page":
             continue
-        props = (tool.get("inputSchema") or {}).get("properties")
+        schema = tool.get("inputSchema")
+        props = schema.get("properties") if isinstance(schema, dict) else None
         if not isinstance(props, dict):
             return False
-        return "create_only" in props and "expected_page_id" in props
+        return _boolean_schema(props.get("create_only")) and _string_or_null_schema(props.get("expected_page_id"))
     return False
 
 

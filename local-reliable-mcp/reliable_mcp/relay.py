@@ -25,13 +25,17 @@ from reliable_mcp.protocol import (
     arguments_of,
     auth_fingerprint,
     cas_advertised,
+    duplicate_write,
     intent_hash,
     is_write,
     normalize_write,
     parse_message,
     receipt,
     rpc_error,
+    rpc_notification_ok,
+    rpc_request_ok,
     rpc_result,
+    safe_echo_id,
 )
 from reliable_mcp.safe import (
     LOOPBACK_HOSTS,
@@ -185,8 +189,17 @@ class Relay:
     def _mcp(self, target: str, header_items, body: bytes):
         message = parse_message(body)
         if isinstance(message, dict) and is_write(message):
+            if not rpc_request_ok(message):
+                self._log(method="POST", path="/mcp", error_class="refused")
+                return _json(rpc_error(safe_echo_id(message), -32600, "Invalid Request"))
             return self._write(message, header_items)
-        if isinstance(message, dict):
+        # Duplicate keys must not be reinterpreted as a clean write. Other
+        # malformed envelopes are forwarded unchanged so we do not synthesize
+        # a valid request from them.
+        if message is None and duplicate_write(body):
+            self._log(method="POST", path="/mcp", error_class="refused")
+            return _json(rpc_error(None, -32600, "Invalid Request"))
+        if isinstance(message, dict) and (rpc_request_ok(message) or rpc_notification_ok(message)):
             return self._mcp_control(message, target, header_items, body)
         return self._forward("POST", target, header_items, body)
 

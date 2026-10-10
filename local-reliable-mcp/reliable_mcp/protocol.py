@@ -25,6 +25,15 @@ _I64_MIN = -1 << 63
 _I64_MAX = (1 << 63) - 1
 
 
+def _reject_constant(name: str) -> None:
+    # serde_json/rmcp refuse NaN, Infinity, and -Infinity. Python's json accepts
+    # them by default and turns them into floats, so a write whose arguments
+    # contain one would parse, get normalized with the constant silently
+    # dropped, and enqueue. Refuse at parse time instead: _load_object returns
+    # None and the body is forwarded unchanged, where the backend rejects it.
+    raise ValueError(f"non-standard JSON constant {name}")
+
+
 def _load_object(raw: bytes):
     duplicated = False
 
@@ -38,8 +47,12 @@ def _load_object(raw: bytes):
         return obj
 
     try:
-        message = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        message = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=pairs,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, ValueError):
         return None
     if not isinstance(message, dict):
         return None

@@ -39,8 +39,11 @@ Sem `--stage`, o comando só imprime o plano e diz «não instala».
 
 1. Copiar `source/` para `~/.agents/tools/ai-memory/reliable-mcp/` com
    dono do usuário e diretórios `0700` / arquivos `0600` (o lançador `0755`).
-2. `bootstrap` contra o backend **ainda** em `:49374`. Se `create_only` não
-   aparecer no `tools/list`, abortar. Não mover a porta.
+2. `bootstrap` contra o backend **ainda** em `:49374`, se ele já anunciar
+   CAS. Na primeira instalação, pode usar o mesmo binário candidato
+   validado em uma porta loopback livre com dados temporários. Copiar
+   somente `cache/mcp_bootstrap.json` dessa outbox para a outbox real;
+   nunca copiar as intenções do ensaio. Sem CAS confirmado, abortar.
 3. Criar a outbox `~/.local/share/ai-memory-delivery` (`0700`), fora de
    `~/.local/share/ai-memory`.
 4. Parar `ai-memory.service`.

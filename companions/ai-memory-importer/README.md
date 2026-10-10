@@ -78,6 +78,9 @@ stubs for them.
   `tags`, `pinned`, and `body`. Unknown frontmatter is ignored.
 - Auth comes only from `AI_MEMORY_AUTH_TOKEN`; there is intentionally no CLI
   token argument.
+- HTTP redirects are refused for preflight, page writes and conversation
+  batches. Imported content stays at the selected `--server-url`; a redirect
+  error reports the HTTP status without its location or response body.
 - External conversations are fully parsed, schema-checked, bounded, and
   sanitized before any manifest or HTTP request is created. Unknown fields and
   roles fail closed. Limits are 2 MiB per file, 128 messages, and 1 MiB total

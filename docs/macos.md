@@ -211,6 +211,14 @@ open "companions/ai-memory-macos/dist/AI Memory.app"
 Drag `AI Memory.app` to `/Applications` so the LaunchAgent path stays stable
 across rebuilds. The menu extra has no Dock icon.
 
+The app XML-escapes binary, home and data-directory paths in its LaunchAgent
+plist and reads installed arguments through the property-list parser. Its
+command runner drains both output pipes while the child runs and reaps its own
+child on timeout, escalating to SIGKILL if SIGTERM does not stop it. Native
+regressions for these behaviors run with
+`swift test --package-path companions/ai-memory-macos` on macOS with Swift 6;
+Linux Rust checks do not validate the Swift companion.
+
 1. **Install & Start Server** — runs bundled `ai-memory init` if
    `~/Library/Application Support/ai-memory/config.toml` is missing, renders
    `packaging/launchd/com.github.akitaonrails.ai-memory.plist`, and bootstraps

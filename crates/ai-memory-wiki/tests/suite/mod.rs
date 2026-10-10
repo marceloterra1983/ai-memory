@@ -5,3 +5,4 @@
 mod admission;
 mod dream_cas;
 mod dream_cas_red;
+mod page_file_lock;

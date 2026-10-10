@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added optional `create_only` and `expected_page_id` guards on `memory_write_page`, checked in the same writer transaction as the page mutation, and returned `page_id` from `memory_read_page` when that head's stored body is the body served. A lost race returns JSON-RPC `-32009` `page_write_conflict` and leaves the markdown, index, and evidence unchanged. (local-20261009; private integration, no upstream issue opened)
 - Added the operational local `dream` admin route (Anonymous bootstrap with no authority, Root when authority is configured) and scoped thin CLI, with dry-run
   by default and explicit apply, exact no-create allowlists, a globally bounded
   native scheduler, conservative input limits, local semantic screening,
@@ -34,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   following, and the same 8 KiB request cap, dim check, and
   non-finite/degenerate vector refusal.
   (local-20261009; private integration, no upstream issue opened)
+- Refused a conditional `memory_write_page` that would replace an unindexed or divergent markdown file, and serialized the page snapshot, install, SQL, and rollback across store handles and processes with an exclusive flock taken on a blocking thread. Omitting the guards still overwrites. (local-20261009; private integration, no upstream issue opened)
 - Replaced redundant dream ML support judgments with shared-driver proof of exactly two complete literal source records and no new body text. Kept local Jev relatedness mandatory at 0.95 and real Qwen drafting; refused rewritten output and counted only actual inference attempts/HTTP requests. (local-20261009; private integration, no upstream issue opened)
 - Refused dream clusters with different expiration instants (including an absent TTL), and required unchanged expiration on new versions; equal TTLs remain eligible and expiry is rechecked by CAS. (local-20261009; private integration, no upstream issue opened)
 - Fixed free titles and no-target sentinels being promoted to typed wiki links;

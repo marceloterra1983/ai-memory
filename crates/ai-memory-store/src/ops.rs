@@ -174,7 +174,7 @@ use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
-use crate::error::{StoreError, StoreResult};
+use crate::error::{PageWriteConflictReason, PageWriteGuard, StoreError, StoreResult};
 
 /// One embedding upsert requested by a backfill or embed command.
 #[derive(Debug)]
@@ -201,6 +201,104 @@ pub fn upsert_page(conn: &mut Connection, page: &NewPage) -> StoreResult<PageId>
     let result_id = upsert_page_in_tx(&tx, page, now)?;
     tx.commit()?;
     Ok(result_id)
+}
+
+/// Upsert `page` only when `guard` matches the live head, in this transaction.
+///
+/// A refusal returns [`StoreError::PageWriteConflict`] before
+/// [`upsert_page_in_tx`], so a losing `create_only` does not record evidence
+/// on the unchanged-body short-circuit. Dropping the transaction rolls back.
+///
+/// # Errors
+/// Returns [`StoreError::PageWriteConflict`] when the guard loses, or any
+/// error from [`upsert_page_in_tx`].
+pub(crate) fn upsert_page_if(
+    conn: &mut Connection,
+    page: &NewPage,
+    guard: PageWriteGuard,
+) -> StoreResult<PageId> {
+    let tx = conn.transaction()?;
+    let current: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT id FROM pages WHERE workspace_id = ?1 AND project_id = ?2 \
+             AND path = ?3 AND is_latest = 1",
+            params![
+                page.workspace_id.as_bytes(),
+                page.project_id.as_bytes(),
+                page.path.as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let current_id = current
+        .as_deref()
+        .map(PageId::from_slice)
+        .transpose()
+        .map_err(StoreError::from)?;
+    match guard {
+        PageWriteGuard::CreateOnly => {
+            if let Some(id) = current_id {
+                return Err(StoreError::PageWriteConflict {
+                    reason: PageWriteConflictReason::AlreadyExists,
+                    current_page_id: Some(id),
+                });
+            }
+        }
+        PageWriteGuard::ExpectedHead(expected) => {
+            if current_id != Some(expected) {
+                return Err(StoreError::PageWriteConflict {
+                    reason: PageWriteConflictReason::StaleHead,
+                    current_page_id: current_id,
+                });
+            }
+        }
+    }
+    let now = Timestamp::now().as_microsecond();
+    let result_id = upsert_page_in_tx(&tx, page, now)?;
+    tx.commit()?;
+    Ok(result_id)
+}
+
+/// The live head row, read on the writer connection so a guarded file check
+/// sees the same snapshot the following upsert will commit against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LivePageHead {
+    /// `pages.id` of the `is_latest = 1` row.
+    pub id: PageId,
+    /// Stored body, without frontmatter.
+    pub body: String,
+    /// Raw `frontmatter_json` of that same row.
+    pub frontmatter_json: String,
+}
+
+pub(crate) fn latest_page_head(
+    conn: &Connection,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+    path: &str,
+) -> StoreResult<Option<LivePageHead>> {
+    let row = conn
+        .query_row(
+            "SELECT id, body, frontmatter_json FROM pages \
+             WHERE workspace_id = ?1 AND project_id = ?2 AND path = ?3 AND is_latest = 1",
+            params![workspace_id.as_bytes(), project_id.as_bytes(), path],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((id, body, frontmatter_json)) = row else {
+        return Ok(None);
+    };
+    Ok(Some(LivePageHead {
+        id: PageId::from_slice(&id)?,
+        body,
+        frontmatter_json,
+    }))
 }
 
 pub(crate) fn upsert_page_metadata_if_latest(

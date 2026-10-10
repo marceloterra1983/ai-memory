@@ -421,6 +421,7 @@ async fn conditional_persistence_rolls_back_installed_metadata_when_writer_cas_r
             },
             emitted.as_bytes(),
             Some((f.id, f.hash)),
+            None,
         )
         .await;
     assert!(matches!(result, Err(WikiError::StalePageHead)));

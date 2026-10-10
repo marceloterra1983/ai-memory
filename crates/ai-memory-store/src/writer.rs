@@ -7,6 +7,7 @@
 //! mode that bit cognee (#2717) — there is exactly one writer at all
 //! times, by construction.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -26,7 +27,7 @@ use crate::auto_improve::{
     RejectAutoImproveProposal, StageAutoImproveRun, StagedAutoImproveRun,
     StagedAutoImproveRunReport,
 };
-use crate::error::{StoreError, StoreResult};
+use crate::error::{PageWriteGuard, StoreError, StoreResult};
 use crate::ops::{
     self, AdmittedSession, DeleteWorkspaceSummary, EmbeddingWrite, HookSessionAdmission,
     IngestObservationOutcome, LifecycleOnlyEndOutcome, MoveSessionSummary, MoveSummary,
@@ -131,6 +132,17 @@ pub(crate) enum WriteCmd {
     UpsertPage {
         page: NewPage,
         reply: oneshot::Sender<StoreResult<PageId>>,
+    },
+    UpsertPageIf {
+        page: NewPage,
+        guard: PageWriteGuard,
+        reply: oneshot::Sender<StoreResult<PageId>>,
+    },
+    LatestPageHead {
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: String,
+        reply: oneshot::Sender<StoreResult<Option<ops::LivePageHead>>>,
     },
     UpsertPageMetadataIfLatest {
         page: NewPage,
@@ -780,7 +792,13 @@ pub struct WriterHandle {
 struct WriterInner {
     tx: mpsc::Sender<WriteCmd>,
     join: Mutex<Option<JoinHandle<()>>>,
+    /// Per-path mutex shared by every clone of this handle. Wiki instances that
+    /// share the writer take it around the file snapshot, conditional upsert,
+    /// and rollback so one path cannot restore another writer's bytes.
+    page_locks: Mutex<HashMap<PageLockKey, Arc<tokio::sync::Mutex<()>>>>,
 }
+
+type PageLockKey = (WorkspaceId, ProjectId, PagePath);
 
 impl WriterHandle {
     /// Take ownership of `conn` and spawn the writer thread.
@@ -795,6 +813,7 @@ impl WriterHandle {
             inner: Arc::new(WriterInner {
                 tx,
                 join: Mutex::new(Some(handle)),
+                page_locks: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -2428,6 +2447,75 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Upsert a page only when `guard` matches the live head in the same
+    /// writer transaction as the mutation.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::PageWriteConflict`] when the guard loses, without
+    /// inserting a version. Also returns [`StoreError::WriterClosed`] or the
+    /// SQL error from the conditional upsert.
+    pub async fn upsert_page_if(
+        &self,
+        page: NewPage,
+        guard: PageWriteGuard,
+    ) -> StoreResult<PageId> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::UpsertPageIf {
+            page,
+            guard,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Read the live head on the writer connection.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] if the actor has shut down, or the
+    /// SQL error from [`ops::latest_page_head`].
+    pub async fn latest_page_head(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &str,
+    ) -> StoreResult<Option<ops::LivePageHead>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::LatestPageHead {
+            workspace_id,
+            project_id,
+            path: path.to_owned(),
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Serialize writers of one `(workspace, project, path)` across every wiki
+    /// that shares this handle. Different paths still run concurrently.
+    /// Another `Store::open` has its own map; the wiki also takes an OS file
+    /// lock around the file and the SQL that follows.
+    pub async fn lock_page(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &PagePath,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut map = self
+                .inner
+                .page_locks
+                .lock()
+                .expect("page_locks mutex poisoned");
+            map.retain(|_, v| Arc::strong_count(v) > 1);
+            Arc::clone(
+                map.entry((workspace_id, project_id, path.clone()))
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        lock.lock_owned().await
+    }
+
     /// Supersede a metadata-only update if the scoped head and body hash match.
     /// Preserves the predecessor's attribution and evidence in the same transaction.
     /// A stale head, foreign id, or changed body returns `None` without writing.
@@ -3361,6 +3449,19 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::UpsertPage { page, reply } => {
                 let result = ops::upsert_page(&mut conn, &page);
                 send_or_warn(reply, result, "upsert_page");
+            }
+            WriteCmd::UpsertPageIf { page, guard, reply } => {
+                let result = ops::upsert_page_if(&mut conn, &page, guard);
+                send_or_warn(reply, result, "upsert_page_if");
+            }
+            WriteCmd::LatestPageHead {
+                workspace_id,
+                project_id,
+                path,
+                reply,
+            } => {
+                let result = ops::latest_page_head(&conn, workspace_id, project_id, &path);
+                send_or_warn(reply, result, "latest_page_head");
             }
             WriteCmd::UpsertPageMetadataIfLatest {
                 page,

@@ -223,6 +223,7 @@ impl Wiki {
                 },
                 emitted.as_bytes(),
                 Some((req.expected_head_id, req.expected_body_sha256)),
+                None,
             )
             .await?;
         receipt.checkpoint = self

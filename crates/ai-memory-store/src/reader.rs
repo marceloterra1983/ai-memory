@@ -923,6 +923,23 @@ pub struct StoredPageBody {
     pub pinned: bool,
 }
 
+/// One `is_latest` row: the head id and the body it stored, from a single SELECT.
+#[derive(Debug, Clone)]
+pub struct StoredPageHead {
+    /// `pages.id` of this latest row. This is the head, not a separate version id.
+    pub id: PageId,
+    /// Page title as stored in the DB.
+    pub title: String,
+    /// Page body (markdown without frontmatter).
+    pub body: String,
+    /// Raw `frontmatter_json` TEXT column (parse at the call site).
+    pub frontmatter_json: String,
+    /// Memory tier stored on the latest page row.
+    pub tier: String,
+    /// Whether the latest page row is pinned.
+    pub pinned: bool,
+}
+
 /// Search hit with workspace/project names, used by the web UI to avoid
 /// per-hit metadata lookups after a global search.
 #[derive(Debug, Clone, Serialize)]
@@ -8160,6 +8177,52 @@ impl ReaderPool {
                 )
                 .optional()?;
             Ok(row)
+        })
+        .await
+    }
+
+    /// Fetch the live head id together with the body and frontmatter of that
+    /// same row. Callers that return this id must be returning this body.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn latest_head_by_ids(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &str,
+    ) -> StoreResult<Option<StoredPageHead>> {
+        let path = path.to_owned();
+        self.with_conn(move |conn| {
+            let row = conn
+                .query_row(
+                    "SELECT id, title, body, frontmatter_json, tier, pinned FROM pages \
+                     WHERE workspace_id = ?1 AND project_id = ?2 AND path = ?3 \
+                       AND is_latest = 1",
+                    params![workspace_id.as_bytes(), project_id.as_bytes(), path],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)? != 0,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((id, title, body, frontmatter_json, tier, pinned)) = row else {
+                return Ok(None);
+            };
+            Ok(Some(StoredPageHead {
+                id: PageId::from_slice(&id)?,
+                title,
+                body,
+                frontmatter_json,
+                tier,
+                pinned,
+            }))
         })
         .await
     }

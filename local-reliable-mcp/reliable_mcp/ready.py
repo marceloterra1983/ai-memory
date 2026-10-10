@@ -33,7 +33,7 @@ def probe(url: str, workspace: str, project: str, per_call: float = 2.5, budget:
             },
         }
     )
-    message = _ok_result(init)
+    message = _ok_result(init, "ready-init")
     if message is None:
         return False, "initialize failed"
     result = message["result"]
@@ -41,7 +41,7 @@ def probe(url: str, workspace: str, project: str, per_call: float = 2.5, budget:
         return False, "initialize failed"
 
     listed = call({"jsonrpc": "2.0", "id": "ready-tools", "method": "tools/list", "params": {}})
-    tools_message = _ok_result(listed)
+    tools_message = _ok_result(listed, "ready-tools")
     if tools_message is None:
         return False, "tools/list failed"
     tools = tools_message["result"].get("tools") if isinstance(tools_message["result"], dict) else None
@@ -64,7 +64,7 @@ def probe(url: str, workspace: str, project: str, per_call: float = 2.5, budget:
     if status is None or status.transport_failed or status.status != 200:
         return False, "memory_status failed"
     parsed = parse_message(status.body)
-    if parsed is None:
+    if not _matches(parsed, "ready-status"):
         return False, "memory_status malformed"
     if "error" in parsed:
         return False, "memory_status error"
@@ -82,10 +82,14 @@ def probe(url: str, workspace: str, project: str, per_call: float = 2.5, budget:
     return True, "ready"
 
 
-def _ok_result(response):
+def _matches(message, rpc_id) -> bool:
+    return isinstance(message, dict) and message.get("jsonrpc") == "2.0" and message.get("id") == rpc_id
+
+
+def _ok_result(response, rpc_id):
     if response is None or response.transport_failed or response.status != 200:
         return None
     message = parse_message(response.body)
-    if not isinstance(message, dict) or "error" in message or "result" not in message:
+    if not _matches(message, rpc_id) or "error" in message or "result" not in message:
         return None
     return message

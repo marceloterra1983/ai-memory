@@ -736,6 +736,25 @@ class IngressCase(unittest.TestCase):
         ok, reason = probe(self.relay.url, "demo", "demo", per_call=0.4, budget=2)
         self.assertFalse(ok, reason)
 
+    def test_new_outbox_directory_entries_are_synced(self):
+        import reliable_mcp.outbox as outbox
+
+        box = Path(self.tmp.name) / "new-outbox"
+        synced = []
+        original = outbox.os.fsync
+
+        def track(fd):
+            synced.append(os.fstat(fd).st_ino)
+            original(fd)
+
+        outbox.os.fsync = track
+        try:
+            outbox.ensure_outbox(box)
+        finally:
+            outbox.os.fsync = original
+        self.assertIn(box.parent.stat().st_ino, synced)
+        self.assertIn(box.stat().st_ino, synced)
+
     def test_symlink_outbox_and_root_are_refused(self):
         from reliable_mcp.outbox import OutboxError, ensure_outbox
         from reliable_mcp.relay import Relay

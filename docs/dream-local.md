@@ -72,7 +72,15 @@ literal loopback endpoints, no redirects, proxies, retries or provider fallback.
 The semantic endpoint is fixed to `http://127.0.0.1:8787/v1/systemone`; port 8789
 is rejected. Configuring dream also selects the restricted transport for the
 local OpenAI-compatible embedder: document embeddings and any configured
-query endpoint both stay on that bounded local path. Admission remains required; dream refuses
+query endpoint both stay on that bounded local path. Oversized document
+embeddings use complete nonoverlapping UTF-8 chunks, each with its exact
+document prefix and at most 8192 encoded JSON bytes. Source-byte-weighted
+pooling of normalized chunk vectors produces one normalized vector per
+page; any chunk failure refuses the entire vector. Small-document vectors,
+stored identity and wiki/FTS text are unchanged. Queries, drafting and
+semantic requests retain their single-request limits. These byte counts and
+vector calculations require no new semantic judgment or Jev call.
+Admission remains required; dream refuses
 remote admission destinations and any admission/sanitizer mutation of a gated
 draft. Local service operators must verify the actual backend behind each alias.
 

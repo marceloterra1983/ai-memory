@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Embedded complete oversized documents through the restricted local
+  OpenAI-compatible provider using nonoverlapping UTF-8 chunks and a
+  source-byte-weighted, normalized vector pool. Preserved the 8 KiB encoded
+  request guard, exact document prefixes, provider/model/dimension identity,
+  wiki/FTS content and single-request query limits; invalid chunks now fail
+  the whole document without storing a partial vector.
+  (local-20261010; private integration, no upstream issue opened)
 - Refused importer HTTP redirects before forwarding imported content, escaped
   binary/home paths in the Mac app's LaunchAgent plist, and drained both command
   output pipes with bounded termination and child reaping on timeout. Corrected

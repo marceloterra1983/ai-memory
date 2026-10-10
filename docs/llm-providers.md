@@ -371,8 +371,18 @@ text itself; the OpenAI-compatible `/v1/embeddings` wire format has no field
 for it. `AI_MEMORY_EMBEDDING_QUERY_PREFIX` and
 `AI_MEMORY_EMBEDDING_DOCUMENT_PREFIX` (only applied by the `openai` and
 `openai-compat` embedders) are prepended to query and document text
-respectively, before the existing truncation, so a long body is still
-truncated to the same overall input cap with the prefix included. Both are
+respectively. Ordinary provider paths apply their existing truncation with
+the prefix included. The restricted local OpenAI-compatible path selected
+by dream instead embeds every byte of a document in consecutive UTF-8
+chunks: each complete encoded JSON request, including the exact prefix and
+model, fits the existing 8192-byte guard. Each chunk receives the document
+prefix; its normalized vector is weighted by original source UTF-8 bytes
+(excluding prefix/JSON escapes), then the pooled vector is normalized.
+Single-chunk documents keep the same vector, and provider/model/dimension
+and document-prefix identities stay unchanged. A failed or invalid chunk
+fails the document rather than producing a partial vector. Queries remain
+single bounded requests, including on a configured query endpoint.
+The wiki body and FTS index are never truncated by this operation. Both prefixes are
 empty by default — no behaviour change when unset — and are not trimmed, so
 a publisher's trailing space is preserved exactly. For example, NVIDIA's
 [`nvidia/Nemotron-3-Embed-1B-BF16`](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16)

@@ -525,7 +525,7 @@ async fn factory_wires_query_endpoint_without_changing_identity() {
 }
 
 #[tokio::test]
-async fn factory_dream_local_query_endpoint_keeps_document_byte_cap() {
+async fn factory_dream_local_query_endpoint_keeps_each_document_request_bounded() {
     let documents = MockServer::start().await;
     let queries = MockServer::start().await;
     mount_embeddings(&documents, 8).await;
@@ -543,10 +543,19 @@ async fn factory_dream_local_query_endpoint_keeps_document_byte_cap() {
     embedder.embed_query("find").await.expect("query");
     assert_eq!(recorded(&queries).await.len(), 1);
     assert_eq!(recorded(&documents).await.len(), 1);
-    let oversized = embedder.embed_document(&"y".repeat(9_000)).await;
-    assert!(
-        oversized.is_err(),
-        "dream document embedding must keep its own byte cap"
+    embedder.embed_document(&"y".repeat(9_000)).await.unwrap();
+    let docs = recorded(&documents).await;
+    assert_eq!(docs.len(), 3);
+    assert!(docs.iter().all(|req| req.body.len() <= 8192));
+    assert_eq!(
+        docs[1..]
+            .iter()
+            .map(|req| request_input(req)
+                .strip_prefix("passage: ")
+                .unwrap()
+                .to_string())
+            .collect::<String>(),
+        "y".repeat(9_000)
     );
     assert_eq!(
         recorded(&queries).await.len(),

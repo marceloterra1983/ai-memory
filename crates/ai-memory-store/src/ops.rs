@@ -2779,6 +2779,17 @@ fn admit_hook_session_event_inner(
             |r| r.get(0),
         )?;
         if count <= ended_count {
+            // A distinct valid terminal envelope still needs a receipt. Its
+            // work is already represented, so claim only the key; the router
+            // repairs the end tail before completing it. Replays keep both
+            // the original claim time and any completed receipt unchanged.
+            if let Some(key) = ingest_key {
+                tx.execute(
+                    "INSERT INTO ingest_keys (project_id, key, seen_at, completed_at) \
+                     VALUES (?1, ?2, ?3, NULL) ON CONFLICT(project_id, key) DO NOTHING",
+                    params![project_id.as_bytes(), key, now],
+                )?;
+            }
             tx.commit()?;
             return Ok(HookSessionAdmission::AlreadyEnded { session: guard });
         }

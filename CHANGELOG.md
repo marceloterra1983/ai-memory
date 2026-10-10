@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Claimed valid keyed ends of already-ended sessions in authorized native hook
+  admission, completing receipts only after tail recovery without duplicating
+  observations, summaries, handoffs or consolidation generations. Refused
+  invalid source envelopes and nonregular files without blocking other local
+  hook deliveries, and bounded resident payloads to the current batch. (local-20261010; private integration, no upstream issue opened)
 - Added an independent, bounded native-hook spool worker with scoped read-only
   SQLite delivery receipts, private fsynced recovery archives, asynchronous slow
   lifecycle admission and recurring deterministic flushing. Retained every

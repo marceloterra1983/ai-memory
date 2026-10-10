@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 import time
 from contextlib import closing
@@ -327,6 +328,53 @@ class HookDeliveryCase(unittest.TestCase):
         self.assertFalse(good.exists())
         self.assertEqual([key for key, _, _ in client.sent], ["legitimate"])
 
+    def test_invalid_envelope_types_are_preserved_with_legitimate_control(self):
+        entries = [[], 123, self.entry("bad-number", url=123),
+                   self.entry("bad-object", url={}), self.entry("bad-list", url=[])]
+        invalid = []
+        for index, entry in enumerate(entries):
+            path = self.spool / f"0000000000000-42-{index:016x}.json"
+            raw = json.dumps(entry).encode()
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            invalid.append((path, raw))
+        good, _ = self.write_entry("legitimate")
+        client = CheckpointClient(self)
+        try:
+            result = self.drainer(client).drain_once()
+        except (AttributeError, TypeError) as error:
+            self.fail(f"invalid envelope blocked the valid control: {type(error).__name__}")
+        self.assertEqual(result["delivered"], 1)
+        self.assertEqual(result["errors"], len(invalid))
+        self.assertFalse(good.exists())
+        for path, raw in invalid:
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertFalse(self.receipt_path(path).exists())
+        self.assertEqual([key for key, _, _ in client.sent], ["legitimate"])
+        self.assert_content_free(result)
+
+    def test_fifo_source_is_refused_without_blocking_legitimate_control(self):
+        fifo = self.spool / "0000000000000-42-0000000000000042.json"
+        os.mkfifo(fifo, 0o600)
+        good, raw = self.write_entry("legitimate")
+        self.checkpoint("legitimate")
+        command = [sys.executable, "-B", "-m", "reliable_mcp.hook_delivery",
+                   "--spool", str(self.spool), "--database", str(self.database),
+                   "--archive", str(self.archive), "--origin", ORIGIN, "--once"]
+        try:
+            process = subprocess.run(command, capture_output=True, timeout=2)
+        except subprocess.TimeoutExpired:
+            self.fail("FIFO blocked the valid control")
+        self.assertEqual(process.returncode, 0, process.stderr.decode())
+        result = json.loads(process.stdout)
+        self.assertEqual(result["delivered"], 1)
+        self.assertEqual(result["errors"], 1)
+        self.assertTrue(stat.S_ISFIFO(fifo.stat().st_mode))
+        self.assertFalse(good.exists())
+        self.assertEqual((self.archive / good.name).read_bytes(), raw)
+        self.assertEqual(process.stderr, b"")
+        self.assert_content_free(result)
+
     def test_archive_symlink_cannot_overwrite_foreign_target(self):
         path, raw = self.write_entry()
         self.archive.mkdir(mode=0o700)
@@ -470,6 +518,46 @@ class HookDeliveryCase(unittest.TestCase):
             self.assertEqual(path.read_bytes(), raw)
             self.assertFalse(self.receipt_path(path).exists())
         self.assert_content_free(result)
+
+    def test_large_backlog_uses_memory_for_one_batch_instead_of_every_payload(self):
+        calls = []
+
+        class DisconnectedClient:
+            def exchange(self, *_):
+                calls.append(1)
+                return Exchange(None, [], b"", "synthetic_down")
+
+        body = json.dumps({"session_id": "synthetic-session", "tool_response": "x" * (128 * 1024)})
+        originals = [self.write_entry(f"large-{index:03}", body=body)[0] for index in range(100)]
+        drainer = self.drainer(DisconnectedClient())
+        tracemalloc.start()
+        try:
+            result = drainer.drain_once()
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 24 * 1024 * 1024,
+                        "pending backlog bodies must not all remain resident before sending")
+        self.assertEqual(result["delivered"], 0)
+        self.assertEqual(result["pending"], 100)
+        self.assertGreater(len(calls), 0)
+        self.assertLessEqual(len(calls), 4)
+        for path in originals:
+            self.assertEqual(json.loads(path.read_bytes())["body"], body)
+            self.assertFalse(self.receipt_path(path).exists())
+
+    def test_claim_created_after_scan_is_not_reposted_into_its_active_tail(self):
+        first, _ = self.write_entry("first-control")
+        claimed, raw = self.write_entry("claimed-during-pass", event="pre-compact")
+        fresh, _ = self.write_entry("fresh-control")
+        client = CheckpointClient(self, callback=lambda: self.checkpoint("claimed-during-pass", completed_at=None))
+        result = self.drainer(client).drain_once()
+        self.assertEqual(result["delivered"], 2)
+        self.assertEqual(result["unconfirmed"], 1)
+        self.assertEqual(claimed.read_bytes(), raw)
+        self.assertFalse(first.exists())
+        self.assertFalse(fresh.exists())
+        self.assertEqual([key for key, _, _ in client.sent], ["first-control", "fresh-control"])
 
     def test_unconfirmed_prefix_cools_down_so_new_arrivals_are_not_starved(self):
         originals = [self.write_entry(f"unconfirmed-{index:03}") for index in range(128)]

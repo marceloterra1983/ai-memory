@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Retained the native-hook worker's open lock descriptor while waiting for a
+  preservation guard handoff, and closed its lock and database cleanly when
+  cancelled before acquisition. (local-20261010; private integration, no upstream issue opened)
 - Claimed valid keyed ends of already-ended sessions in authorized native hook
   admission, completing receipts only after tail recovery without duplicating
   observations, summaries, handoffs or consolidation generations. Refused

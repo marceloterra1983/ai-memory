@@ -79,8 +79,15 @@ PYTHONPATH=local-reliable-mcp python3 -B -m reliable_mcp.hook_delivery \
 O template `templates/ai-memory-hook-delivery.service` instala um serviço
 independente; o caminho do módulo precisa estar instalado primeiro. Não
 reinicie backend, ingress ou delivery para ativá-lo. Não execute junto com
-outro dono do flock. Congele um manifesto e backup privado verificados antes
-de assumir uma fila real, preservando conteúdo, SHA, idade, modo e metadados.
+outro drainer ativo. O serviço mantém o mesmo descritor aberto enquanto espera
+um guard existente; SIGINT/SIGTERM cancela a espera, fecha os recursos e sai
+com código zero. Congele um manifesto e backup privado verificados antes de
+assumir uma fila real, preservando conteúdo, SHA, idade, modo e metadados.
+
+Uma transferência coordenada deve impedir novas aberturas do mesmo inode,
+esperar os descritores de outros drainers fecharem naturalmente e provar o
+WRITE FLOCK do worker antes de restaurar o acesso. A espera do flock sozinha
+não reserva prioridade sobre drainers nativos concorrentes.
 
 O laço espera um segundo entre ciclos e limita cada ciclo a quatro pedidos,
 32 eventos por lote e dois segundos de envio. A fila de trabalho guarda caminhos;

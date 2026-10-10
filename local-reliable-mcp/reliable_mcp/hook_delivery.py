@@ -75,7 +75,7 @@ def _preserve(path, raw):
 class HookDelivery:
     """Unix operator sidecar; retain native spool ownership for the entire lifetime."""
 
-    def __init__(self, spool, database, archive, origin, client=None):
+    def __init__(self, spool, database, archive, origin, client=None, stop_event=None):
         assert_not_root()
         self.spool, self.archive = Path(spool), Path(archive)
         database = Path(database)
@@ -98,7 +98,18 @@ class HookDelivery:
         fd = os.open(self.spool / ".drain.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         self.lock = os.fdopen(fd, "a+b")
         try:
-            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptedError("stopped while waiting for native spool lock")
+                try:
+                    fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if stop_event is None:
+                        raise
+                    # Keep this FD available during the operator's admission
+                    # gate; reopening would fail while the inode is mode000.
+                    stop_event.wait(0.05)
         except BaseException:
             self.lock.close()
             self.db.close()
@@ -265,16 +276,10 @@ def main(argv=None):
     stopped = threading.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stopped.set())
-    drainer = None
-    while not stopped.is_set():
-        try:
-            drainer = HookDelivery(args.spool, args.database, args.archive, args.origin)
-            break
-        except BlockingIOError:
-            # A staged service may wait for the preservation guard to hand
-            # over the native flock without restarting any existing service.
-            stopped.wait(0.05)
-    if drainer is None:
+    try:
+        drainer = HookDelivery(args.spool, args.database, args.archive, args.origin,
+                               stop_event=stopped)
+    except InterruptedError:
         return 0
     try:
         while not stopped.is_set():

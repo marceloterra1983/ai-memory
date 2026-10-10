@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import tracemalloc
 import unittest
 import time
@@ -595,6 +596,199 @@ class HookDeliveryCase(unittest.TestCase):
             if process.poll() is None:
                 process.kill()
             process.communicate()
+
+    def lock_fds(self, pid):
+        lock = self.spool / ".drain.lock"
+        identity = (lock.stat().st_dev, lock.stat().st_ino)
+        result = []
+        for fd in (Path("/proc") / str(pid) / "fd").iterdir():
+            try:
+                info = fd.stat()
+            except FileNotFoundError:
+                continue
+            if (info.st_dev, info.st_ino) == identity:
+                result.append(int(fd.name))
+        return result
+
+    def test_waiting_constructor_retries_same_open_fd_until_guard_releases(self):
+        from reliable_mcp.hook_delivery import HookDelivery
+
+        observed = []
+        case = self
+        with (self.spool / ".drain.lock").open("a+b") as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX)
+
+            class Handoff(threading.Event):
+                def wait(self, timeout=None):
+                    waiting = [fd for fd in case.lock_fds(os.getpid()) if fd != guard.fileno()]
+                    case.assertEqual(len(waiting), 1)
+                    observed.append(waiting[0])
+                    if len(observed) == 3:
+                        fcntl.flock(guard, fcntl.LOCK_UN)
+                    return super().wait(0)
+
+            try:
+                drainer = HookDelivery(self.spool, self.database, self.archive, ORIGIN,
+                                      stop_event=Handoff())
+            except TypeError as error:
+                self.fail(f"persistent waiting lock is unavailable: {error}")
+            self.drainers.append(drainer)
+            self.assertEqual(observed, [drainer.lock.fileno()] * 3)
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_cancelled_waiting_constructor_closes_fd_and_database_without_unlocking_guard(self):
+        from reliable_mcp.hook_delivery import HookDelivery
+
+        observed = []
+        connections = []
+        real_connect = sqlite3.connect
+        case = self
+        with (self.spool / ".drain.lock").open("a+b") as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX)
+            before = self.lock_fds(os.getpid())
+
+            class Cancel(threading.Event):
+                def wait(self, timeout=None):
+                    waiting = [fd for fd in case.lock_fds(os.getpid()) if fd != guard.fileno()]
+                    case.assertEqual(len(waiting), 1)
+                    observed.append(waiting[0])
+                    if len(observed) == 3:
+                        self.set()
+                    return super().wait(0)
+
+            def connect(*args, **kwargs):
+                db = real_connect(*args, **kwargs)
+                connections.append(db)
+                return db
+
+            with patch("reliable_mcp.hook_delivery.sqlite3.connect", connect):
+                try:
+                    with self.assertRaises(InterruptedError):
+                        HookDelivery(self.spool, self.database, self.archive, ORIGIN,
+                                     stop_event=Cancel())
+                except TypeError as error:
+                    self.fail(f"cancellable waiting lock is unavailable: {error}")
+            self.assertEqual(observed, [observed[0]] * 3)
+            self.assertEqual(self.lock_fds(os.getpid()), before)
+            for db in connections:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    db.execute("SELECT 1")
+            with (self.spool / ".drain.lock").open("a+b") as other:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_constructor_default_remains_nonblocking_and_leaks_no_fd(self):
+        from reliable_mcp.hook_delivery import HookDelivery
+
+        guard = self.drainer()
+        before = self.lock_fds(os.getpid())
+        with self.assertRaises(BlockingIOError):
+            HookDelivery(self.spool, self.database, self.archive, ORIGIN)
+        self.assertEqual(self.lock_fds(os.getpid()), before)
+        self.assertFalse(guard.lock.closed)
+
+    def test_cli_cancelled_while_waiting_exits_zero_without_touching_original(self):
+        path, raw = self.write_entry("cancelled-handoff")
+        guard = self.drainer()
+        command = [sys.executable, "-B", "-m", "reliable_mcp.hook_delivery",
+                   "--spool", str(self.spool), "--database", str(self.database),
+                   "--archive", str(self.archive), "--origin", ORIGIN, "--once"]
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and not self.lock_fds(process.pid):
+                self.assertIsNone(process.poll())
+                time.sleep(0.005)
+            self.assertEqual(len(self.lock_fds(process.pid)), 1)
+            process.terminate()
+            stdout, stderr = process.communicate(timeout=2)
+            self.assertEqual(process.returncode, 0, stderr.decode())
+            self.assertEqual(stdout, b"")
+            self.assertEqual(stderr, b"")
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertFalse(self.receipt_path(path).exists())
+            self.assertFalse(guard.lock.closed)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+
+    @unittest.skipIf(os.getuid() == 0, "mode000 admission requires the non-root operator")
+    def test_cli_same_fd_acquires_with_mode000_gate_after_competing_native_fd_closes(self):
+        path, raw = self.write_entry("gated-handoff")
+        self.checkpoint("gated-handoff")
+        guard = self.drainer()
+        lock = self.spool / ".drain.lock"
+        original_inode = lock.stat().st_ino
+        native_ready = self.root / "native-ready"
+        native_script = (
+            "import fcntl,os,sys,time;from pathlib import Path\n"
+            "fd=os.open(sys.argv[1],os.O_RDWR);Path(sys.argv[2]).write_text(str(fd))\n"
+            "deadline=time.monotonic()+1\n"
+            "while time.monotonic()<deadline:\n"
+            " try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);sys.exit(9)\n"
+            " except BlockingIOError: time.sleep(.025)\n"
+            "os.close(fd)\n"
+        )
+        native = subprocess.Popen([sys.executable, "-B", "-c", native_script,
+                                   str(lock), str(native_ready)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        command = [sys.executable, "-B", "-m", "reliable_mcp.hook_delivery",
+                   "--spool", str(self.spool), "--database", str(self.database),
+                   "--archive", str(self.archive), "--origin", ORIGIN]
+        worker = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                self.assertIsNone(worker.poll())
+                if native_ready.exists() and self.lock_fds(worker.pid):
+                    break
+                time.sleep(0.005)
+            self.assertTrue(native_ready.exists())
+            waiting_fd = self.lock_fds(worker.pid)
+            self.assertEqual(len(waiting_fd), 1, "worker must retain its waiting FD")
+            self.assertEqual(len(self.lock_fds(native.pid)), 1)
+            lock.chmod(0o000)
+            with self.assertRaises(PermissionError):
+                fd = os.open(lock, os.O_RDWR)
+                os.close(fd)
+            self.assertEqual(lock.stat().st_ino, original_inode)
+            time.sleep(0.12)
+            self.assertIsNone(worker.poll())
+            self.assertEqual(self.lock_fds(worker.pid), waiting_fd)
+            native_stdout, native_stderr = native.communicate(timeout=2)
+            self.assertEqual(native.returncode, 0, native_stderr.decode())
+            self.assertEqual(native_stdout, b"")
+            self.assertEqual(native_stderr, b"")
+            self.assertEqual(self.lock_fds(worker.pid), waiting_fd)
+            self.assertEqual(path.read_bytes(), raw)
+            guard.close()
+            deadline = time.monotonic() + 3
+            while path.exists() and time.monotonic() < deadline:
+                self.assertIsNone(worker.poll())
+                time.sleep(0.005)
+            self.assertFalse(path.exists())
+            self.assertEqual(self.lock_fds(worker.pid), waiting_fd)
+            fdinfo = (Path("/proc") / str(worker.pid) / "fdinfo" / str(waiting_fd[0])).read_text()
+            self.assertRegex(fdinfo, rf"FLOCK\s+ADVISORY\s+WRITE\s+{worker.pid}\s+[^\s]+:{original_inode}\s+0\s+EOF")
+            lock.chmod(0o600)
+            with lock.open("a+b") as native_control:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(native_control, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            worker.terminate()
+            stdout, stderr = worker.communicate(timeout=3)
+            self.assertEqual(worker.returncode, 0, stderr.decode())
+            self.assertEqual(stderr, b"")
+            self.assertEqual(json.loads(stdout)["delivered"], 1)
+            self.assertEqual((self.archive / path.name).read_bytes(), raw)
+            self.assertFalse(path.exists())
+        finally:
+            lock.chmod(0o600)
+            for process in (worker, native):
+                if process.poll() is None:
+                    process.kill()
+                process.communicate()
 
 
 if __name__ == "__main__":

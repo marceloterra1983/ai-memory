@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Added an independent, bounded native-hook spool worker with scoped read-only
+  SQLite delivery receipts, private fsynced recovery archives, asynchronous slow
+  lifecycle admission and recurring deterministic flushing. Retained every
+  unconfirmed event without changing its age or retry count; kept the MCP page
+  outbox and existing backend processes separate.
+  (local-20261010; private integration, no upstream issue opened)
 - Embedded complete oversized documents through the restricted local
   OpenAI-compatible provider using nonoverlapping UTF-8 chunks and a
   source-byte-weighted, normalized vector pool. Preserved the 8 KiB encoded

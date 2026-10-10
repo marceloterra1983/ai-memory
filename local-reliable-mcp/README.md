@@ -60,7 +60,59 @@ O stage ainda gera `:49376`; nesta máquina essa porta pertence a
 `farol-firecrawl-mcp.service`. Ajuste o stage para `:49377` conforme
 `PROCEDURE.md` antes da instalação.
 
-## Limites
+## Fila nativa de hooks (Unix, operação local)
+
+`hook-spool` é outra fila. O worker MCP acima não a drena. Para recuperar
+capturas com o backend ativo, o módulo separado mantém o flock nativo
+`.drain.lock`, consulta SQLite em modo somente-leitura e exige
+`ingest_keys.completed_at` no workspace/projeto explícito da URL. HTTP 202,
+HTTP 200 e os índices aceitos de `/hook/batch` não substituem esse recibo.
+
+```bash
+PYTHONPATH=local-reliable-mcp python3 -B -m reliable_mcp.hook_delivery \
+  --spool "$HOME/.local/share/ai-memory/hook-spool" \
+  --database "$HOME/.local/share/ai-memory/db/memory.sqlite" \
+  --archive "$HOME/backups/ai-memory/hooks-delivered" \
+  --origin http://127.0.0.1:49374
+```
+
+O template `templates/ai-memory-hook-delivery.service` instala um serviço
+independente; o caminho do módulo precisa estar instalado primeiro. Não
+reinicie backend, ingress ou delivery para ativá-lo. Não execute junto com
+outro dono do flock. Congele um manifesto e backup privado verificados antes
+de assumir uma fila real, preservando conteúdo, SHA, idade, modo e metadados.
+
+O laço espera um segundo entre ciclos e limita cada ciclo a quatro pedidos,
+32 eventos por lote e dois segundos de envio. `pre-compact`,
+`post-compaction` e `session-end` usam `/hook` assíncrono para não prender
+eventos comuns atrás da consolidação; só o recibo SQL posterior autoriza a
+remoção. Claims incompletos permanecem intactos e não são reenviados para
+competir com a cauda ativa. Falhas sem claim recebem apenas um intervalo em
+memória entre envios; `attempts` e `created_ms` nunca são reescritos.
+
+Antes de remover um evento confirmado, o worker grava o JSON original exato
+e um recibo com SHA, metadados e checkpoint em arquivos `0600`, fsync de
+arquivos e diretório privado `0700`. Colisões, symlinks, escopo parcial,
+outra origin, profiles e OIDC ficam preservados, sem fallback de credencial
+ou destino. Os logs contêm somente contagens. Jev não se aplica a essas
+comparações determinísticas. O limite de 10.000 arquivos do produtor nativo
+permanece; não deixe uma fila protegida/parada alcançar esse limite.
+
+Uma sessão já terminada pode reconhecer `session-end` sem criar checkpoint
+para uma chave nova (`AlreadyEnded`). Esse worker conserva o original;
+uma confirmação HTTP ou ponteiro de sessão não o transforma em entregue.
+O mesmo vale para caudas de `pre-compact` que ainda não completaram.
+
+Para rollback, preserve primeiro manifesto, originais e recibos; pare apenas
+o novo serviço. Isso libera o flock e pode permitir o drainer nativo com
+descarte por idade/tentativas. Mantenha um guard do flock durante investigação
+ou transferência se ainda houver itens sem recibo. Não limpe a fila, não
+resete tentativas/idade, não reenvie itens com checkpoint completo e não
+sobrescreva arquivos que chegaram depois do backup.
+
+Testes: `cd local-reliable-mcp && python3 -B -m unittest discover -s tests -t . -v`.
+
+## Limites da entrada MCP
 
 - Não é uptime de 100%. Se o relay morre depois de receber o pedido e
   antes do commit atômico (tmp, rename, fsync do arquivo e do diretório),

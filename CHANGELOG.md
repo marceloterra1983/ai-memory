@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added a private loopback MCP ingress with fsynced write intents outside the core data directory, independent recovery worker, guarded replay and complete body/metadata readback before delivery acknowledgement. Added live MCP readiness for the explicitly configured scope instead of an HTTP-only installation check. (local-20261010; private integration, no upstream issue opened)
 - Added typed `page_not_found` and `scope_not_found` error data for MCP clients to distinguish absence from authorization or I/O failures, preserving error codes and messages. (local-20261009; private integration, no upstream issue opened)
 - Added optional `create_only` and `expected_page_id` guards on `memory_write_page`, checked in the same writer transaction as the page mutation, and returned `page_id` from `memory_read_page` when that head's stored body is the body served. A lost race returns JSON-RPC `-32009` `page_write_conflict` and leaves the markdown, index, and evidence unchanged. (local-20261009; private integration, no upstream issue opened)
 - Added the operational local `dream` admin route (Anonymous bootstrap with no authority, Root when authority is configured) and scoped thin CLI, with dry-run

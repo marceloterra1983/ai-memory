@@ -39,6 +39,14 @@ def _scrub(text, secret):
 
 
 class RealBinaryCase(unittest.TestCase):
+    def test_isolation_check_rechecks_an_empty_startup_cmdline(self):
+        from unittest.mock import patch
+
+        data = Path("/tmp/synthetic-isolation-control")
+        binary = Path(f"/proc/{os.getpid()}/exe").resolve()
+        with patch.object(Path, "read_bytes", side_effect=[b"", str(data).encode()]):
+            self._assert_isolated(os.getpid(), binary, data)
+
     def test_legacy_binary_is_rejected_and_a_scoped_write_does_not_land(self):
         binary = _binary()
         if binary is None:
@@ -158,6 +166,10 @@ class RealBinaryCase(unittest.TestCase):
         exe = os.readlink(f"/proc/{pid}/exe")
         self.assertEqual(os.path.realpath(exe), os.path.realpath(binary))
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode()
+        deadline = time.monotonic() + 2
+        while not cmdline and time.monotonic() < deadline:
+            time.sleep(0.01)
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode()
         self.assertIn(str(data), cmdline)
         self.assertNotIn("49374", cmdline)
         for fd in Path(f"/proc/{pid}/fd").iterdir():

@@ -50,6 +50,8 @@ da revisão. Ver `PROCEDURE.md`.
 `expected_page_id`, e `memory_status` no escopo explícito). HTTP 200 com
 erro JSON-RPC, `isError`, 405, 500 ou corpo malformado não contam.
 `/healthz` isolado não conta. O cache de schema não responde prontidão.
+O instalador também exige ingress e delivery ativos e repete a leitura
+MCP pela entrada; backend pronto sozinho não conclui a instalação.
 
 ## Limites
 

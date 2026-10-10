@@ -1,8 +1,6 @@
---- a/install-ai-memory.sh	2026-10-09 23:35:40.149261445 -0300
-+++ b/install-ai-memory.sh	2026-10-09 23:35:40.149295660 -0300
-@@ -153,10 +153,49 @@
- systemctl --user enable --now ai-memory.service
- have loginctl && loginctl enable-linger "$USER" >/dev/null 2>&1 || true
+--- a/install-ai-memory.sh
++++ b/install-ai-memory.sh
+@@ -155,5 +155,38 @@
  ready=0
 +RELIABLE_MCP="${RELIABLE_MCP:-$HOME/.agents/tools/ai-memory/reliable-mcp/reliable-mcp}"
 +BACKEND_ORIGIN="${AI_MEMORY_BACKEND_URL:-http://127.0.0.1:49376}"
@@ -43,7 +41,7 @@
 +    break
 +  fi
    sleep 0.4
- done
+@@ -161,2 +194,8 @@
  [[ "$ready" -eq 1 ]] || { systemctl --user status --no-pager ai-memory.service || true; die "servidor não respondeu"; }
 +for unit in ai-memory-ingress.service ai-memory-delivery.service; do
 +  systemctl --user is-active --quiet "$unit" || { systemctl --user status --no-pager "$unit" || true; die "unit inativa: $unit"; }

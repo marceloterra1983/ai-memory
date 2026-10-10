@@ -64,16 +64,16 @@ erro JSON-RPC, `isError`, 405, 500 ou corpo malformado não contam.
   caminho estiver ausente. Conteúdo divergente fica `conflict`.
 - O backend precisa anunciar `create_only` e `expected_page_id`. Campos
   CAS não são enviados a uma versão que os ignoraria.
-- O binário atual do ai-memory ainda não anuncia esses campos. A prontidão
-  falha fechada até o outro worker publicar o CAS. Este diretório não faz
-  o cutover.
+- O backend desta variante anuncia os campos CAS. Versões anteriores sem
+  esse contrato reprovam a prontidão; o cutover segue `PROCEDURE.md`.
 - Lote JSON-RPC é encaminhado opaco e não é interceptado.
-- `Content-Length` é obrigatório. Corpo, concorrência e tempo têm teto
+- `Content-Length` é obrigatório quando há corpo. Corpo, concorrência e tempo têm teto
   (10 MiB, 32 em voo, encaminhamento ~8 s).
 - O cache guarda só schema, `serverInfo`, protocolo e capabilities. Não
   guarda resultado de ferramenta nem segredo.
-- Token de autorização não entra em recibo nem em log. Se o segredo não
-  puder ser relido, a operação fica pendente e exige reautorização. Root
-  não faz replay de escrita de outro usuário.
+- Token de autorização não entra em recibo nem em log. Autorização e
+  identidade ficam em sidecars privados `0600` para preservar o ator no
+  replay. Se o segredo não puder ser relido, a operação fica pendente e
+  exige reautorização. Root não faz replay de escrita de outro usuário.
 - Redirect para fora do loopback vira 502 e não é seguido.
 - O worker espera 1 s entre passagens. É um laço local, não um timer de modelo.

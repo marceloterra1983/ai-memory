@@ -177,20 +177,20 @@ def normalize_write(args: dict):
 
 
 def derive_title(body: str, path: str) -> str:
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("# "):
-            return stripped[2:].strip()
+    # Rust's body.lines() recognizes LF/CRLF, not other Unicode separators.
+    for line in body.split("\n"):
+        if line.startswith("# "):
+            title = line[2:].strip()
+            if title:
+                return title
     stem = path.rsplit("/", 1)[-1]
     return stem[:-3] if stem.endswith(".md") else stem
 
 
 def expected_title(intent: dict) -> str:
     title = intent.get("title")
-    # A present empty title is stored as-is. The read path still derives a
-    # heading when the stored title is blank, so recognition follows that.
-    if isinstance(title, str) and title != "":
-        return title
+    if isinstance(title, str) and title.strip():
+        return title.strip()
     return derive_title(intent["body"], intent["path"])
 
 
@@ -327,7 +327,7 @@ def matches(intent: dict, page: dict) -> bool:
         return False
     if page.get("title") != expected_title(intent):
         return False
-    if intent.get("title") is not None and frontmatter.get("title") not in (None, intent["title"]):
+    if intent.get("title") is not None and frontmatter.get("title") != intent["title"]:
         return False
     return True
 

@@ -1,9 +1,6 @@
---- a/crates/ai-memory-mcp/src/server.rs	2026-10-09 23:35:40.157478936 -0300
-+++ b/crates/ai-memory-mcp/src/server.rs	2026-10-09 23:35:40.157578824 -0300
-@@ -1669,7 +1669,12 @@
-     /// handle for a create-on-write resolution, or an underlying store failure
-     /// — stay `internal_error` (`-32603`).
-     fn scope_error(err: ai_memory_store::ScopeResolutionError) -> McpError {
+--- a/crates/ai-memory-mcp/src/server.rs	2026-10-09 23:42:04.227526361 -0300
++++ b/crates/ai-memory-mcp/src/server.rs	2026-10-09 23:42:04.227772075 -0300
+@@ -1672 +1672,6 @@
 -        if err.is_bad_request() || err.is_not_found() {
 +        if err.is_not_found() {
 +            McpError::invalid_params(
@@ -11,34 +8,18 @@
 +                Some(serde_json::json!({"code": "scope_not_found"})),
 +            )
 +        } else if err.is_bad_request() {
-             McpError::invalid_params(err.to_string(), None)
-         } else {
-             McpError::internal_error(err.to_string(), None)
-@@ -4124,7 +4129,7 @@
-                                 "page {} not found in resolved scope {scope}{hint}",
-                                 page_path.as_str()
-                             ),
+@@ -4127 +4132 @@
 -                            None,
 +                            Some(serde_json::json!({"code": "page_not_found"})),
-                         ))
-                     }
-                 }
-@@ -10238,6 +10243,11 @@
-             msg.contains("does-not-exist.md"),
-             "must name the path; got {msg}"
-         );
+@@ -10240,0 +10246,5 @@
 +        assert_eq!(
 +            err.data,
 +            Some(serde_json::json!({"code": "page_not_found"})),
 +            "page absence must be a typed code, not the message text"
 +        );
- 
-         // Auto-scoped read: the error adds the parallel-session hint.
-         let err = server
-@@ -11141,6 +11151,39 @@
-         }
-     }
- 
+@@ -11141,0 +11152,33 @@
++    }
++
 +    /// Typed scope absence is `data.code = scope_not_found` on the existing
 +    /// invalid-params error. Malformed input keeps `data` empty. Forbidden
 +    /// and store failures stay internal and are not absence.
@@ -70,8 +51,3 @@
 +        ));
 +        assert_eq!(forbidden.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
 +        assert!(forbidden.data.is_none());
-+    }
-+
-     #[tokio::test]
-     async fn memory_status_names_the_project_that_answered() {
-         // #757: a static MCP client's transport session id is not a hook

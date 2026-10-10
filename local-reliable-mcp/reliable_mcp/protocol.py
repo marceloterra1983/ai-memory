@@ -52,7 +52,10 @@ def _load_object(raw: bytes):
             object_pairs_hook=pairs,
             parse_constant=_reject_constant,
         )
-    except (UnicodeDecodeError, ValueError):
+        # Python also accepts float overflow and lone surrogates that serde_json
+        # rejects. Validate the whole object before normalization can drop them.
+        json.dumps(message, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (UnicodeError, ValueError):
         return None
     if not isinstance(message, dict):
         return None

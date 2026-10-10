@@ -83,7 +83,8 @@ outro dono do flock. Congele um manifesto e backup privado verificados antes
 de assumir uma fila real, preservando conteúdo, SHA, idade, modo e metadados.
 
 O laço espera um segundo entre ciclos e limita cada ciclo a quatro pedidos,
-32 eventos por lote e dois segundos de envio. `pre-compact`,
+32 eventos por lote e dois segundos de envio. A fila de trabalho guarda caminhos;
+os corpos ficam em memória somente para o lote atual e seu próximo candidato. `pre-compact`,
 `post-compaction` e `session-end` usam `/hook` assíncrono para não prender
 eventos comuns atrás da consolidação; só o recibo SQL posterior autoriza a
 remoção. Claims incompletos permanecem intactos e não são reenviados para
@@ -98,10 +99,19 @@ ou destino. Os logs contêm somente contagens. Jev não se aplica a essas
 comparações determinísticas. O limite de 10.000 arquivos do produtor nativo
 permanece; não deixe uma fila protegida/parada alcançar esse limite.
 
-Uma sessão já terminada pode reconhecer `session-end` sem criar checkpoint
-para uma chave nova (`AlreadyEnded`). Esse worker conserva o original;
-uma confirmação HTTP ou ponteiro de sessão não o transforma em entregue.
-O mesmo vale para caudas de `pre-compact` que ainda não completaram.
+Uma sessão já terminada admite uma chave nova de `session-end` válido em
+transação após validar escopo, dono, agente e autorização. A claim fica
+pendente até o reparo da cauda nativa terminar; o replay não duplica observação,
+summary, handoff ou geração de consolidação. Ends ausentes ou de escopo
+inválido não recebem claim. Esse suporte exige rebuild do backend; instalar
+somente o sidecar não corrige binários anteriores.
+
+Caudas de `pre-compact` ainda incompletas exigem recuperação nativa coordenada:
+depois de provar que o processador anterior terminou, reentregue o envelope
+original uma vez ao backend com consolidação zero-LLM, preservando a chave e
+a autorização. `ResumePending` retoma os efeitos sem nova observação. O worker
+não reenvia claims pendentes periodicamente: confirme seus recibos depois da
+recuperação, sem escrever SQL nem considerar ACK ou ponteiro como entrega.
 
 Para rollback, preserve primeiro manifesto, originais e recibos; pare apenas
 o novo serviço. Isso libera o flock e pode permitir o drainer nativo com

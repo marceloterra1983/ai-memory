@@ -1066,3 +1066,444 @@ async fn session_summary_reconcile_follows_the_observation_target_scope() {
     assert_ne!(startup_id, target_id);
     assert_eq!(summary, Some(target_id.as_bytes().to_vec()));
 }
+
+mod ended_hook_receipts {
+    use super::*;
+    use ai_memory_core::{NewObservation, ObservationKind, Sanitized, Sanitizer};
+    use ai_memory_store::{
+        AccessMode, GrantLevel, HookProjectAuthorization, HookSessionAdmission, ProjectAccess,
+        ProjectPrincipal, StoreError,
+    };
+    use rusqlite::{OptionalExtension, params};
+
+    fn end_event(ws: WorkspaceId, proj: ProjectId) -> NewSession {
+        NewSession {
+            occurred_at: Some(1_700_000_000_000_000),
+            id: SessionId::new(),
+            workspace_id: ws,
+            project_id: proj,
+            agent_kind: AgentKind::Codex,
+            cwd: Some("/repo/app".into()),
+            actor_user: Some(operator("alice")),
+        }
+    }
+
+    fn end_observation(event: &NewSession) -> Sanitized<NewObservation> {
+        Sanitized::new(
+            NewObservation {
+                occurred_at: event.occurred_at,
+                session_id: event.id,
+                workspace_id: event.workspace_id,
+                project_id: event.project_id,
+                kind: ObservationKind::SessionEnd,
+                extension: None,
+                source_event: Some("SessionEnd".into()),
+                title: "Synthetic end".into(),
+                body: "Synthetic completed work.".into(),
+                importance: 1,
+            },
+            &Sanitizer::builtin(),
+        )
+    }
+
+    async fn receipt(store: &Store, proj: ProjectId, key: &str) -> Option<(i64, Option<i64>)> {
+        let key = key.to_string();
+        store
+            .reader
+            .with_conn(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT seen_at, completed_at FROM ingest_keys WHERE project_id = ?1 AND key = ?2",
+                        params![proj.as_bytes(), key],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?)
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn admit(store: &Store, event: &NewSession, key: &str) -> HookSessionAdmission {
+        store
+            .writer
+            .admit_hook_session_event(
+                event.clone(),
+                end_observation(event),
+                OwnerFilter::User(operator("alice")),
+                Some(key.into()),
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    /// A fresh terminal envelope still needs a durable claim when its work
+    /// was ended by another envelope. Claiming it cannot redo terminal effects.
+    #[tokio::test]
+    async fn already_ended_receipt_is_pending_durable_and_idempotent_without_new_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let (ws, proj) = scope(&store).await;
+        let event = end_event(ws, proj);
+        store.writer.begin_session(event.clone()).await.unwrap();
+        store
+            .writer
+            .insert_observation(end_observation(&event))
+            .await
+            .unwrap();
+        let summary = store
+            .writer
+            .upsert_page(page(
+                ws,
+                proj,
+                "sessions/synthetic.md",
+                "Summary",
+                "Original summary.",
+            ))
+            .await
+            .unwrap();
+        store
+            .writer
+            .end_session_with_handoff(
+                event.id,
+                Some(summary),
+                NewHandoff {
+                    workspace_id: ws,
+                    project_id: proj,
+                    from_session_id: Some(event.id),
+                    from_agent: AgentKind::Codex,
+                    to_agent: None,
+                    cwd: event.cwd.clone(),
+                    summary: "Original handoff.".into(),
+                    open_questions: vec![],
+                    next_steps: vec![],
+                    files_touched: vec![],
+                    owner_user: event.actor_user.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let snapshot = || {
+            let reader = store.reader.clone();
+            let session_id = event.id;
+            async move {
+                reader.with_conn(move |conn| {
+                    Ok(conn.query_row(
+                        "SELECT ended_at, ended_observation_count, summary_page_id,
+                         (SELECT COUNT(*) FROM observations), (SELECT COUNT(*) FROM pages),
+                         (SELECT COUNT(*) FROM handoffs), (SELECT COUNT(*) FROM session_consolidation_jobs)
+                         FROM sessions WHERE id = ?1",
+                        [session_id.as_bytes()],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, Option<Vec<u8>>>(2)?,
+                            row.get::<_, u64>(3)?, row.get::<_, u64>(4)?, row.get::<_, u64>(5)?, row.get::<_, u64>(6)?)),
+                    )?)
+                }).await.unwrap()
+            }
+        };
+        let before = snapshot().await;
+        assert!(matches!(
+            admit(&store, &event, "fresh-end").await,
+            HookSessionAdmission::AlreadyEnded { .. }
+        ));
+        let pending = receipt(&store, proj, "fresh-end")
+            .await
+            .expect("valid AlreadyEnded must durably claim its own delivery key");
+        assert_eq!(pending.1, None, "tail repair must finish before completion");
+        assert!(matches!(
+            admit(&store, &event, "fresh-end").await,
+            HookSessionAdmission::AlreadyEnded { .. }
+        ));
+        assert_eq!(receipt(&store, proj, "fresh-end").await, Some(pending));
+        assert_eq!(
+            snapshot().await,
+            before,
+            "a receipt cannot append terminal artifacts"
+        );
+        assert!(
+            store
+                .writer
+                .complete_observation_ingest_if_claimed(proj, "fresh-end".into())
+                .await
+                .unwrap()
+        );
+        let completed = receipt(&store, proj, "fresh-end").await.unwrap();
+        assert!(completed.1.is_some());
+        assert!(matches!(
+            admit(&store, &event, "fresh-end").await,
+            HookSessionAdmission::AlreadyEnded { .. }
+        ));
+        assert!(
+            store
+                .writer
+                .complete_observation_ingest_if_claimed(proj, "fresh-end".into())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            receipt(&store, proj, "fresh-end").await,
+            Some(completed),
+            "replays preserve original claim and completion times"
+        );
+        assert_eq!(snapshot().await, before);
+        drop(store);
+        let reopened = Store::open(tmp.path()).unwrap();
+        assert_eq!(receipt(&reopened, proj, "fresh-end").await, Some(completed));
+    }
+
+    /// Even a fully ended session id cannot authorize another actor, agent,
+    /// or unrelated scope, and a missing session never creates a receipt.
+    #[tokio::test]
+    async fn already_ended_receipt_refuses_foreign_scope_actor_agent_and_missing_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let (ws, proj) = scope(&store).await;
+        let sibling = store
+            .writer
+            .get_or_create_project(ws, "sibling", None)
+            .await
+            .unwrap();
+        let foreign_ws = store
+            .writer
+            .get_or_create_workspace("foreign")
+            .await
+            .unwrap();
+        let foreign_proj = store
+            .writer
+            .get_or_create_project(foreign_ws, "shared-app", None)
+            .await
+            .unwrap();
+        let event = end_event(ws, proj);
+        store.writer.begin_session(event.clone()).await.unwrap();
+        store.writer.end_session(event.id, None).await.unwrap();
+        assert!(matches!(
+            admit(&store, &event, "owned-end").await,
+            HookSessionAdmission::AlreadyEnded { .. }
+        ));
+        let control = receipt(&store, proj, "owned-end")
+            .await
+            .expect("legitimate actor must claim a receipt");
+        for (label, target_ws, target_proj, cwd) in [
+            ("sibling-other-cwd", ws, sibling, Some("/repo/other")),
+            (
+                "foreign-other-cwd",
+                foreign_ws,
+                foreign_proj,
+                Some("/repo/other"),
+            ),
+            ("foreign-no-cwd", foreign_ws, foreign_proj, None),
+        ] {
+            let mut foreign = event.clone();
+            foreign.workspace_id = target_ws;
+            foreign.project_id = target_proj;
+            foreign.cwd = cwd.map(Into::into);
+            assert!(
+                matches!(
+                    admit(&store, &foreign, label).await,
+                    HookSessionAdmission::InvalidScopedEnd
+                ),
+                "{label}"
+            );
+            assert_eq!(receipt(&store, proj, label).await, None, "{label}");
+            assert_eq!(receipt(&store, target_proj, label).await, None, "{label}");
+        }
+        for (label, owner, agent) in [
+            (
+                "foreign-actor",
+                OwnerFilter::User(operator("bob")),
+                AgentKind::Codex,
+            ),
+            ("unattributed", OwnerFilter::Unattributed, AgentKind::Codex),
+            (
+                "foreign-agent",
+                OwnerFilter::User(operator("alice")),
+                AgentKind::ClaudeCode,
+            ),
+        ] {
+            let mut foreign = event.clone();
+            foreign.agent_kind = agent;
+            let result = store
+                .writer
+                .admit_hook_session_event(
+                    foreign.clone(),
+                    end_observation(&foreign),
+                    owner,
+                    Some("owned-end".into()),
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(StoreError::SessionCollision)),
+                "{label}: {result:?}"
+            );
+            assert_eq!(
+                receipt(&store, proj, "owned-end").await,
+                Some(control),
+                "a borrowed key cannot bypass identity checks"
+            );
+        }
+        let missing = end_event(ws, proj);
+        assert!(matches!(
+            admit(&store, &missing, "missing-end").await,
+            HookSessionAdmission::InvalidMissingEnd
+        ));
+        assert_eq!(receipt(&store, proj, "missing-end").await, None);
+        assert_eq!(
+            store.reader.find_session_scope(missing.id).await.unwrap(),
+            None
+        );
+        let mut drifted = event.clone();
+        drifted.workspace_id = foreign_ws;
+        drifted.project_id = foreign_proj;
+        drifted.cwd = Some("/repo/app/".into());
+        let admitted = admit(&store, &drifted, "same-cwd-drift").await;
+        let HookSessionAdmission::AlreadyEnded { session } = admitted else {
+            panic!("same-cwd control was refused: {admitted:?}")
+        };
+        assert_eq!((session.workspace_id(), session.project_id()), (ws, proj));
+        assert!(receipt(&store, proj, "same-cwd-drift").await.is_some());
+        assert_eq!(
+            receipt(&store, foreign_proj, "same-cwd-drift").await,
+            None,
+            "receipt belongs to the authorized persisted session scope"
+        );
+        assert!(
+            store
+                .reader
+                .observations_for_session(event.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A stale preflight grant cannot admit a receipt. Same-cwd routing still
+    /// requires current write authorization for both incoming and stored scopes.
+    #[tokio::test]
+    async fn already_ended_receipt_authorizes_both_scopes_on_the_admission_transaction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let (ws, proj) = scope(&store).await;
+        let incoming = store
+            .writer
+            .get_or_create_project(ws, "incoming", None)
+            .await
+            .unwrap();
+        let viewer = store
+            .writer
+            .create_human_user(
+                NewUser {
+                    username: "alice".into(),
+                    name: None,
+                    email: None,
+                },
+                UserRole::User,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        for project in [proj, incoming] {
+            store
+                .writer
+                .set_access_mode(project, AccessMode::Restricted)
+                .await
+                .unwrap();
+            store
+                .writer
+                .grant_memory(viewer, project, GrantLevel::Write, None)
+                .await
+                .unwrap();
+        }
+        let event = end_event(ws, proj);
+        store.writer.begin_session(event.clone()).await.unwrap();
+        store.writer.end_session(event.id, None).await.unwrap();
+        assert!(
+            store
+                .writer
+                .authorize_project(
+                    ws,
+                    proj,
+                    ProjectPrincipal::user(viewer),
+                    true,
+                    ProjectAccess::Write
+                )
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        store
+            .writer
+            .revoke_memory(viewer, proj, None)
+            .await
+            .unwrap();
+        let authorized_admit = |event: NewSession, key: &'static str| {
+            let writer = store.writer.clone();
+            async move {
+                writer
+                    .admit_hook_session_event_authorized(
+                        event.clone(),
+                        end_observation(&event),
+                        OwnerFilter::User(operator("alice")),
+                        Some(key.into()),
+                        None,
+                        Some(HookProjectAuthorization {
+                            viewer,
+                            writes_session_scope: true,
+                        }),
+                    )
+                    .await
+            }
+        };
+        assert!(matches!(
+            authorized_admit(event.clone(), "revoked-after-preflight").await,
+            Err(StoreError::ProjectWriteForbidden)
+        ));
+        assert_eq!(receipt(&store, proj, "revoked-after-preflight").await, None);
+        let mut drifted = event.clone();
+        drifted.project_id = incoming;
+        assert!(matches!(
+            authorized_admit(drifted.clone(), "forbidden-persisted").await,
+            Err(StoreError::ProjectWriteForbidden)
+        ));
+        assert_eq!(receipt(&store, proj, "forbidden-persisted").await, None);
+        assert_eq!(receipt(&store, incoming, "forbidden-persisted").await, None);
+        store
+            .writer
+            .grant_memory(viewer, proj, GrantLevel::Write, None)
+            .await
+            .unwrap();
+        store
+            .writer
+            .revoke_memory(viewer, incoming, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            authorized_admit(drifted.clone(), "forbidden-incoming").await,
+            Err(StoreError::ProjectWriteForbidden)
+        ));
+        assert_eq!(receipt(&store, proj, "forbidden-incoming").await, None);
+        assert_eq!(receipt(&store, incoming, "forbidden-incoming").await, None);
+        store
+            .writer
+            .grant_memory(viewer, incoming, GrantLevel::Write, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            authorized_admit(drifted, "granted-both").await.unwrap(),
+            HookSessionAdmission::AlreadyEnded { .. }
+        ));
+        let pending = receipt(&store, proj, "granted-both")
+            .await
+            .expect("both current grants authorize the persisted receipt");
+        assert_eq!(pending.1, None);
+        assert_eq!(receipt(&store, incoming, "granted-both").await, None);
+        assert!(
+            store
+                .reader
+                .observations_for_session(event.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}

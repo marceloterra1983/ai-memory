@@ -39,7 +39,7 @@ def _sync_directory(path):
 
 
 def _read_private_source(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as handle:
         before = os.fstat(handle.fileno())
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_BYTES:
@@ -62,7 +62,7 @@ def _preserve(path, raw):
         if existing != raw or stat.S_IMODE(meta.st_mode) != 0o600:
             raise ValueError("archive collision")
         # Re-fsync on retry, including an earlier write whose fsync failed.
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
             os.fsync(handle.fileno())
     else:
         with os.fdopen(fd, "wb") as handle:
@@ -113,6 +113,8 @@ class HookDelivery:
     def _load(self, path):
         raw, meta = _read_private_source(path)
         entry = json.loads(raw)
+        if not isinstance(entry, dict) or not isinstance(entry.get("url"), str):
+            raise ValueError("invalid event envelope")
         parts = urlsplit(entry["url"])
         if (parts.scheme, parts.hostname, parts.port, parts.path) != (
             "http", self.host, self.port, "/hook"
@@ -170,8 +172,8 @@ class HookDelivery:
 
     def drain_once(self):
         result = dict(delivered=0, pending=0, unconfirmed=0, errors=0)
-        ready = deque()
-        for path in sorted(self.spool.glob("*.json")):
+
+        def load_pending(path):
             try:
                 item = self._load(path)
                 checkpoint = self._checkpoint(item)
@@ -180,24 +182,41 @@ class HookDelivery:
                     result["delivered"] += 1
                 elif checkpoint:
                     result["unconfirmed"] += 1
-                elif self._retry_after.get(path.name, 0) > time.monotonic():
-                    result["unconfirmed"] += 1
                 else:
-                    ready.append(item)
+                    return item
             except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
                 result["errors"] += 1
+            return None
+
+        ready = deque()
+        for path in sorted(self.spool.glob("*.json")):
+            item = load_pending(path)
+            if item is not None:
+                if self._retry_after.get(path.name, 0) > time.monotonic():
+                    result["unconfirmed"] += 1
+                else:
+                    ready.append(path)
+        item = None
         started = time.monotonic()
         requests = 0
         while ready and requests < MAX_REQUESTS and time.monotonic() - started < 2:
-            first = ready.popleft()
+            first = load_pending(ready.popleft())
+            if first is None:
+                continue
             batch = [first]
             size = len(first["raw"])
             # Keep each event's credential and original order, without mixing tokens.
-            while (not first["slow"] and ready and not ready[0]["slow"]
-                   and len(batch) < MAX_ITEMS and ready[0]["token"] == first["token"]):
-                if size + len(ready[0]["raw"]) > MAX_BYTES // 2:
+            while not first["slow"] and ready and len(batch) < MAX_ITEMS:
+                next_item = load_pending(ready[0])
+                if next_item is None:
+                    ready.popleft()
+                    continue
+                if next_item["slow"] or next_item["token"] != first["token"]:
                     break
-                batch.append(ready.popleft())
+                if size + len(next_item["raw"]) > MAX_BYTES // 2:
+                    break
+                ready.popleft()
+                batch.append(next_item)
                 size += len(batch[-1]["raw"])
             headers = {"Content-Type": "application/json"}
             if first["token"]:

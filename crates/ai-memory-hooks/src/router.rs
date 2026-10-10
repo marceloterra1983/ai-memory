@@ -3113,9 +3113,9 @@ async fn process_authorized(
                 .await?;
             }
             if let Some(key) = ingest_key {
-                let _ = state
+                state
                     .writer
-                    .complete_observation_ingest_if_claimed(session.project_id(), key)
+                    .complete_observation_ingest(session.project_id(), key)
                     .await?;
             }
             return Ok(());
@@ -12199,6 +12199,267 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "already-ended synthetic SessionEnd must not create a handoff"
+        );
+    }
+
+    /// A distinct valid end needs its own receipt, even when an earlier end
+    /// already wrote the artifacts. A failed repair must leave it resumable.
+    #[tokio::test]
+    async fn already_ended_new_key_repairs_before_receipt_and_replay_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = make_state(&tmp).await;
+        let sid = SessionId::new();
+        let fire = |event: &str, key: Option<&str>| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("codex".into()),
+                    workspace: Some("default".into()),
+                    project: Some("scratch".into()),
+                    ingest_key: key.map(str::to_owned),
+                    ..Default::default()
+                },
+                serde_json::json!({"session_id": sid.to_string(), "prompt": "finish work"}),
+            )
+        };
+        process(&state, fire("user-prompt-submit", None), None, Vec::new())
+            .await
+            .unwrap();
+        process(&state, fire("session-end", None), None, Vec::new())
+            .await
+            .unwrap();
+        let llm = Arc::new(RecordingLlm(Mutex::new(None)));
+        state.consolidator = Some(Arc::new(Consolidator::new(
+            state.reader.clone(),
+            state.writer.clone(),
+            state.wiki.clone(),
+            llm.clone(),
+            state.workspace_id,
+            state.project_id,
+        )));
+        state.consolidate_on_session_end = true;
+        state.session_consolidation_notify = Some(Arc::new(tokio::sync::Notify::new()));
+
+        // This connection alters only the disposable fixture. Refuse the real
+        // queue write to reproduce failure after admission but before receipt.
+        let db = rusqlite::Connection::open(tmp.path().join("db/memory.sqlite")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_end_repair BEFORE INSERT ON session_consolidation_jobs BEGIN SELECT RAISE(ABORT, 'repair failed'); END;").unwrap();
+        assert!(
+            process(
+                &state,
+                fire("session-end", Some("distinct-end")),
+                None,
+                Vec::new()
+            )
+            .await
+            .is_err()
+        );
+        let pending: (u64, u64) = state.reader.with_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*), COUNT(completed_at) FROM ingest_keys WHERE key = 'distinct-end'", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        }).await.unwrap();
+        assert_eq!(
+            pending,
+            (1, 0),
+            "valid end must claim its new key, but never complete a failed repair"
+        );
+        db.execute_batch("DROP TRIGGER fail_end_repair;").unwrap();
+
+        let (first, replay) = tokio::join!(
+            process(
+                &state,
+                fire("session-end", Some("distinct-end")),
+                None,
+                Vec::new()
+            ),
+            process(
+                &state,
+                fire("session-end", Some("distinct-end")),
+                None,
+                Vec::new()
+            ),
+        );
+        first.unwrap();
+        replay.unwrap();
+        let before: i64 = state
+            .reader
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT completed_at FROM ingest_keys WHERE key = 'distinct-end'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        process(
+            &state,
+            fire("session-end", Some("another-end")),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        process(
+            &state,
+            fire("session-end", Some("distinct-end")),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let counts = state.reader.with_conn(|conn| {
+            Ok(conn.query_row("SELECT (SELECT COUNT(*) FROM observations), (SELECT COUNT(*) FROM pages WHERE path GLOB 'sessions/*'), (SELECT COUNT(*) FROM handoffs), (SELECT COUNT(*) FROM session_consolidation_jobs), (SELECT COUNT(completed_at) FROM ingest_keys), (SELECT completed_at FROM ingest_keys WHERE key = 'distinct-end')", [], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?, r.get::<_, u64>(2)?, r.get::<_, u64>(3)?, r.get::<_, u64>(4)?, r.get::<_, i64>(5)?)))?)
+        }).await.unwrap();
+        assert_eq!(
+            counts,
+            (2, 1, 1, 1, 2, before),
+            "new receipts and replays must preserve observations, summary, handoff, queue generation and original completion time"
+        );
+        assert!(
+            llm.0.lock().unwrap().is_none(),
+            "end repair queues work without calling the provider"
+        );
+    }
+
+    /// Native recovery resumes a claimed PreCompact tail with no provider and
+    /// skips completed replays without duplicating its observation or artifacts.
+    #[tokio::test]
+    async fn precompact_pending_native_claim_resumes_zero_llm_checkpoint_once() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let sid = SessionId::new();
+        let cwd = tmp.path().join("precompact-recovery");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let fire = |event: &str, key: Option<&str>| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("codex".into()),
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    workspace: Some("default".into()),
+                    project: Some("scratch".into()),
+                    ingest_key: key.map(str::to_owned),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "session_id": sid.to_string(),
+                    "cwd": cwd.to_string_lossy(),
+                    "prompt": "preserve interrupted working state",
+                }),
+            )
+        };
+        process(&state, fire("user-prompt-submit", None), None, Vec::new())
+            .await
+            .unwrap();
+        let env = fire("pre-compact", Some("native-precompact-recovery"));
+        let kind = env.event.to_observation_kind();
+        let admission = state
+            .writer
+            .admit_hook_session_event(
+                NewSession {
+                    occurred_at: env.occurred_at_micros(),
+                    id: sid,
+                    workspace_id: state.workspace_id,
+                    project_id: state.project_id,
+                    agent_kind: env.agent,
+                    cwd: Some(cwd),
+                    actor_user: None,
+                },
+                Sanitized::new(
+                    NewObservation {
+                        occurred_at: env.occurred_at_micros(),
+                        session_id: sid,
+                        workspace_id: state.workspace_id,
+                        project_id: state.project_id,
+                        kind,
+                        extension: env.extension.clone(),
+                        source_event: env.source_event.clone(),
+                        title: env
+                            .title_hint
+                            .clone()
+                            .unwrap_or_else(|| kind.as_str().to_owned()),
+                        body: env.body_excerpt.clone().unwrap_or_default(),
+                        importance: importance_for(env.event),
+                    },
+                    &state.sanitizer,
+                ),
+                ai_memory_core::OwnerFilter::Unattributed,
+                env.ingest_key.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            admission,
+            HookSessionAdmission::Observation {
+                ingest: IngestObservationOutcome::Inserted(_),
+                ..
+            }
+        ));
+        let project = state.project_id;
+        let pending: Option<i64> = state
+            .reader
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT completed_at FROM ingest_keys WHERE project_id = ?1 AND key = 'native-precompact-recovery'",
+                    [project.as_bytes()],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(pending, None);
+        let observations = state.reader.observations_for_session(sid).await.unwrap();
+        assert_eq!(observations.len(), 2);
+        let path = ai_memory_core::PagePath::new(format!("sessions/{sid}.md")).unwrap();
+        assert!(
+            state
+                .reader
+                .page_body_by_ids(state.workspace_id, project, path.as_str())
+                .await
+                .unwrap()
+                .is_none(),
+            "interrupted admission has not run the checkpoint tail"
+        );
+
+        process(&state, env.clone(), None, Vec::new())
+            .await
+            .unwrap();
+        let page = state
+            .wiki
+            .read_page(state.workspace_id, project, &path)
+            .unwrap();
+        assert!(page.body.contains("preserve interrupted working state"));
+        let completed: i64 = state
+            .reader
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT completed_at FROM ingest_keys WHERE project_id = ?1 AND key = 'native-precompact-recovery'",
+                    [project.as_bytes()],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        let checkpoint = state.wiki.recent_checkpoints(1).unwrap();
+        assert!(checkpoint[0].summary.starts_with("pre-compact("));
+        process(&state, env, None, Vec::new()).await.unwrap();
+        let counts = state
+            .reader
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM observations), (SELECT COUNT(*) FROM pages), (SELECT COUNT(*) FROM handoffs), (SELECT COUNT(*) FROM session_consolidation_jobs), (SELECT COUNT(*) FROM sessions WHERE ended_at IS NOT NULL), (SELECT completed_at FROM ingest_keys WHERE key = 'native-precompact-recovery')",
+                    [],
+                    |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?, row.get::<_, u64>(2)?, row.get::<_, u64>(3)?, row.get::<_, u64>(4)?, row.get::<_, i64>(5)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(counts, (2, 1, 0, 0, 0, completed));
+        assert_eq!(
+            state.wiki.recent_checkpoints(1).unwrap()[0].oid,
+            checkpoint[0].oid,
+            "completed replay must not produce another wiki commit"
         );
     }
 

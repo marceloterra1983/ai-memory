@@ -70,7 +70,11 @@ from hook paths.
    effects may repeat an already applied effect rather than silently lose the
    rest. For an interrupted already-ended SessionEnd, the replay converges the
    wiki commit, durable provider job, and pending key without appending another
-   observation. `log.md` gets an appended
+   observation. A distinct valid keyed end of the same covered generation
+   claims its own pending receipt after scope, owner, agent and write-access
+   admission; completion follows that repair, without another summary,
+   handoff or consolidation generation. Missing or foreign ends claim nothing.
+   `log.md` gets an appended
    `## [YYYY-MM-DDTHH:MM:SSZ] <event> | <title>` line.
 3. On true `SessionEnd` events, the server synthesises a
    `sessions/<id>.md` summary page (rule-based, no LLM) and opens a

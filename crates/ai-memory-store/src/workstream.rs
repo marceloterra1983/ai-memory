@@ -508,6 +508,26 @@ pub(crate) fn link_native_session(
     agent: AgentKind,
     native_session_id: &str,
 ) -> StoreResult<bool> {
+    link_native_session_inner(conn, run_id, agent, native_session_id, None)
+}
+
+pub(crate) fn link_native_session_authorized(
+    conn: &mut Connection,
+    run_id: ManagedRunId,
+    agent: AgentKind,
+    native_session_id: &str,
+    viewer: ai_memory_core::UserId,
+) -> StoreResult<bool> {
+    link_native_session_inner(conn, run_id, agent, native_session_id, Some(viewer))
+}
+
+fn link_native_session_inner(
+    conn: &mut Connection,
+    run_id: ManagedRunId,
+    agent: AgentKind,
+    native_session_id: &str,
+    viewer: Option<ai_memory_core::UserId>,
+) -> StoreResult<bool> {
     if native_session_id.trim().is_empty() {
         return Ok(false);
     }
@@ -542,6 +562,22 @@ pub(crate) fn link_native_session(
             .is_some_and(|linked| linked != native_session_id)
     {
         return Ok(false);
+    }
+    if let Some(viewer) = viewer {
+        let (workspace, project): (Vec<u8>, Vec<u8>) = tx.query_row(
+            "SELECT workspace_id, project_id FROM workstreams WHERE id = ?1",
+            params![&run.workstream],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        crate::project_authz::resolve_project_authz(
+            &tx,
+            WorkspaceId::from_slice(&workspace)?,
+            ProjectId::from_slice(&project)?,
+            &crate::ProjectPrincipal::user(viewer),
+            true,
+        )?
+        .authorize(crate::ProjectAccess::Write)
+        .map_err(|_| StoreError::ProjectWriteForbidden)?;
     }
     let workstream = run.workstream;
     let sync_through = run.sync_through;

@@ -144,7 +144,8 @@ this workspace.
 
 Read and plan:
 
-- use `/api/v1/workspaces`, `/api/v1/projects`, `/api/v1/pages`,
+- use `/api/v1/workspaces`, `/api/v1/projects`,
+  `/api/v1/workspaces/{workspace}/projects/{project}/pages`,
   `/api/v1/search`, and `/api/v1/graph` to inspect the destination;
 - default to dry-run, printing planned page writes without mutating ai-memory.
 

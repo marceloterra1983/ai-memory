@@ -14,10 +14,12 @@ that stalls every query before falling back to the original order.
 The reranker prompt, though, is already a scoring rubric: grade each
 candidate 1.0 (direct answer) / 0.7 (same topic) / 0.3 (tangential) /
 0.0 (unrelated). A judge endpoint that scores a fixed rubric answers the
-same question without autoregressive decoding. The adapter in
-[`docs/examples/jev-reranker-adapter/jev_rerank_shim.py`](examples/jev-reranker-adapter/jev_rerank_shim.py)
-sits between ai-memory and the provider, translates exactly that request
-into one batched Jev `score` call, and proxies everything else unchanged.
+same question without autoregressive decoding. The shipped
+[`choice adapter`](examples/jev-reranker-adapter/jev_rerank_shim_choice.py)
+sits between ai-memory and the provider, translates reranking into one Jev
+`choice` call, and proxies other requests unchanged. The earlier rubric
+`score` adapter is not included in this repository; its measured results
+are retained below as historical comparisons.
 
 ## How it works
 
@@ -31,13 +33,11 @@ configuration; it splits traffic by request shape:
    message has that prefix are reranker requests.
 2. The user message is `{"query", "candidates": [{"candidate", "title",
    "text"}]}` with 1-based indices. The adapter renders one `state` block
-   (query + numbered candidates) and one `score` question per candidate
-   whose `criteria` mirror the reranker prompt's four grades, then makes a
-   single POST to the Jev `/v1/systemone` endpoint.
-3. Each answer's rubric index maps back to `relevance` 0.0 / 0.3 / 0.7 /
-   1.0 (index / 3), and the adapter returns
-   `{"scores": [{"candidate": n, "relevance": f}]}` as plain chat-completion
-   content — the exact shape the reranker's tolerant parser expects.
+   (query + numbered candidates) and one `choice` question whose criteria
+   identify every candidate, then posts to Jev `/v1/systemone`.
+3. Each candidate's choice probability becomes its `relevance`, and the
+   adapter returns `{"scores": [{"candidate": n, "relevance": f}]}` as
+   chat-completion content matching the reranker's structured score schema.
 4. Every other request — consolidation, lint, bootstrap, plain chats — is
    reverse-proxied to the real upstream byte-for-byte, `Authorization`
    forwarded verbatim. The adapter stores no secrets.
@@ -72,7 +72,7 @@ Description=ai-memory Jev reranker adapter
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/ai-memory/ops/jev_rerank_shim.py
+ExecStart=/usr/bin/python3 /opt/ai-memory/ops/jev_rerank_shim_choice.py
 Environment=JEV_URL=http://127.0.0.1:18095/v1/systemone
 Environment=UPSTREAM=http://127.0.0.1:8000
 Environment=LISTEN=127.0.0.1:18097
@@ -91,13 +91,10 @@ AI_MEMORY_LLM_BASE_URL=http://127.0.0.1:18097/v1
 AI_MEMORY_RERANKER=llm
 ```
 
-To run the choice-contrastive variant instead, point `ExecStart` at
-`jev_rerank_shim_choice.py`; reranker requests then log
-`jev-choice N candidates in X.XXXs`. Everything else (env, unit,
-provider config) is identical.
-
-Verify the split with `journalctl -u <unit>`: reranker requests log
-`jev N candidates in X.XXXs`, everything else is silent (proxied).
+Copy the shipped `jev_rerank_shim_choice.py` to the path selected by
+`ExecStart`. Verify the split with `journalctl -u <unit>`: reranker requests
+log `jev-choice N candidates in X.XXXs`; successful proxied requests are
+silent. The historical rubric adapter is not bundled.
 
 ## Benchmarks
 
@@ -110,7 +107,7 @@ hybrid, `explain=true` score details, identical server build):
 | none (server order) | 0.495 | 0.651 | 0.739 | — |
 | hosted model A (reasoning, max) | 0.778 | 0.840 | 0.875 | **20.2 s** |
 | hosted model B (reasoning) | 0.768 | 0.834 | 0.870 | 13.9 s |
-| **Jev via this adapter** | **0.778** | **0.838** | **0.873** | **0.205 s** |
+| **Jev via historical rubric adapter** | **0.778** | **0.838** | **0.873** | **0.205 s** |
 
 The judge endpoint matches the hosted reasoning models' quality at
 ~100× lower latency. Hosted model A's 20.2 s mean sat exactly on the
@@ -119,7 +116,7 @@ out and the feature was effectively off (queries stalled 20 s, then fell
 back to the original order).
 
 Live end-to-end (production server, `AI_MEMORY_RERANKER=llm` through the
-adapter, full golden set): hit@1 0.657 / MRR 0.788 / NDCG@10 0.843,
+historical rubric adapter, full golden set): hit@1 0.657 / MRR 0.788 / NDCG@10 0.843,
 0 errors in 102 queries, mean `memory_query` latency 2.2 s (p50 2.21 s,
 max 3.07 s), 110/110 rerank translations served, 0 adapter failures. The
 gap to the offline arm is candidate-pool shape, not scoring: the live
@@ -174,8 +171,8 @@ same 4B overtakes the 35B. If your backend is a small replay-trained
 judge, the choice adapter is the difference between usable and not.
 
 Prefer the choice adapter when the reranker leg is the only consumer.
-Keep the rubric adapter if anything downstream reads absolute relevance
-grades (thresholding, logging heuristics, score fusion) — choice
+Use a rubric-scoring implementation if anything downstream reads absolute
+relevance grades (thresholding, logging heuristics, score fusion) — choice
 probabilities carry no absolute meaning and their scale shifts with
 candidate count.
 
@@ -187,7 +184,7 @@ candidate count.
   model, which is the pre-adapter behavior, not an outage.
 - Rubric scoring produces absolute relevance grades. If anything
   downstream of `relevance` reads absolute values (thresholding, fusion,
-  logged heuristics), keep the rubric adapter: per-candidate choice
+  logged heuristics), use a rubric-scoring implementation: per-candidate choice
   probabilities from the choice adapter are normalized across the whole
   candidate list (winner ≈ 0.99, rest ≈ 0.001, scale shifts with
   candidate count) and carry ordering information only. The sort-only

@@ -705,6 +705,8 @@ fn dev_loop_is_wired_consistently() {
         ".github/workflows/windows.yml",
         "docker/Dockerfile",
         "bin/release",
+        "packaging/aur/PKGBUILD",
+        "flake.nix",
         "AGENTS.md",
         "CONTRIBUTING.md",
         ".github/pull_request_template.md",
@@ -714,17 +716,48 @@ fn dev_loop_is_wired_consistently() {
             "{path} still sets TAILWIND_SKIP"
         );
     }
+    for path in ["packaging/aur/PKGBUILD", "flake.nix"] {
+        assert!(
+            !read_repo(path).contains("TAILWIND_BUILD"),
+            "{path} must use the vendored stylesheet without opting into its regeneration"
+        );
+    }
+    let aur = read_repo("packaging/aur/PKGBUILD");
+    assert!(aur.contains("cargo test --frozen --release -p ai-memory-cli"));
+    assert!(
+        !aur.contains("--bin ai-memory"),
+        "AUR check must cover the CLI library and integration suite, not the empty binary shim"
+    );
 }
 
 #[cfg(unix)]
 fn installed_hook_names(agent_arg: &str, canonical_agent: &str, hooks: &[&str]) -> Vec<String> {
+    installed_hook_names_with_helper(agent_arg, canonical_agent, hooks, true)
+}
+
+#[cfg(unix)]
+fn installed_hook_names_with_helper(
+    agent_arg: &str,
+    canonical_agent: &str,
+    hooks: &[&str],
+    with_helper: bool,
+) -> Vec<String> {
     let tmp = tempfile::tempdir().unwrap();
     let bundle = tmp.path().join("bundle/hooks").join(canonical_agent);
     std::fs::create_dir_all(&bundle).unwrap();
+    if with_helper {
+        std::fs::write(
+            bundle.parent().unwrap().join("_lib.sh"),
+            read_repo("hooks/_lib.sh"),
+        )
+        .unwrap();
+    }
     for hook in hooks {
         std::fs::write(
             bundle.join(format!("{hook}.sh")),
-            format!("#!/usr/bin/env bash\nprintf '{hook}\\n'\n"),
+            "#!/usr/bin/env bash\n\
+             . \"$(dirname \"$0\")/../_lib.sh\"\n\
+             printf '%s\\n' \"$(ai_memory_url_encode 'fixture value')\"\n",
         )
         .unwrap();
     }
@@ -780,6 +813,21 @@ fn installed_hook_names(agent_arg: &str, canonical_agent: &str, hooks: &[&str]) 
         .env("FAKE_HOOK_CHECKSUM", sha256_file(&archive))
         .output()
         .unwrap();
+    if !with_helper {
+        assert!(
+            !output.status.success(),
+            "a bundle missing the shared helper must fail"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("_lib.sh"));
+        assert!(
+            std::fs::read_dir(destination.join(canonical_agent))
+                .unwrap()
+                .next()
+                .is_none(),
+            "no event script may be installed without the shared helper"
+        );
+        return Vec::new();
+    }
     assert!(
         output.status.success(),
         "installer failed: stdout={} stderr={}",
@@ -802,8 +850,92 @@ fn installed_hook_names(agent_arg: &str, canonical_agent: &str, hooks: &[&str]) 
                 & 0o111,
             0
         );
+        let output = freshly_written_shell_script_command(&installed.join(name))
+            .env("HOME", tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "installed hook could not source its helper"
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "fixture%20value\n");
     }
     names
+}
+
+#[cfg(unix)]
+fn run_deploy_with_manifest(manifest: Option<&str>) -> (std::process::Output, bool) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let script = bin.join("deploy");
+    std::fs::write(&script, read_repo("bin/deploy")).unwrap();
+    std::fs::write(
+        bin.join("deploy.env"),
+        "SERVER=fixture.invalid\nDEPLOY_DIR=/fixture\nIMAGE=fixture.invalid/ai-memory:fixture\n",
+    )
+    .unwrap();
+    let manifest_path = tmp.path().join("manifest.json");
+    if let Some(manifest) = manifest {
+        std::fs::write(&manifest_path, manifest).unwrap();
+    }
+    let build_record = tmp.path().join("build-reached");
+    let docker = bin.join("docker");
+    std::fs::write(
+        &docker,
+        "#!/usr/bin/env bash\n\
+         set -euo pipefail\n\
+         case \"$1\" in\n\
+           manifest) [ -f \"$FAKE_MANIFEST\" ] || exit 1; cat \"$FAKE_MANIFEST\" ;;\n\
+           build) : > \"$FAKE_BUILD_RECORD\"; exit 97 ;;\n\
+           *) exit 98 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = freshly_written_shell_script_command(&script)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                shell_path(&bin),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("FAKE_MANIFEST", &manifest_path)
+        .env("FAKE_BUILD_RECORD", &build_record)
+        .output()
+        .unwrap();
+    (output, build_record.exists())
+}
+
+#[cfg(unix)]
+#[test]
+fn deploy_refuses_large_multiarch_manifest_before_building() {
+    let manifest = format!(
+        "{{\"manifests\":[],\n\"padding\":\"{}\"}}\n",
+        "x".repeat(1024 * 1024)
+    );
+    let (output, built) = run_deploy_with_manifest(Some(&manifest));
+    assert_eq!(
+        output.status.code(),
+        Some(65),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(!built, "a multiarch tag must never reach docker build/push");
+}
+
+#[cfg(unix)]
+#[test]
+fn deploy_allows_singlearch_and_unknown_private_tags() {
+    for manifest in [Some("{\"schemaVersion\":2,\"layers\":[]}\n"), None] {
+        let (output, built) = run_deploy_with_manifest(manifest);
+        assert_eq!(output.status.code(), Some(97));
+        assert!(built, "a private tag must reach the fixture build boundary");
+    }
 }
 
 // Unlike run_wrapper_on_fake_macos's docker fake (which only ever sees one
@@ -2442,6 +2574,15 @@ mod slow {
         assert!(
             !agent_dir.exists() || std::fs::read_dir(agent_dir).unwrap().next().is_none(),
             "no hook script may be written before archive verification"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_installer_rejects_a_verified_bundle_without_shared_helper() {
+        assert!(
+            installed_hook_names_with_helper("codex", "codex", &["session-start"], false)
+                .is_empty()
         );
     }
 

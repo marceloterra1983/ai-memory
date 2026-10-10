@@ -23,7 +23,7 @@ up, what else to include, what to exclude, and how to schedule it.
 ```
 data/
 ├── wiki/    # markdown source of truth (already a git repository)
-├── raw/    # immutable session-log ledger
+├── raw/    # optional managed-workstream visible-event segments
 ├── db/     # memory.sqlite (FTS5, entities, embeddings) — DERIVED
 ├── logs/   # daily rolling tracing
 └── models/ # local embedder weights (redownloadable)
@@ -34,8 +34,8 @@ Split by durability:
 | Directory | Back up? | Why |
 |---|---|---|
 | `wiki/` | **Yes, always.** | Markdown source of truth. Irreplaceable. Already a git repository. |
-| `raw/` | Yes if you want the full ledger; no if you want a small mirror. | Immutable observation log. Useful for rebuilding session history; not required to keep the wiki working. |
-| `db/` | **No.** | SQLite index derived from `wiki/`. Rebuildable via `ai-memory reindex`; see [`lifecycle-ops.md#reindex`](lifecycle-ops.md#reindex). Committing a WAL-mode SQLite database to git also wastes space on every write. |
+| `raw/` | Yes if you use managed workstreams and need their ledger. | Bounded visible-event segments for managed runs; ordinary hook observations live in SQLite. These files alone do not rebuild session rows. |
+| `db/` | **Yes, via `ai-memory backup`; exclude from the git mirror.** | Wiki page indexes are rebuildable via [`reindex`](lifecycle-ops.md#reindex), but sessions, observations, handoffs, users/tokens, audit rows, and other DB-only state are not. The online backup command snapshots SQLite consistently; copying a live WAL database into git does not. |
 | `logs/` | No. | Tracing output; nothing durable. |
 | `models/` | No. | Local embedder weights, sha256-pinned, redownloaded on first boot per [`local-embeddings.md`](local-embeddings.md). |
 | `.serve.lock` | No. | Server pidfile. |
@@ -52,15 +52,16 @@ running `reindex` after a restore), pair the git mirror with a periodic
 Read this before configuring a remote — decide what is acceptable to have
 off your machine, then pick the shape of backup that matches.
 
-The wiki captures **everything the coding agent sees during a session**
-that ai-memory's sanitizer classifies as observations to store: user
-prompts, tool inputs and outputs, page bodies written by consolidation.
-The sanitizer strips obvious credentials (see `SECURITY.md`), but it
-cannot prove that every prompt or tool response was safe to store. In
-practice this means: if any user has ever pasted an API key, a password,
-a private client name, a customer record, or a file path they consider
-sensitive into a captured session, it is on disk in the wiki tree, and
-whatever you push will carry it.
+Lifecycle hooks store sanitized, bounded observations in SQLite; consolidation
+compiles those observations into wiki pages. They are not complete transcripts,
+and excluded file-tool events are dropped before storage. Managed runs can
+add a separate bounded visible-event ledger under `raw/`.
+
+The sanitizer strips recognized credentials (see `SECURITY.md`), but it cannot
+prove every captured prompt or tool response is safe to store. Private names,
+customer records, sensitive paths, or an unrecognized credential may survive in
+stored observations and compiled pages. A mirror carries whatever remains in
+the files you include; review that content before sending it off-host.
 
 For any remote target — even a private repository on a service you
 control — assume an operator or administrator on the receiving side
@@ -141,9 +142,10 @@ Two caveats:
 
 ## Backing up the whole data dir (mirror + push)
 
-For a full-install backup — wiki, raw ledger, sanitized config — the
-supported pattern is a scheduled rsync into a mirror git repository, followed
-by a git push. This avoids running git operations against the live wiki
+For a file mirror — wiki, optional raw ledger, and selected config — the
+example uses a scheduled rsync into a mirror git repository, followed by a
+git push. Filename exclusions do not redact inline secrets: remove tokens or
+other credentials from any included `config.toml` before using this pattern. This avoids running git operations against the live wiki
 repository (which the server writes to) while still giving you a single
 remote with the full recoverable state.
 
@@ -171,9 +173,11 @@ cadence):
    changed; skip if there is no delta.
 4. `git push origin main` with a timeout so a hung network does not block the
    next run.
-5. `tar czf $TARBALL_DIR/ai-memory-$(date +%F).tar.gz` a copy of the same
-   tree, so the DB and models can be recovered without a `reindex` after a
-   catastrophic disk loss.
+5. Write a tarball of the selected data/config files under `TARBALL_DIR`.
+   The example excludes `db/`, `models/`, logs, and secrets from this archive
+   too. It preserves wiki files and optional raw segments, not DB-only state,
+   and uses a different layout from `ai-memory backup`. Pair it with a
+   separate `ai-memory backup --to <tarball>` for database recovery.
 6. Rotate old tarballs and old script logs on a retention window (30 days by
    default).
 
@@ -193,8 +197,10 @@ Recovering the full ai-memory install from it is two steps:
    [`lifecycle-ops.md#reindex`](lifecycle-ops.md#reindex) walks through this.
    Sessions, observations, handoffs, users/tokens, audit rows, and
    embeddings live only in the DB and are not rebuilt by `reindex` — for
-   those, restore from the paired tarball via `ai-memory restore --from
-   <tarball> --data-dir <path> --force`.
+   those, restore a separate archive produced by `ai-memory backup` via
+   `ai-memory restore --from <tarball> --data-dir <path> --force`. The example
+   snapshot script's tarball is for manual file recovery and is not accepted
+   by `ai-memory restore`.
 
 ## Security posture
 
@@ -202,13 +208,12 @@ Remote sync is your own channel, not ai-memory's — this is called out
 explicitly in [`SECURITY.md`](../SECURITY.md) ("Remote sync security" under
 out-of-scope for v1). What that means in practice:
 
-- **Private repository, always.** ai-memory captures prompts, tool calls, and
-  synthesized page bodies verbatim — the same content you would treat as
-  project source.
+- **Private repository, always.** Treat sanitized, bounded capture and
+  synthesized page bodies as potentially sensitive project content.
 - **Least-privilege push credential.** Prefer an SSH deploy key or a
   fine-grained personal-access token scoped to the mirror repository only.
   Rotate on the same cadence you rotate other long-lived push credentials.
-- **Explicit secret exclusion.** The example script rejects any file matching
+- **Explicit secret exclusion.** The example script excludes source files matching
   `SECRET_EXCLUDES` (`*.env`, `auth.json`, `.secrets`, `*.pem`, `*.key`, `*.crt` by default), and the
   suggested mirror-repo `.gitignore` matches the same set. Add anything else
   install-specific — private CA bundles, host-side certificates, cloud

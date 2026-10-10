@@ -91,10 +91,9 @@ provider vectors you already have, and switching back is a config
 change. `ai-memory embed --force` re-embeds a project under the
 current provider when you want one consistent set.
 
-Existing installs keep their configured provider; `local` is opt-in.
-Fresh-install defaults are decided by benchmark numbers, not vibes —
-see `docs/benchmarks/` for the zero-LLM vs local-embeddings
-LongMemEval rows, reproducible via:
+Existing installs keep an explicitly configured provider; an unset provider
+uses the best-effort local default described above. See `docs/benchmarks/`
+for the zero-LLM vs local-embeddings LongMemEval rows, reproducible via:
 
 ```bash
 cargo run --release -p ai-memory-eval -- retrieval --embeddings local

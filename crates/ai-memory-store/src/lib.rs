@@ -61,9 +61,9 @@ pub use maintenance::MaintenanceJob;
 pub use ops::{
     AdmittedSession, BootstrapChunkRecord, CompactSummary, Compaction, DateOnlyTtlPage,
     DeleteWorkspaceSummary, EmbedOutcome, EmbeddingWrite, EntityBackfillSummary,
-    HookSessionAdmission, IdentityResolution, IngestObservationOutcome, LifecycleOnlyEndOutcome,
-    LivePageHead, MAX_PENDING_INBOX_MESSAGES, MoveSessionSummary, MoveSummary,
-    ObservationPruneOutcome, OkfMigratedPage, PAGE_WINDOW_BACKFILL_BATCH,
+    HookProjectAuthorization, HookSessionAdmission, IdentityResolution, IngestObservationOutcome,
+    LifecycleOnlyEndOutcome, LivePageHead, MAX_PENDING_INBOX_MESSAGES, MoveSessionSummary,
+    MoveSummary, ObservationPruneOutcome, OkfMigratedPage, PAGE_WINDOW_BACKFILL_BATCH,
     PageWindowBackfillSummary, PagesMode, PurgeMode, PurgeSessionSummary, PurgeSummary,
     ReorgSummary, RepairSessionTimesSummary, RepairedSessionTimes, SessionTimesCandidate,
     SessionTimesSkipReason, SkippedSessionTimes, StaleAfterRepair, backfill_entity_index,

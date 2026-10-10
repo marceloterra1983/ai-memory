@@ -550,15 +550,16 @@ historical text. Never cached (`no-store`). Same payload as the MCP tool
 - `POST /api/v1/search`: at most **25 scopes** per request.
 - HTTP body cap: **10 MB** (shared with the MCP body limit; you won't
   hit this for normal API traffic).
-- **Cache-Control + ETag.** Identity-independent read endpoints use
-  `Cache-Control: private, max-age=N` with an endpoint-specific TTL; page reads
-  also carry a SHA-256 `ETag`, and a matching `If-None-Match` receives `304 Not
-  Modified`. Briefing, overview, handoff-list, session-list and session
-  observation responses depend on the authenticated actor and therefore use
-  `Cache-Control: private, no-store`, so
-  a browser cannot reuse Alice's prompt-derived response after credentials at
-  the same URL switch to Bob. Search responses are not cacheable because the
-  request body affects the result.
+- **Cache-Control + ETag.** Cacheable read endpoints use
+  `Cache-Control: private, no-cache, max-age=N` with an endpoint-specific TTL.
+  `no-cache` requires browser revalidation even within that TTL, so current
+  credentials and project grants are checked before a cached response is
+  reused. Page reads also carry a SHA-256 `ETag`; a matching `If-None-Match`
+  receives `304 Not Modified` only after the caller's scoped access is checked.
+  Both page `200` and `304` responses require revalidation. Briefing, overview,
+  handoff-list, session-list and session observation responses depend on the
+  authenticated actor and use `Cache-Control: private, no-store`. Search
+  responses are not cacheable because the request body affects the result.
 
 ## 6. Custom UI hosting and base paths
 
@@ -713,7 +714,7 @@ Read these:
 | Route registration + handler bodies | `crates/ai-memory-web/src/routes/api.rs` |
 | Response structs (`PageHit`, `WorkspaceSummary`, `BriefingSnapshot`, `HealthPage`, `SessionSummary`, `ObservationRecord`, …) | `crates/ai-memory-store/src/reader.rs` |
 | Session listing + per-session observation readers (`sessions_for_scope`, `session_summary_scoped`, `session_observations_scoped`) | `crates/ai-memory-store/src/reader.rs` |
-| 27 integration tests covering every endpoint (auth, 400s, 404s, multi-scope correctness, SPA fallback) | `crates/ai-memory-web/tests/routes.rs` |
+| Integration tests covering API and HTML routes (auth, 400s, 404s, multi-scope correctness, SPA fallback) | `crates/ai-memory-web/tests/suite/routes.rs` |
 | Auth + middleware layering | `crates/ai-memory-cli/src/commands/serve.rs` (`mount_web_router`, `apply_http_layers`) |
 | Custom-UI dir validation | `crates/ai-memory-cli/src/commands/serve.rs` (`validate_web_ui_args`) |
 
@@ -733,26 +734,17 @@ environment. The list is validated at startup:
 
 Invalid origins fail startup with a clear error rather than silently
 accepting wildcard. The layer allows `GET / POST / OPTIONS`,
-`Authorization` + `Content-Type` headers, and credentials, with a
-10-minute preflight cache.
+`Authorization`, `Content-Type`, and `X-CSRF-Token` headers, and credentials,
+with a 10-minute preflight cache.
 
 ## 10. Known gaps and deliberate non-goals
 
-- **No write surface, by design — not a pending iteration.** Browsers
-  can't mutate, and won't. The wiki is a record of what a project
-  produced, authored by automated summarisation over captured
-  observations; retrieval, provenance and the audit trail all rest on
-  nobody having gone back and adjusted it. Hand-editing a page stops it
-  answering "what did this project produce" and starts it answering
-  "what did someone want it to say", with no way to tell the two apart
-  afterwards.
-
-  This is not a ban on human input. `memory_write_page` exists for
-  durable human annotations and lands them in the same lineage as
-  everything else (pages supersede on body change). The line is between
-  adding to the record through the normal path and editing it from
-  outside. A human-editable wiki is a reasonable thing to want and a
-  separate product — see #482.
+- **No wiki-write surface in `/api/v1`.** These data routes are read-only.
+  Explicit durable annotations use `memory_write_page`, the CLI, or the
+  existing admin write path, which preserve attribution and supersession.
+  Markdown remains the source of truth: operators can edit the wiki on disk,
+  and the watcher reconciles those edits into the derived index. A browser
+  editor is outside this API's current contract; see #482 for that discussion.
 - **Rate limiting** is shared with `/mcp` + `/admin` (only the body
   cap is enforced today). A future global limiter would tighten the
   authenticated-misbehaviour case.

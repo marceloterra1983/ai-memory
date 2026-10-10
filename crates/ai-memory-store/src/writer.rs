@@ -214,6 +214,7 @@ pub(crate) enum WriteCmd {
         owner_filter: OwnerFilter,
         ingest_key: Option<String>,
         moved_from_cwd: Option<String>,
+        authorization: Option<ops::HookProjectAuthorization>,
         reply: oneshot::Sender<StoreResult<HookSessionAdmission>>,
     },
     EndAdmittedSession {
@@ -751,6 +752,7 @@ pub(crate) enum WriteCmd {
         run_id: ManagedRunId,
         agent: AgentKind,
         native_session_id: String,
+        viewer: Option<UserId>,
         reply: oneshot::Sender<StoreResult<bool>>,
     },
     AcceptManagedRunContext {
@@ -1294,6 +1296,28 @@ impl WriterHandle {
         ingest_key: Option<String>,
         moved_from_cwd: Option<String>,
     ) -> StoreResult<HookSessionAdmission> {
+        self.admit_hook_session_event_authorized(
+            session,
+            obs,
+            owner_filter,
+            ingest_key,
+            moved_from_cwd,
+            None,
+        )
+        .await
+    }
+
+    /// Admit a hook and authorize every written scope on the writer transaction.
+    /// `None` preserves root and single-user operation without project grants.
+    pub async fn admit_hook_session_event_authorized(
+        &self,
+        session: NewSession,
+        obs: Sanitized<NewObservation>,
+        owner_filter: OwnerFilter,
+        ingest_key: Option<String>,
+        moved_from_cwd: Option<String>,
+        authorization: Option<ops::HookProjectAuthorization>,
+    ) -> StoreResult<HookSessionAdmission> {
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::AdmitHookSessionEvent {
             session,
@@ -1301,6 +1325,7 @@ impl WriterHandle {
             owner_filter,
             ingest_key,
             moved_from_cwd,
+            authorization,
             reply: tx,
         })
         .await?;
@@ -3175,11 +3200,25 @@ impl WriterHandle {
         agent: AgentKind,
         native_session_id: impl Into<String>,
     ) -> StoreResult<bool> {
+        self.link_managed_run_session_authorized(run_id, agent, native_session_id, None)
+            .await
+    }
+
+    /// Link a native session only if the viewer may write the run's project.
+    /// The grant decision and mutation share one writer transaction.
+    pub async fn link_managed_run_session_authorized(
+        &self,
+        run_id: ManagedRunId,
+        agent: AgentKind,
+        native_session_id: impl Into<String>,
+        viewer: Option<UserId>,
+    ) -> StoreResult<bool> {
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::LinkManagedRunSession {
             run_id,
             agent,
             native_session_id: native_session_id.into(),
+            viewer,
             reply: tx,
         })
         .await?;
@@ -3578,16 +3617,28 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 owner_filter,
                 ingest_key,
                 moved_from_cwd,
+                authorization,
                 reply,
             } => {
-                let result = ops::admit_hook_session_event(
-                    &mut conn,
-                    &session,
-                    &obs,
-                    &owner_filter,
-                    ingest_key.as_deref(),
-                    moved_from_cwd.as_deref(),
-                );
+                let result = match authorization {
+                    Some(authorization) => ops::admit_hook_session_event_authorized(
+                        &mut conn,
+                        &session,
+                        &obs,
+                        &owner_filter,
+                        ingest_key.as_deref(),
+                        moved_from_cwd.as_deref(),
+                        &authorization,
+                    ),
+                    None => ops::admit_hook_session_event(
+                        &mut conn,
+                        &session,
+                        &obs,
+                        &owner_filter,
+                        ingest_key.as_deref(),
+                        moved_from_cwd.as_deref(),
+                    ),
+                };
                 send_or_warn(reply, result, "admit_hook_session_event");
             }
             WriteCmd::EndAdmittedSession {
@@ -4440,14 +4491,24 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 run_id,
                 agent,
                 native_session_id,
+                viewer,
                 reply,
             } => {
-                let result = crate::workstream::link_native_session(
-                    &mut conn,
-                    run_id,
-                    agent,
-                    &native_session_id,
-                );
+                let result = match viewer {
+                    Some(viewer) => crate::workstream::link_native_session_authorized(
+                        &mut conn,
+                        run_id,
+                        agent,
+                        &native_session_id,
+                        viewer,
+                    ),
+                    None => crate::workstream::link_native_session(
+                        &mut conn,
+                        run_id,
+                        agent,
+                        &native_session_id,
+                    ),
+                };
                 send_or_warn(reply, result, "link_managed_run_session");
             }
             WriteCmd::AcceptManagedRunContext { run_id, reply } => {

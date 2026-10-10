@@ -540,8 +540,20 @@ fn plan_external_conversation(
     }
     let bytes = fs::read(file).with_context(|| format!("read {}", file.display()))?;
     let source_sha256 = sha256_hex(&bytes);
-    let mut envelope: ConversationEnvelope =
-        serde_json::from_slice(&bytes).context("parse generic conversation JSON")?;
+    let mut envelope: ConversationEnvelope = serde_json::from_slice(&bytes).map_err(|error| {
+        // Schema diagnostics can quote source values before credential redaction.
+        anyhow!(
+            "parse generic conversation JSON: {} error at line {}, column {}",
+            match error.classify() {
+                serde_json::error::Category::Io => "io",
+                serde_json::error::Category::Syntax => "syntax",
+                serde_json::error::Category::Data => "schema",
+                serde_json::error::Category::Eof => "truncated input",
+            },
+            error.line(),
+            error.column()
+        )
+    })?;
 
     envelope.project = validate_label(&envelope.project, "project", 128)?.to_owned();
     envelope.source = validate_source_name(&envelope.source)?.to_owned();
@@ -1254,6 +1266,7 @@ impl ImportClient {
         Ok(Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             origin,
             base_path,
@@ -1368,6 +1381,9 @@ impl ImportClient {
             .send()
             .await?;
         let status = resp.status();
+        if status.is_redirection() {
+            bail!("hook batch refused redirect: HTTP {status}");
+        }
         let ack = resp
             .json()
             .await
@@ -1709,6 +1725,34 @@ mod tests {
         assert!(serialized.contains("REDACTED"));
     }
 
+    #[test]
+    fn malformed_conversation_errors_do_not_echo_source_values() {
+        let td = tempdir().unwrap();
+        let marker = "synthetic-private-conversation-value";
+        let malformed = [
+            serde_json::json!({
+                "project": "p", "source": "chatgpt", "session_id": "s",
+                "messages": [{"role": marker, "content": "fixture"}]
+            }),
+            serde_json::json!({
+                "project": "p", "source": "chatgpt", "session_id": "s",
+                "messages": marker
+            }),
+        ];
+        for input in malformed {
+            let file = write_conversation(td.path(), input);
+            let error = plan_external_conversation(&file, "w", DEFAULT_SERVER_URL).unwrap_err();
+            let diagnostic = format!("{error:#}");
+            assert!(diagnostic.contains("parse generic conversation JSON"));
+            assert!(
+                !diagnostic.contains(marker),
+                "schema errors must not quote private source values: {diagnostic}"
+            );
+        }
+        let file = write_conversation(td.path(), sample_conversation());
+        assert!(plan_external_conversation(&file, "w", DEFAULT_SERVER_URL).is_ok());
+    }
+
     #[tokio::test]
     async fn malformed_or_hostile_source_fails_before_manifest_or_http() {
         let td = tempdir().unwrap();
@@ -1744,6 +1788,72 @@ mod tests {
             !manifest.exists(),
             "invalid input must have zero side effects"
         );
+    }
+
+    #[tokio::test]
+    async fn hook_batch_refuses_redirects_without_forwarding_private_data() {
+        for status in ["307 Temporary Redirect", "308 Permanent Redirect"] {
+            let receiver = TcpListener::bind("127.0.0.1:0").unwrap();
+            let receiver_address = receiver.local_addr().unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            let (stop, stopped) = std::sync::mpsc::channel();
+            let receiver_thread = thread::spawn(move || {
+                loop {
+                    match receiver.accept() {
+                        Ok((mut stream, _)) => {
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(2)))
+                                .unwrap();
+                            let _ = read_http_request(&mut stream);
+                            respond_json(&mut stream, "200 OK", r#"{"accepted":5}"#);
+                            return true;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("synthetic receiver accept failed: {error}"),
+                    }
+                    if stopped.recv_timeout(Duration::from_millis(10)).is_ok() {
+                        return false;
+                    }
+                }
+            });
+            let selected = TcpListener::bind("127.0.0.1:0").unwrap();
+            let selected_address = selected.local_addr().unwrap();
+            let selected_thread = thread::spawn(move || {
+                let (mut stream, _) = selected.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let (headers, body) = read_http_request(&mut stream);
+                assert!(headers.starts_with("POST /hook/batch "));
+                assert!(
+                    body.windows(25)
+                        .any(|part| part == b"PRIVATE_SYNTHETIC_PAYLOAD")
+                );
+                // Neither the redirect location nor its body may enter diagnostics.
+                write!(stream, "HTTP/1.1 {status}\r\nLocation: http://{receiver_address}/unapproved\r\nContent-Length: 26\r\nConnection: close\r\n\r\nPRIVATE_SYNTHETIC_RESPONSE").unwrap();
+            });
+            let td = tempdir().unwrap();
+            let mut conversation = sample_conversation();
+            conversation["messages"][1]["content"] = "PRIVATE_SYNTHETIC_PAYLOAD".into();
+            let file = write_conversation(td.path(), conversation);
+            let server_url = format!("http://{selected_address}");
+            let plan = plan_external_conversation(&file, "default", &server_url).unwrap();
+            let result = ImportClient::new(&server_url)
+                .unwrap()
+                .post_hook_batch(&plan.events)
+                .await;
+            let _ = stop.send(());
+            let forwarded = receiver_thread.join().unwrap();
+            selected_thread.join().unwrap();
+            assert!(
+                !forwarded,
+                "private batch must stay at the selected destination"
+            );
+            let error = result.err().expect("redirect must be refused").to_string();
+            assert!(error.contains(&status[..3]));
+            assert!(!error.contains("PRIVATE_SYNTHETIC"));
+            assert!(!error.contains("unapproved"));
+        }
     }
 
     #[tokio::test]

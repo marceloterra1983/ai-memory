@@ -250,6 +250,43 @@ assert_eq "capture-only marker: marker_qs forwards the OUTER scope" \
     "&cwd=$(ai_memory_url_encode "$TMP/scope/inner")&workspace=acme&project=infra&project_src=marker" \
     "$(ai_memory_marker_qs "$TMP/scope/inner")"
 
+# PowerShell must make the same scope/briefing distinction: a capture-only
+# child is transparent, while an explicit child project stays a boundary.
+PSH=""
+if command -v pwsh >/dev/null 2>&1; then
+    PSH=$(command -v pwsh)
+elif command -v powershell >/dev/null 2>&1; then
+    PSH=$(command -v powershell)
+fi
+if [ -n "$PSH" ]; then
+    printf '[briefing]\ninject_on_session_start = true\nmax_chars = 1234\n' >>"$TMP/scope/.ai-memory.toml"
+    PS_LIB=$(host_path "$PWD/hooks/lib/ai-memory-hook.ps1")
+    PS_CWD=$(host_path "$TMP/scope/inner")
+    PS_NEAREST=$(AI_MEMORY_TEST_LIB="$PS_LIB" AI_MEMORY_TEST_CWD="$PS_CWD" \
+        "$PSH" -NoProfile -ExecutionPolicy Bypass -Command \
+        '. $env:AI_MEMORY_TEST_LIB; Get-AiMemoryMarkerToml -Cwd $env:AI_MEMORY_TEST_CWD')
+    # Native Windows PowerShell writes CRLF even under Git Bash.
+    PS_NEAREST=$(printf '%s' "$PS_NEAREST" | tr -d '\r')
+    assert_eq "powershell nearest marker keeps capture policy local" \
+        "$(host_path "$TMP/scope/inner/.ai-memory.toml")" "$PS_NEAREST"
+    PS_QUERY=$(AI_MEMORY_TEST_LIB="$PS_LIB" AI_MEMORY_TEST_CWD="$PS_CWD" \
+        "$PSH" -NoProfile -ExecutionPolicy Bypass -Command \
+        '. $env:AI_MEMORY_TEST_LIB; $q = Get-AiMemoryMarkerQuery -Cwd $env:AI_MEMORY_TEST_CWD; $q -replace "^&cwd=[^&]*", ""; Get-AiMemoryBriefingQuery -Cwd $env:AI_MEMORY_TEST_CWD')
+    PS_QUERY=$(printf '%s' "$PS_QUERY" | tr -d '\r')
+    assert_eq "powershell capture-only marker inherits outer scope and briefing" \
+        "&workspace=acme&project=infra&project_src=marker
+&briefing=true&briefing_budget=1234" "$PS_QUERY"
+    printf 'project = "child"\n' >"$TMP/scope/inner/.ai-memory.toml"
+    PS_QUERY=$(AI_MEMORY_TEST_LIB="$PS_LIB" AI_MEMORY_TEST_CWD="$PS_CWD" \
+        "$PSH" -NoProfile -ExecutionPolicy Bypass -Command \
+        '. $env:AI_MEMORY_TEST_LIB; $q = Get-AiMemoryMarkerQuery -Cwd $env:AI_MEMORY_TEST_CWD; $q -replace "^&cwd=[^&]*", ""; Get-AiMemoryBriefingQuery -Cwd $env:AI_MEMORY_TEST_CWD')
+    PS_QUERY=$(printf '%s' "$PS_QUERY" | tr -d '\r')
+    assert_eq "powershell explicit child scope refuses outer scope and briefing" \
+        "&project=child&project_src=marker" "$PS_QUERY"
+else
+    printf '  skip powershell nested capture marker probe (PowerShell unavailable)\n'
+fi
+
 # --- repository identity (#708) ----------------------------------------
 # An undeclared checkout sends its normalised remote, with the credentials in
 # the URL dropped on this side; a declared project outranks the remote and

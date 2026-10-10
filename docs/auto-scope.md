@@ -106,9 +106,11 @@ must not be used as ai-memory's actor session key.
 qualified identity and `session_id`. In `per_actor`, a request that has identity but
 no session id can use that user's latest no-session slot instead of the
 process-wide single slot. A request that does carry a session id must
-match a hook-published keyed entry; if it does not, ai-memory falls back
-to the server's baked default rather than another session's latest
-project.
+match a hook-published keyed entry once the pointer is live. A genuine
+mismatch reads the server's baked default rather than another session's
+latest project; an unscoped write is refused. Before the first foreground
+hook after startup, reads may use the bounded restart seed described below,
+while writes keep their configured default.
 
 The composite `(identity, session_id)` key namespaces only these active-project
 pointers. The durable `SessionId` stored for hook observations remains global:
@@ -241,12 +243,13 @@ that narrow:
   (`purge-project`, `move-project`, workspace removal) reach the seed too, so a
   scope that no longer exists cannot keep answering from it.
 
-Reads deliberately do **not** fail closed on an unresolved pointer. A keyed
-miss is also the normal shape of the pre-publish window (hooks are
-fire-and-forget, so a session's first read can arrive before its `SessionStart`
-write lands) and of TTL/cap eviction on a busy server. Erroring there would
-turn both into spurious failures; seeding a real fallback fixes the silent
-answer without touching them.
+Reads deliberately do **not** return an error solely for an unresolved
+pointer. Before any keyed publication in the process, an `Unset` pointer can
+use the startup seed. Once keyed activity has occurred, a missing coordinate
+is a `Mismatch` — including after TTL/cap eviction — and reads use the
+configured default, never the seed. Unscoped writes refuse that mismatch.
+The read-side scope provenance distinguishes these outcomes so a client can
+retry with explicit scope.
 
 ## Memory footprint
 
@@ -275,7 +278,9 @@ The single behavioural change is deliberate: a client that forwards a session
 id which does **not** match any published hook activity no longer inherits the
 shared slot. Answering it from there is what routed a request into whichever
 project published last — on a shared server, potentially another operator's.
-Such a caller now resolves to the server's configured default instead.
+Such a caller's reads resolve to the server's configured default instead;
+unscoped writes are refused. The pre-publication startup window remains
+`Unset` and may use the read-only seed described above.
 
 To restore the old behaviour exactly:
 

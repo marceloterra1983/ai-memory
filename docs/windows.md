@@ -167,11 +167,12 @@ the `hooks` key in Devin's main config file.
 For Kiro CLI, `install-mcp --client kiro-cli --apply` writes
 `%USERPROFILE%\.kiro\settings\mcp.json` unless `$env:KIRO_HOME` overrides the
 root. `install-hooks --agent kiro-cli --apply` updates existing v2 agent files
-under `.kiro\agents`; use `--config-file` for a project-local agent. Kiro v3
-hook capture remains unsupported pending sanitized live lifecycle and built-in
-tool payload fixtures for its documented standalone schema. Run these commands
-from the same native Windows environment that launches Kiro so generated
-executable paths remain valid.
+under `.kiro\agents`; use `--config-file` for a project-local agent. For
+v3's standalone schema, use `install-hooks --agent kiro-cli-v3 --apply` (or
+`--config-file .kiro\hooks\ai-memory.json` for project-local registration).
+Run these commands from the same native Windows environment that launches
+Kiro so generated executable paths remain valid. Native Windows behavior
+still needs real-installation validation; see the caveats below.
 
 ## Scenario C: Prebuilt Release Binary (No Toolchain)
 
@@ -200,7 +201,8 @@ if (($UserPath -split ';') -notcontains $Dest) {
 }
 
 # Wire MCP + lifecycle hooks against your server.
-& "$Dest\ai-memory.exe" install-mcp --client claude-code --apply
+& "$Dest\ai-memory.exe" install-mcp --client claude-code --apply `
+    --server-url "https://memory.example.com/mcp" --auth-token "<token>"
 & "$Dest\ai-memory.exe" install-hooks --agent claude-code --apply `
     --server-url "https://memory.example.com" --auth-token "<token>"
 ```
@@ -230,8 +232,10 @@ assets: it contains `ai-memory.exe`, the full `hooks/` bundle (`.ps1` +
 the `ai-memory.exe` path from the running binary, keep the extracted `.exe`
 at a stable location (re-run `install-hooks` if you move it).
 
-This leaves the server running only while a terminal is open. To keep it
-up across logoff and reboot, continue to [Scenario
+These commands configure the native client against an existing remote
+server; they do not start one. If you want this binary to run a local server,
+use `ai-memory init` and `ai-memory serve --transport http`, or install the
+persistent wrapper in [Scenario
 E](#scenario-e-keep-the-server-running-native-windows-service).
 
 ## Scenario D: Native Windows Source Build
@@ -647,7 +651,7 @@ from what the repository actually ships today.
   writable native install in place (#801, #802): it verifies the
   `ai-memory-windows-x86_64.zip` checksum, replaces `ai-memory.exe` by
   rename-aside, refreshes a sibling `hooks/` tree, and re-stages installed
-  hooks — see Scenario B. A non-writable prefix (for example under Program
+  hooks — see Scenario C. A non-writable prefix (for example under Program
   Files) still upgrades through the manual download/extract sequence.
 
 Promotion to Supported is the maintainer's decision once the in-progress items

@@ -27,10 +27,11 @@ Claude Code may use its supported Windows exec form; other agents use native
 single command strings according to their hook schema. PowerShell/Git Bash
 script bundles are compatibility fallbacks and do not enforce capture-policy
 v1. Grok and Zero capture lifecycle events, but both ignore
-SessionStart stdout, so ai-memory does not auto-inject handoffs for them.
-SessionStart handoff injection works only for clients that consume startup-hook
-stdout (or their equivalent context-injection result); Grok and Zero must call
-`memory_handoff_accept` when resuming.
+SessionStart stdout. Grok injects the handoff on its first `PostToolUse`;
+call `memory_handoff_accept` when resuming before that first tool if you need
+the context earlier. Zero requires an explicit `memory_handoff_accept` call.
+SessionStart injection works only for clients that consume startup-hook
+stdout or their equivalent context-injection result.
 
 Capture exclusions are separate from MCP registration. Native hook commands and
 generated OpenCode/OMP/Pi/OpenClaw integrations enforce `[capture]
@@ -692,9 +693,9 @@ resumed session.
 
 ## ZCode (z.ai)
 
-**Status:** MCP supported. Lifecycle hooks are not installed by this command;
-they are tracked in issue #512, so until then capture is not active and
-ai-memory only sees the sessions where an agent calls its MCP tools.
+**Status:** MCP and lifecycle hooks are supported. MCP registration and
+hook installation are separate commands; managed workstreams are not supported.
+The hook installer writes the root `hooks` block added for #512.
 
 **Config file:** ZCode keeps its user-scope config at
 `~/.zcode/cli/config.json`, with servers under the nested `mcp.servers` map
@@ -728,6 +729,16 @@ The entry schema is strict: an entry carrying any key outside
 generated registration carries exactly those keys. The default stateless
 `/mcp` endpoint needs no flavor marker; auth goes in the `headers` map.
 Servers from every scope auto-connect at session start.
+
+Install lifecycle capture into the same user config separately:
+
+```bash
+ai-memory install-hooks --agent zcode --apply \
+    --server-url "http://homelab:49374" --auth-token "$TOKEN"
+```
+
+This preserves sibling settings and third-party hooks. An existing
+`hooks.enabled = false` remains disabled; the installer warns about it.
 
 ## Swival CLI
 
@@ -913,44 +924,24 @@ which merges:
 }
 ```
 
-`install-mcp` appends the `?flavor=moonshot` query itself (idempotently, so
-re-runs don't duplicate it). The Moonshot API validates tool parameter
-schemas against a restricted dialect ("moonshot flavored json schema") that
-rejects root-level `anyOf`/`oneOf`/`allOf` combinators — including the
-`anyOf` on `memory_read_page` — and fails the whole session with a 400 at
-`tools/list`. The ai-memory server answers requests carrying this flavor
-with flat schemas; every other client keeps receiving the upstream schemas
-unchanged.
+`install-mcp` appends `?flavor=moonshot` idempotently. This retains
+compatibility with older ai-memory servers whose schemas carried root-level
+`anyOf`/`oneOf`/`allOf` combinators. Current servers advertise every tool
+without root combinators even on an unflavored URL (#577); the exactly-one
+contract of `memory_read_page` lives in descriptions and runtime validation.
 
-> **Do not register ai-memory with Kimi's own `mcp add`.** Kimi Code's
-> documented command —
->
-> ```bash
-> kimi mcp add --transport http ai-memory http://127.0.0.1:49374/mcp
-> ```
->
-> writes the plain URL, with no `?flavor=moonshot`. The server then serves
-> the upstream schemas, Moonshot rejects `memory_read_page`'s root-level
-> `anyOf`, and **every model turn fails with a 400** — including turns that
-> use no tools at all, because tool schemas ship with each request. Use
-> `ai-memory install-mcp --client kimi-code --apply` instead, which writes
-> the flavored URL for you.
->
-> The failure is unusually hard to attribute: `kimi mcp test ai-memory`
-> **passes**, because it only lists tools and never sends them upstream. The
-> server looks healthy while every real turn dies.
->
-> Already registered that way? Either re-run `install-mcp` as above, or set
-> the server-side floor and leave the client entry alone:
->
-> ```bash
-> AI_MEMORY_STRIP_ROOT_COMBINATORS=true   # or `strip_root_combinators = true`
-> ```
->
-> That serves the restricted dialect on every `tools/list` regardless of the
-> `?flavor=` marker, so any strict client that skips the marker is covered —
-> not just Kimi. A request's marker can only raise the dialect further, never
-> lower it. Reported in #474.
+Use `ai-memory install-mcp --client kimi-code --apply` for the maintained
+registration, including the compatibility marker. Kimi's own `mcp add`
+writes an unflavored URL; on current ai-memory builds that URL also receives
+root-combinator-free schemas.
+
+> **Older-server diagnosis (#474):** a plain URL could expose a root
+> `anyOf` that Moonshot rejected on every model turn. `kimi mcp test
+> ai-memory` could still pass because it listed tools without sending their
+> schemas upstream. Refresh the registration with `install-mcp`, upgrade
+> the server, or use `AI_MEMORY_STRIP_ROOT_COMBINATORS=true`
+> (`strip_root_combinators = true`) on an older server. The toggle remains
+> supported; a request's flavor marker can raise the dialect further.
 
 **Config file (hooks):** `~/.kimi-code/config.toml` (same `$KIMI_CODE_HOME`
 base). Kimi Code stores hooks as `[[hooks]]` array entries in the same TOML
@@ -977,9 +968,8 @@ stdout but prepends successful user-prompt hook output to the turn).
 **Gotchas:**
 - Do not add a `transport` field for HTTP servers: `url` alone means
   streamable HTTP; `transport: "sse"` selects the legacy SSE transport.
-- Do not strip the `?flavor=moonshot` query from the installed URL: without
-  it the Moonshot API rejects `memory_read_page`'s root `anyOf` and every
-  session fails at `tools/list`.
+- Keep the installed `?flavor=moonshot` query for compatibility with older
+  servers. Current ai-memory schemas are root-combinator-free without it.
 - Hook entries accept only `event`, `matcher`, `command`, and `timeout`
   (seconds, 1-600, default 30). Any extra field makes Kimi Code fail to load
   the entire `config.toml`, so prefer `install-hooks --apply` over hand
@@ -991,8 +981,9 @@ stdout but prepends successful user-prompt hook output to the turn).
 
 ## Command Code
 
-**Status:** MCP and the four stable shell-hook events are supported. Managed
-workstreams and experimental Mods are not installed.
+**Status:** MCP, the four stable lifecycle-hook events, and managed
+workstreams via `ai-memory run command-code` are supported. Experimental Mods
+are not installed.
 
 **Config files:** `~/.commandcode/mcp.json` for MCP and
 `~/.commandcode/settings.json` for lifecycle hooks.
@@ -1027,15 +1018,15 @@ spool events locally, enforce capture exclusions for the documented tool
 envelope, and inject pending handoffs with
 `hookSpecificOutput.additionalContext` at `SessionStart`.
 
-`Stop` is only a turn boundary. Run `ai-memory finalize-session --agent
-command-code` after the final turn (or add `--session-id <uuid>` when several
-sessions share the project). ai-memory does not generate a Mod: that API is
-experimental and unsandboxed. Command Code officially documents its
-project-scoped append-only JSONL location, native resume selectors, `--yolo`,
-and Windows aliases, but not the JSONL record schema. A managed adapter remains
-deferred until a real logged-in client acceptance test supplies sanitized
-structural fixtures and validates checkout ownership, incremental visible-event
-import, resume identity, normal-exit finalization, and native Windows execution.
+`Stop` is only a turn boundary. For a direct, unmanaged launch, run
+`ai-memory finalize-session --agent command-code` after the final turn (or add
+`--session-id <uuid>` when several sessions share the project). Managed
+`ai-memory run command-code` launches import the allowlisted visible JSONL
+records and finalize on normal exit; see
+[Managed workstreams](managed-workstreams.md). ai-memory does not generate a
+Mod: that API is experimental and unsandboxed. Native Windows integration
+still needs the real-installation validation described in
+[the Windows guide](windows.md#current-harness-caveats).
 
 Sources: <https://commandcode.ai/docs/mcp>,
 <https://commandcode.ai/docs/hooks>,
@@ -1045,10 +1036,9 @@ Sources: <https://commandcode.ai/docs/mcp>,
 
 ## Kiro CLI
 
-**Status:** MCP, v2 lifecycle hooks, and explicit v2 managed workstreams are
-supported. Bare automatic workstream selection remains unsupported pending a
-logged-in current-format v2 acceptance run. V3 hooks and managed sessions need
-their own documented, fixture-tested payload and store contracts.
+**Status:** MCP, v2 and v3 lifecycle hooks, and managed workstreams are
+supported. Bare `ai-memory run` considers checkout-local sessions from both
+engines; their incompatible stores remain separate.
 
 **Config file:** `$KIRO_HOME/settings/mcp.json`, defaulting to
 `~/.kiro/settings/mcp.json`. Use `--config-file .kiro/settings/mcp.json` when
@@ -1074,10 +1064,11 @@ servers, and merges this entry idempotently:
 ```
 
 Kiro sends MCP tool schemas through Amazon Bedrock, which rejects root-level
-`anyOf`, `oneOf`, and `allOf`. The installer appends `?flavor=bedrock`; the
-server strips only those root combinators for that request while preserving
-nested schemas and the handlers' runtime validation. Kimi Code's existing
-`?flavor=moonshot` behavior remains supported independently.
+`anyOf`, `oneOf`, and `allOf`. The installer retains `?flavor=bedrock` for
+compatibility with older servers. Current ai-memory tool schemas already omit
+root combinators by default (#577); nested schemas and the handlers' runtime
+validation remain intact. Kimi Code's `?flavor=moonshot` compatibility marker
+is supported independently.
 
 Kiro permits remote MCP URLs over HTTPS. Plain HTTP is accepted only for
 `localhost`, `127.0.0.1`, or another loopback address; `install-mcp` rejects a
@@ -1258,6 +1249,9 @@ than JSON Schema and reject the whole `tools/list` with a 400. ai-memory can
 serve a relaxed dialect per request, via a `?flavor=` query on the MCP URL, or
 server-wide via config for clients that cannot carry one. Runtime argument
 validation is identical in every dialect — only the advertised schema changes.
+Current tool schemas are root-combinator-free by default (#577); the Moonshot
+and Bedrock markers preserve older-server compatibility. Nullable argument
+types still require the Gemini/Vertex normalization below.
 
 | Marker | Config key | What it changes | Who needs it |
 | --- | --- | --- | --- |

@@ -74,10 +74,10 @@ Many projects use CLAUDE.md for Claude Code and
 AGENTS.md for Codex / OpenCode / OpenCode 2 / Cursor / Gemini CLI / Grok Build CLI / Kimi Code / Kiro CLI / Command Code,
 but if the project says one file is canonical, use that file.
 
-Claude Code loads `CLAUDE.md` and does not read `AGENTS.md`. In a project
-where `AGENTS.md` is canonical, give `CLAUDE.md` a bare `@AGENTS.md` import
-line. Without it a rule written to `AGENTS.md` is absent from context at
-session start and reaches Claude Code only if the agent opens the file.
+This repository uses only `AGENTS.md` for agent instructions, by the owner's
+policy. Do not create a root `CLAUDE.md` bridge here. Other repositories may
+choose a Claude import bridge; the product's generic installer supports their
+choice without imposing it on this checkout.
 
 If the rule is a standing *user/team* preference that should apply to
 every project (tech choices, code style, personal conventions), save it
@@ -111,8 +111,8 @@ start/end HTML-comment markers, without disturbing the rest of the file.
 
 This file is the single canonical instruction file for AI coding agents
 working in this repository (Claude Code, Codex, OpenCode, OpenCode 2, Cursor, Gemini
-CLI, Kimi Code, Command Code, and other AGENTS-aware harnesses). `CLAUDE.md` is only a
-short pointer here — do not duplicate rules into it.
+CLI, Kimi Code, Command Code, and other AGENTS-aware harnesses). Keep this
+repository's instructions here; do not create a root `CLAUDE.md`.
 
 ## Project overview
 
@@ -158,7 +158,7 @@ or prompt routing for learning review.
   workspace resolver 3. The authoritative workspace version is
   `workspace.package.version` in `Cargo.toml`.
 - **Async runtime:** `tokio` (full features).
-- **MCP/HTTP:** `rmcp` 1.7 (server SDK) + `axum` 0.8 for MCP HTTP, hooks,
+- **MCP/HTTP:** `rmcp` 2.2 (server SDK) + `axum` 0.8 for MCP HTTP, hooks,
   admin, `/api/v1`, and the built-in `/web` UI; `tower` / `tower-http`.
 - **Store:** `rusqlite` (bundled SQLite, backup API), `refinery`
   migrations, FTS5, `parking_lot`.
@@ -311,6 +311,7 @@ no tiers.
 
 - Shell-level checks: `tests/hooks/test_lib.sh`,
   `tests/e2e/handoff_smoke.sh`, `scripts/check-native-packaging.sh`.
+- Offline Jev adapter contract: `python3 -B -m unittest discover -s tests/examples -v`.
 - CI additionally runs `cargo build --release --bin ai-memory` on
   Linux/macOS, a Docker image smoke test, `cargo audit` (with the ignores
   listed in `ci.yml`), and differential gitleaks scanning.
@@ -364,9 +365,9 @@ prior-art bug (see `docs/ARCHITECTURE.md` and `docs/issues-*.md`):
 5. **Hooks are fire-and-forget and bounded.** Script hooks hard-timeout
    at ≤200 ms; the server returns 202 immediately or 429 when saturated.
    No unbounded `tokio::spawn` fan-out or queues on hook paths.
-6. **Privacy strip is a typed boundary.** `Sanitized<NewObservation>` has
-   no constructor other than `sanitize()`; the hook router's sanitizer is
-   the only path from untrusted text into the store.
+6. **Privacy strip is a typed boundary.** `Sanitized<NewObservation>` is
+   constructed only by `Sanitized::new`, which scrubs and bounds the title
+   and body with the configured sanitizer before the store accepts them.
 7. **JSON-schema structured outputs only** for LLM calls; no XML or
    wrapper libraries.
 8. **`{provider, model, dim}` denormalized next to every embedding**;
@@ -412,7 +413,7 @@ prior-art bug (see `docs/ARCHITECTURE.md` and `docs/issues-*.md`):
 
     Unit tests do not cover this: they exercise one session at a time, which
     is the exact shape that cannot see a collaboration or concurrency defect.
-    `crates/ai-memory-store/tests/multi_session.rs` and the pointer tests in
+    `crates/ai-memory-store/tests/suite/multi_session.rs` and the pointer tests in
     `ai-memory-core::active_project` are the guards. Any change to scope
     resolution, page supersession, session identity, handoff acceptance, the
     writer actor, or owner filters must be argued against this invariant
@@ -476,7 +477,7 @@ Additional boundary rules:
   root, DB-user, and anonymous cases — now recorded against the inventory.
 - New disk+SQL mutations need recovery/rollback tests.
 - The recall-eval framework lives at
-  `crates/ai-memory-consolidate/tests/recall_eval.rs`.
+  `crates/ai-memory-consolidate/tests/suite/recall_eval.rs`.
 - Tests run with `cargo t` locally and `cargo test --workspace --all-targets`
   in CI (plus `cargo test --workspace --doc`, which `--all-targets` excludes,
   for doc-comment code blocks).
@@ -581,7 +582,7 @@ Additional boundary rules:
   tag from the branch, then let the branch go dormant — no standing
   develop/gitflow branches. Bucket incoming work at triage with the
   `breaking-change` label and version milestones.
-- Keep `CLAUDE.md` as a pointer to this file.
+- Keep repository agent instructions exclusively in `AGENTS.md`.
 
 ## Documentation map
 

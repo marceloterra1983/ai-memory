@@ -294,8 +294,8 @@ prunable rather than only after it ages in place.
   Legacy raw fallback recall searches the durable `observations` table via
   FTS5; lifecycle HookEnvelope JSON is not a complete transcript archive.
 * `<data_dir>/logs/` - rolling daily `tracing` output.
-* `<data_dir>/models/` - reserved for bundled embedding models
-  (M9.5+, when local `ort` lands).
+* `<data_dir>/models/` - checksum-pinned local `all-MiniLM-L6-v2` model
+  cache for in-process Candle embeddings; model files can be staged offline.
 * `<data_dir>/client-projects.json` - private, client-local checkout links for
   `ai-memory show`, keyed by credential-free server identity plus workspace and
   project. It is not part of the SQLite/wiki source of truth, and no server API
@@ -330,10 +330,13 @@ prunable rather than only after it ages in place.
 
 | Tier | Lifetime | Decay |
 |---|---|---|
-| Working | Current session only | Hard-drop on session end (kept in `observations` for forensics) |
-| Episodic | 30d hot → 180d cold → evict (or tier-down, opt-in A2) | `salience · exp(−λΔt) + σ · log(1+access_count) · exp(−μ · days_since_access) · (1 + breadth_weight · ln(1 + max(distinct_actors−1, 0)))` |
-| Semantic | Indefinite | None - only supersedeable via M7 LLM rewrite |
-| Procedural | Indefinite | Frequency-decay if not re-observed |
+| Working | Persists until explicit deletion or TTL expiry | None |
+| Episodic | Retention-driven eviction with a recoverable tombstone (or opt-in A2 tier-down) | `salience · exp(−λΔt) + σ · log(1+access_count) · exp(−μ · days_since_access) · (1 + breadth_weight · ln(1 + max(distinct_actors−1, 0)))` |
+| Semantic | Indefinite | None |
+| Procedural | Indefinite | None |
+
+Only episodic pages participate in retention eviction. Explicit deletion and
+frontmatter TTL expiry apply to every tier; a TTL also outranks pinning.
 
 `λ` is the scalar `[decay] lambda` by default, but can be set per tier via
 `[decay.half_life_days]` (a half-life in days per tier, converted to
@@ -448,6 +451,7 @@ crates/
 ├── ai-memory-hooks/       payload schemas, sanitiser, /hook ingress.
 ├── ai-memory-llm/         provider auth boundary + LlmProvider / Embedder traits.
 ├── ai-memory-consolidate/ Karpathy ingest / lint / sweep / auto-improve pipeline.
+├── ai-memory-web/         /web read surfaces and /api/v1 JSON routes.
 ├── ai-memory-workstream/  read-only native transcript + launch adapters.
 └── ai-memory-cli/         `ai-memory` binary entry point + thin HTTP subcommands.
 ```
@@ -694,10 +698,10 @@ run_autowire = true                # `ai-memory run <harness>` auto-installs tha
                                    # hooks + MCP on first launch if missing (idempotent,
                                    # one-time per harness+version+install location).
                                    # Also `--no-autowire`.
-claude_true_yolo = false           # opt-in: on a Claude `ai-memory run --yolo`, also
-                                   # silence the residual `--dangerously-skip-permissions`
-                                   # prompts (rm timeout/confirmation, PowerShell rm deny)
-                                   # and force `bypassPermissions` via `--settings`.
+claude_true_yolo = false           # opt-in: on a Claude `ai-memory run --yolo`, force
+                                   # `bypassPermissions` via `--settings` over defaultMode.
+                                   # Explicit ask/deny rules and Claude's command-safety
+                                   # checks still apply; no extra rm env knobs are set.
                                    # Claude-only, no-op for every other harness. Also
                                    # `--true-yolo`. See
                                    # docs/design-yolo-safety-ai-jail.md.
@@ -748,14 +752,14 @@ dedup_cold_clusters = false        # A3 opt-in: cluster near-duplicate cold
 # dedup_max_eps = 0.15             # conservative eps ceiling (cosine distance;
                                    # 0 ⇒ default). Lower = merges less.
 
-[decay.half_life_days]             # opt-in per-tier retention curves (all keys
+[decay.half_life_days]             # opt-in per-tier score curves (all keys
                                    # optional). Half-life in DAYS; converted to
                                    # λ = ln(2)/days. An omitted key falls back to
                                    # the scalar `lambda` above, so the default
                                    # (no keys) is byte-identical to today — no
                                    # score change or mass-eviction on upgrade.
-# working = 7                      # e.g. keep scratch short…
-# episodic = 365                   # …and session history long
+# working = 7                      # score only; no decay eviction for working
+# episodic = 365                   # slower decay-based episodic retention
 # semantic = 180
 # procedural = 90
 
@@ -1079,16 +1083,10 @@ embeddings spec, and is not covered by a live test against Copilot here.
 
 ## Future work
 
-* **M9.5 - local embeddings via `ort`.** Bundle `bge-small-en-v1.5`
-  for an API-key-free homelab path. ~200 MB image bloat; trait is
-  ready, just needs the `OrtBgeSmallEmbedder` impl + tokenizer wiring.
 * **`sqlite-vec` integration.** Brute-force cosine works fine to a few
   thousand pages; past that, the `sqlite-vec` extension is the next
   step. See [`docs/vector-backend-policy.md`](vector-backend-policy.md)
   for the criteria that should justify adding it.
-* **Scheduled consolidation queue.** Forget sweep, lint, and auto-improvement
-  already run on server-side schedules; a future queue can compile session
-  summaries outside hook latency.
 * **Richer curator actions.** The shipped curator stages only one report page;
   future work can add individual merge/supersession/link-fix proposals while
   keeping deletes and semantic rewrites review-gated.
@@ -1096,14 +1094,14 @@ embeddings spec, and is not covered by a live test against Copilot here.
   wiki browser shipped in `ai-memory-web` (`/web` — project list, page
   tree, page view, search, and the root-only `/web/pending` triage page,
   whose approve and reject buttons post to the existing
-  `/admin/pending-writes/*` routes). It stays read-only by design: the wiki is a
-  machine-authored record, and a browser edit surface would break the
-  invariant the whole store rests on (#482). Better *reading* — richer
-  navigation, diff/history views, graph exploration — is open. See
+  `/admin/pending-writes/*` routes). Browser page editing is not shipped;
+  manual Markdown edits remain supported through the watcher. Richer
+  navigation, diff/history views and graph exploration remain open (#482). See
   [`docs/frontend-api.md`](frontend-api.md#10-known-gaps-and-deliberate-non-goals).
-* **Real LongMemEval-S harness.** The recall-eval framework exists
-  ([`crates/ai-memory-consolidate/tests/recall_eval.rs`](../crates/ai-memory-consolidate/tests/recall_eval.rs));
-  porting LongMemEval-S itself requires the dataset.
+* **Broader recall evaluation.** The synthetic recall-eval framework lives in
+  [`crates/ai-memory-consolidate/tests/suite/recall_eval.rs`](../crates/ai-memory-consolidate/tests/suite/recall_eval.rs).
+  The real LongMemEval-S harness has shipped in [`evals/`](../evals/README.md),
+  with [published runs](benchmarks/README.md); additional runs require the dataset.
 
 ## Reading order
 
@@ -1121,5 +1119,5 @@ embeddings spec, and is not covered by a live test against Copilot here.
   Hermes Agent-inspired learning-loop research and safety boundaries.
 * [`docs/issues-*.md`](.) - concrete failure modes we've designed to
   avoid.
-* [`CLAUDE.md`](../CLAUDE.md) - per-session operating rules pinned
-  into Claude Code conversations.
+* [`AGENTS.md`](../AGENTS.md) - canonical contributor and agent instructions;
+  Claude Code imports this file through its `CLAUDE.md` pointer.

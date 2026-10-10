@@ -35,8 +35,10 @@ ai-memory install-hooks --agent  claude-code --apply \
     --server-url "http://<server-ip>:49374" --auth-token "$TOKEN"
 ```
 
-When users must not see each other's projects at all, run separate servers.
-One machine can still capture for several of them: register each server as
+Use [restricted projects and read/write grants](users.md#per-project-access)
+when users on one shared server should reach different projects. Root retains
+access to every project; use separate servers for independent trust domains.
+One machine can still capture for several servers: register each server as
 a named profile with `ai-memory server add` and let each repository's
 `.ai-memory.toml` select one with `server = "<name>"`. The marker never holds
 a URL or token, a profile can be restricted to the directories it serves, and

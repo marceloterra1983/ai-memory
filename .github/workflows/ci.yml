@@ -78,6 +78,8 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: false
+      - name: Offline Jev reranker adapter contract
+        run: python3 -B -m unittest discover -s tests/examples -v
       - name: Build the external lifecycle relay
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target

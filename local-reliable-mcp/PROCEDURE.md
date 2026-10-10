@@ -5,7 +5,9 @@ install` não executa estes passos. Não copia token, não muda a unit base
 e não liga autenticação nova nem desliga a que já existe.
 
 Os clientes permanecem em `http://127.0.0.1:49374/mcp`. Só o bind do
-backend muda, por drop-in, para `127.0.0.1:49376`.
+backend muda, por drop-in, para `127.0.0.1:49377` nesta máquina.
+`127.0.0.1:49376` pertence a `farol-firecrawl-mcp.service` e deve permanecer
+com esse serviço.
 
 ## Stage
 
@@ -30,8 +32,18 @@ O stage contém:
   `manifest.json` `service.readiness_scope` (`workspace` e `project`).
   Override só quando `AI_MEMORY_READY_WORKSPACE` e
   `AI_MEMORY_READY_PROJECT` vêm os dois, não vazios. Um só é erro.
-  Sem manifest e sem o par completo, o instalador para com erro claro.
+  O backend vem de `AI_MEMORY_BACKEND_URL` ou, sem override, de
+  `service.backend_bind`, convertido em origin HTTP e validado por `ready`.
+  O fallback `127.0.0.1:49376` vale só para manifest legado sem esse campo;
+  campo inválido é erro. Sem manifest, são necessários o override de
+  backend e o par completo de escopo.
   Não infere o último projeto. `--check` continua só leitura.
+
+O gerador de stage ainda usa `:49376`. Antes de instalar nesta máquina,
+ajuste o bind do drop-in para `127.0.0.1:49377` e os argumentos `--backend`
+das duas units para `http://127.0.0.1:49377`. Registre também
+`service.backend_bind: "127.0.0.1:49377"` no manifest, mantendo
+`service.readiness_scope`. Essa revisão cabe ao root.
 
 Sem `--stage`, o comando só imprime o plano e diz «não instala».
 
@@ -53,13 +65,13 @@ Sem `--stage`, o comando só imprime o plano e diz «não instala».
 6. `systemctl --user daemon-reload`.
 7. Instalar e arrancar `ai-memory-ingress.service` e
    `ai-memory-delivery.service` (usuário). O ingress escuta `:49374`. O
-   backend, ao voltar, escuta `:49376` pelo drop-in.
+   backend, ao voltar, escuta `:49377` pelo drop-in revisado.
 8. `systemctl --user start ai-memory.service`.
 9. Prontidão contra o backend, não contra o ingress:
 
 ```text
 ~/.agents/tools/ai-memory/reliable-mcp/reliable-mcp ready \
-  --backend http://127.0.0.1:49376 --workspace WORKSPACE --project PROJECT
+  --backend http://127.0.0.1:49377 --workspace WORKSPACE --project PROJECT
 ```
 
 O par é o `service.readiness_scope` do manifest (nesta máquina o operador

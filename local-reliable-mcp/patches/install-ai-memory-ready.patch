@@ -1,9 +1,26 @@
 --- a/install-ai-memory.sh
 +++ b/install-ai-memory.sh
-@@ -155,5 +155,38 @@
+@@ -155,5 +155,55 @@
  ready=0
 +RELIABLE_MCP="${RELIABLE_MCP:-$HOME/.agents/tools/ai-memory/reliable-mcp/reliable-mcp}"
-+BACKEND_ORIGIN="${AI_MEMORY_BACKEND_URL:-http://127.0.0.1:49376}"
++BACKEND_ORIGIN="${AI_MEMORY_BACKEND_URL:-}"
++if [[ -z "$BACKEND_ORIGIN" ]]; then
++  BACKEND_ORIGIN="$(python3 - "$MANIFEST" <<'PY_BACKEND'
++import json, sys
++try:
++    data = json.load(open(sys.argv[1], encoding="utf-8"))
++except Exception as exc:
++    sys.exit("manifest ilegível: %s" % exc)
++service = data.get("service") if isinstance(data, dict) else None
++if not isinstance(service, dict):
++    sys.exit("service ausente no manifest")
++bind = service.get("backend_bind", "127.0.0.1:49376")
++if not isinstance(bind, str) or not bind.strip():
++    sys.exit("service.backend_bind precisa de um bind não vazio")
++print("http://" + bind)
++PY_BACKEND
++)" || die "backend sem configuração válida: confira service.backend_bind no manifest ou AI_MEMORY_BACKEND_URL"
++fi
 +if [[ -n "${AI_MEMORY_READY_WORKSPACE+x}" || -n "${AI_MEMORY_READY_PROJECT+x}" ]]; then
 +  READY_WS="${AI_MEMORY_READY_WORKSPACE-}"
 +  READY_PR="${AI_MEMORY_READY_PROJECT-}"
@@ -41,7 +58,7 @@
 +    break
 +  fi
    sleep 0.4
-@@ -161,2 +194,8 @@
+@@ -161,2 +211,8 @@
  [[ "$ready" -eq 1 ]] || { systemctl --user status --no-pager ai-memory.service || true; die "servidor não respondeu"; }
 +for unit in ai-memory-ingress.service ai-memory-delivery.service; do
 +  systemctl --user is-active --quiet "$unit" || { systemctl --user status --no-pager "$unit" || true; die "unit inativa: $unit"; }

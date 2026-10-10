@@ -481,12 +481,12 @@ class InstallerReadiness(unittest.TestCase):
             copied = root / "install-ai-memory.sh"
             copied.write_bytes(fixture.read_bytes())
             dry_run = subprocess.run(
-                ["patch", "--dry-run", "-p1"], cwd=root, input=patch,
+                ["patch", "--fuzz=0", "--dry-run", "-p1"], cwd=root, input=patch,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(dry_run.returncode, 0, dry_run.stdout + dry_run.stderr)
             applied = subprocess.run(
-                ["patch", "-p1"], cwd=root, input=patch,
+                ["patch", "--fuzz=0", "-p1"], cwd=root, input=patch,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
@@ -503,10 +503,6 @@ class InstallerReadiness(unittest.TestCase):
                 + patched[start:end]
             )
             manifest = root / "manifest.json"
-            manifest.write_text(
-                json.dumps({"service": {"readiness_scope": {"workspace": "default", "project": "dev"}}}),
-                encoding="utf-8",
-            )
             stubs = root / "bin"
             stubs.mkdir()
             systemctl = stubs / "systemctl"
@@ -521,57 +517,107 @@ class InstallerReadiness(unittest.TestCase):
             )
             reliable = stubs / "reliable-mcp"
             reliable.write_text(
-                '#!/bin/bash\nset -euo pipefail\nprintf "reliable-mcp %s\\n" "$*" >> "$CALLS"\n'
-                '[[ $# -eq 7 && "$1" == ready && "$2" == --backend && '
-                '"$4" == --workspace && "$5" == default && "$6" == --project && "$7" == dev ]] || exit 2\n'
-                'case "$3" in\n'
-                '  http://127.0.0.1:49376) exit 0 ;;\n'
-                '  http://127.0.0.1:49374) exit "$ENTRY_EXIT" ;;\n'
-                '  *) exit 2 ;;\nesac\n',
+                '#!/usr/bin/env python3\nimport os, sys\n'
+                'from reliable_mcp.safe import parse_origin\n'
+                'args = sys.argv[1:]\n'
+                'with open(os.environ["CALLS"], "a") as log:\n'
+                '    log.write("reliable-mcp " + " ".join(args) + "\\n")\n'
+                'if (len(args) != 7 or args[:2] != ["ready", "--backend"] or\n'
+                '    args[3:] != ["--workspace", os.environ["EXPECTED_WS"], "--project", os.environ["EXPECTED_PR"]]):\n'
+                '    sys.exit(2)\n'
+                'try:\n'
+                '    parse_origin(args[2])\n'
+                'except ValueError as exc:\n'
+                '    sys.exit(str(exc))\n'
+                'if args[2] == os.environ["EXPECTED_BACKEND"]:\n'
+                '    print("ready")\n'
+                '    sys.exit(0)\n'
+                'if args[2] == "http://127.0.0.1:49374":\n'
+                '    if os.environ["ENTRY_EXIT"] == "0":\n'
+                '        print("ready")\n'
+                '    sys.exit(int(os.environ["ENTRY_EXIT"]))\n'
+                'sys.exit(2)\n',
                 encoding="utf-8",
             )
+            sleep = stubs / "sleep"
+            sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            sleep.chmod(0o700)
             systemctl.chmod(0o700)
             reliable.chmod(0o700)
             calls = root / "calls.log"
-            for inactive, entry_exit, error in (
-                ("ai-memory-ingress.service", "0", "ai-memory-ingress.service"),
-                ("ai-memory-delivery.service", "0", "ai-memory-delivery.service"),
-                ("", "1", "entrada"),
-                ("", "0", None),
-            ):
-                with self.subTest(inactive=inactive, entry_exit=entry_exit):
+            cases = (
+                {"name": "inactive ingress", "inactive": "ai-memory-ingress.service", "error": "ai-memory-ingress.service"},
+                {"name": "inactive delivery", "inactive": "ai-memory-delivery.service", "error": "ai-memory-delivery.service"},
+                {"name": "entry not ready", "entry_exit": "1", "error": "entrada"},
+                {"name": "manifest 49377"},
+                {"name": "legacy manifest", "legacy": True, "backend": "http://127.0.0.1:49376"},
+                {"name": "backend override", "overrides": {"AI_MEMORY_BACKEND_URL": "http://127.0.0.1:49378"},
+                 "backend": "http://127.0.0.1:49378"},
+                {"name": "complete override without manifest", "missing_manifest": True,
+                 "overrides": {"AI_MEMORY_BACKEND_URL": "http://127.0.0.1:49378",
+                               "AI_MEMORY_READY_WORKSPACE": "override-ws", "AI_MEMORY_READY_PROJECT": "override-pr"},
+                 "backend": "http://127.0.0.1:49378", "workspace": "override-ws", "project": "override-pr"},
+                {"name": "malformed bind", "bind": "127.0.0.1:not-a-port", "invalid": True, "error": "servidor não respondeu"},
+                {"name": "non-loopback bind", "bind": "192.0.2.1:49377", "invalid": True, "error": "servidor não respondeu"},
+                {"name": "null bind", "bind": None, "before_probe": True, "error": "backend_bind"},
+                {"name": "numeric bind", "bind": 49377, "before_probe": True, "error": "backend_bind"},
+                {"name": "empty bind", "bind": "", "before_probe": True, "error": "backend_bind"},
+            )
+            for case in cases:
+                with self.subTest(case=case["name"]):
+                    service = {"readiness_scope": {"workspace": "default", "project": "dev"}}
+                    if not case.get("legacy"):
+                        service["backend_bind"] = case.get("bind", "127.0.0.1:49377")
+                    manifest.write_text(json.dumps({"service": service}), encoding="utf-8")
+                    if case.get("missing_manifest"):
+                        manifest.unlink()
                     calls.write_text("", encoding="utf-8")
+                    backend = case.get("backend", "http://127.0.0.1:49377")
+                    workspace = case.get("workspace", "default")
+                    project = case.get("project", "dev")
                     env = {
                         "PATH": str(stubs) + os.pathsep + os.defpath,
                         "HOME": str(root),
+                        "PYTHONPATH": str(ROOT),
+                        "PYTHONDONTWRITEBYTECODE": "1",
                         "MANIFEST": str(manifest),
                         "RELIABLE_MCP": str(reliable),
-                        "AI_MEMORY_BACKEND_URL": "http://127.0.0.1:49376",
                         "SERVER_ORIGIN": "http://127.0.0.1:49374",
                         "CALLS": str(calls),
-                        "INACTIVE_UNIT": inactive,
-                        "ENTRY_EXIT": entry_exit,
+                        "EXPECTED_BACKEND": backend,
+                        "EXPECTED_WS": workspace,
+                        "EXPECTED_PR": project,
+                        "INACTIVE_UNIT": case.get("inactive", ""),
+                        "ENTRY_EXIT": case.get("entry_exit", "0"),
                     }
+                    env.update(case.get("overrides", {}))
                     result = subprocess.run(
                         ["bash", "-c", runner], cwd=root, env=env, timeout=5,
                         text=True, capture_output=True, check=False,
                     )
                     invoked = calls.read_text(encoding="utf-8").splitlines()
-                    self.assertEqual(
-                        invoked[0],
-                        "reliable-mcp ready --backend http://127.0.0.1:49376 --workspace default --project dev",
-                    )
+                    error = case.get("error")
+                    if case.get("before_probe"):
+                        self.assertEqual(invoked, [])
+                    else:
+                        chosen = "http://" + case["bind"] if case.get("invalid") else backend
+                        self.assertEqual(
+                            invoked[0],
+                            f"reliable-mcp ready --backend {chosen} --workspace {workspace} --project {project}",
+                        )
                     if error is not None:
                         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                         self.assertNotIn("servidor em", result.stdout + result.stderr)
                         self.assertIn(error, result.stderr)
+                        if case.get("invalid") or case.get("before_probe"):
+                            self.assertNotIn("ready", result.stdout)
                     else:
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                         self.assertIn("servidor em http://127.0.0.1:49374", result.stdout)
                         self.assertEqual(invoked[1:], [
                             "systemctl --user is-active --quiet ai-memory-ingress.service",
                             "systemctl --user is-active --quiet ai-memory-delivery.service",
-                            "reliable-mcp ready --backend http://127.0.0.1:49374 --workspace default --project dev",
+                            f"reliable-mcp ready --backend http://127.0.0.1:49374 --workspace {workspace} --project {project}",
                         ])
 
     def test_patch_reads_manifest_scope_and_check_stays_readonly(self):
@@ -587,7 +633,7 @@ class InstallerReadiness(unittest.TestCase):
             shutil.copy(installer, copied)
             copied.chmod(0o700)
             patch = (ROOT / "patches" / "install-ai-memory-ready.patch").read_text(encoding="utf-8")
-            applied = subprocess.run(["patch", "-p1"], cwd=root, input=patch, text=True, capture_output=True, check=False)
+            applied = subprocess.run(["patch", "--fuzz=0", "-p1"], cwd=root, input=patch, text=True, capture_output=True, check=False)
             self.assertEqual(applied.returncode, 0, applied.stderr)
             text = copied.read_text(encoding="utf-8")
             self.assertIn("readiness_scope", text)

@@ -473,6 +473,107 @@ class HostOriginAndCredential(unittest.TestCase):
 
 
 class InstallerReadiness(unittest.TestCase):
+    def test_patched_readiness_requires_active_ingress_worker_and_entry_mcp(self):
+        fixture = ROOT / "tests" / "fixtures" / "install-ai-memory-before-ready.sh"
+        patch = (ROOT / "patches" / "install-ai-memory-ready.patch").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copied = root / "install-ai-memory.sh"
+            copied.write_bytes(fixture.read_bytes())
+            dry_run = subprocess.run(
+                ["patch", "--dry-run", "-p1"], cwd=root, input=patch,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stdout + dry_run.stderr)
+            applied = subprocess.run(
+                ["patch", "-p1"], cwd=root, input=patch,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+            syntax = subprocess.run(["bash", "-n", str(copied)], text=True, capture_output=True, check=False)
+            self.assertEqual(syntax.returncode, 0, syntax.stderr)
+            patched = copied.read_text(encoding="utf-8")
+            start = patched.index("\nready=0\n") + 1
+            last = '\nok "servidor em $SERVER_ORIGIN"\n'
+            end = patched.index(last, start) + len(last)
+            runner = (
+                "set -euo pipefail\n"
+                "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
+                "ok() { printf '%s\\n' \"$*\"; }\n"
+                + patched[start:end]
+            )
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps({"service": {"readiness_scope": {"workspace": "default", "project": "dev"}}}),
+                encoding="utf-8",
+            )
+            stubs = root / "bin"
+            stubs.mkdir()
+            systemctl = stubs / "systemctl"
+            systemctl.write_text(
+                '#!/bin/bash\nset -euo pipefail\nprintf "systemctl %s\\n" "$*" >> "$CALLS"\n'
+                '[[ "$1" == --user && $# -eq 4 ]] || exit 2\n'
+                'if [[ "$2" == is-active && "$3" == --quiet ]]; then\n'
+                '  [[ "$4" != "$INACTIVE_UNIT" ]]\n'
+                'elif [[ "$2" == status && "$3" == --no-pager ]]; then\n'
+                '  exit 0\nelse\n  exit 2\nfi\n',
+                encoding="utf-8",
+            )
+            reliable = stubs / "reliable-mcp"
+            reliable.write_text(
+                '#!/bin/bash\nset -euo pipefail\nprintf "reliable-mcp %s\\n" "$*" >> "$CALLS"\n'
+                '[[ $# -eq 7 && "$1" == ready && "$2" == --backend && '
+                '"$4" == --workspace && "$5" == default && "$6" == --project && "$7" == dev ]] || exit 2\n'
+                'case "$3" in\n'
+                '  http://127.0.0.1:49376) exit 0 ;;\n'
+                '  http://127.0.0.1:49374) exit "$ENTRY_EXIT" ;;\n'
+                '  *) exit 2 ;;\nesac\n',
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o700)
+            reliable.chmod(0o700)
+            calls = root / "calls.log"
+            for inactive, entry_exit, error in (
+                ("ai-memory-ingress.service", "0", "ai-memory-ingress.service"),
+                ("ai-memory-delivery.service", "0", "ai-memory-delivery.service"),
+                ("", "1", "entrada"),
+                ("", "0", None),
+            ):
+                with self.subTest(inactive=inactive, entry_exit=entry_exit):
+                    calls.write_text("", encoding="utf-8")
+                    env = {
+                        "PATH": str(stubs) + os.pathsep + os.defpath,
+                        "HOME": str(root),
+                        "MANIFEST": str(manifest),
+                        "RELIABLE_MCP": str(reliable),
+                        "AI_MEMORY_BACKEND_URL": "http://127.0.0.1:49376",
+                        "SERVER_ORIGIN": "http://127.0.0.1:49374",
+                        "CALLS": str(calls),
+                        "INACTIVE_UNIT": inactive,
+                        "ENTRY_EXIT": entry_exit,
+                    }
+                    result = subprocess.run(
+                        ["bash", "-c", runner], cwd=root, env=env, timeout=5,
+                        text=True, capture_output=True, check=False,
+                    )
+                    invoked = calls.read_text(encoding="utf-8").splitlines()
+                    self.assertEqual(
+                        invoked[0],
+                        "reliable-mcp ready --backend http://127.0.0.1:49376 --workspace default --project dev",
+                    )
+                    if error is not None:
+                        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertNotIn("servidor em", result.stdout + result.stderr)
+                        self.assertIn(error, result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn("servidor em http://127.0.0.1:49374", result.stdout)
+                        self.assertEqual(invoked[1:], [
+                            "systemctl --user is-active --quiet ai-memory-ingress.service",
+                            "systemctl --user is-active --quiet ai-memory-delivery.service",
+                            "reliable-mcp ready --backend http://127.0.0.1:49374 --workspace default --project dev",
+                        ])
+
     def test_patch_reads_manifest_scope_and_check_stays_readonly(self):
         import hashlib
         import shutil

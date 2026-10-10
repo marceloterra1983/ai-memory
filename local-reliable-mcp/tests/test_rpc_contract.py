@@ -38,6 +38,16 @@ def _write_body(**envelope):
     return json.dumps(message).encode("utf-8")
 
 
+def _invalid_json_writes():
+    base = _write_body(jsonrpc="2.0", id="sdk")
+    for token in (b"NaN", b"Infinity", b"-Infinity", b"1e400", b'"\\ud800"', b'"\\udfff"'):
+        yield "additional-" + token.decode(), base.replace(
+            b'"arguments": {', b'"arguments": {"extra": ' + token + b", ", 1
+        )
+    for surrogate in ("\ud800", "\udfff"):
+        yield "id-" + ascii(surrogate), _write_body(jsonrpc="2.0", id=surrogate)
+
+
 def _ops(outbox: Path):
     ops = outbox / "ops"
     if not ops.is_dir():
@@ -95,6 +105,31 @@ class _RelayCase(unittest.TestCase):
 
 
 class EnvelopeRejection(_RelayCase):
+    def test_non_serde_json_writes_never_enqueue_offline(self):
+        for name, raw in _invalid_json_writes():
+            with self.subTest(name=name):
+                status, _, payload = self._handle(raw)
+                self.assertEqual(_ops(self.outbox), [])
+                self.assertEqual(status, 502, payload)
+                self.assertNotIn(b"PENDING", payload)
+
+    def test_non_serde_json_writes_are_forwarded_byte_for_byte_online(self):
+        self._use_backend()
+        # Refuse forwarded calls at the backend's auth gate; a normalized
+        # write must still leave no intent and must never reach that gate.
+        self.backend.store.require_authorization = True
+        for name, raw in _invalid_json_writes():
+            with self.subTest(name=name):
+                captured = len(self.backend.store.captured)
+                status, _, payload = self._handle(raw)
+                self.assertEqual(_ops(self.outbox), [])
+                self.assertEqual(status, 401, payload)
+                self.assertEqual(
+                    [item["body"] for item in self.backend.store.captured[captured:]], [raw]
+                )
+                self.assertEqual(self.backend.store.write_count, 0)
+                self.assertEqual(self.backend.store.pages, {})
+
     def test_proof_missing_version_and_id_does_not_enqueue(self):
         raw = json.dumps(
             {
@@ -330,6 +365,15 @@ class CasSchema(unittest.TestCase):
 
 
 class ParseMessage(unittest.TestCase):
+    def test_non_serde_json_is_rejected_before_write_normalization(self):
+        for name, raw in _invalid_json_writes():
+            with self.subTest(name=name):
+                self.assertIsNone(parse_message(raw))
+        valid = _write_body(jsonrpc="2.0", id="sdk").replace(
+            b'"arguments": {', b'"arguments": {"extra": [1e300, "\\ud83d\\ude00"], ', 1
+        )
+        self.assertEqual(parse_message(valid)["params"]["arguments"]["extra"], [1e300, "\U0001f600"])
+
     def test_duplicate_keys_are_rejected_at_every_object(self):
         self.assertIsNone(parse_message(b'{"a":1,"a":2}'))
         self.assertIsNone(parse_message(b'{"params":{"path":"a","path":"b"}}'))

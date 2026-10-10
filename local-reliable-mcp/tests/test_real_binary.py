@@ -1,4 +1,4 @@
-"""The installed binary has no CAS yet. A scoped write through the relay must not land."""
+"""An explicitly supplied legacy binary must reject CAS delivery in isolated data."""
 
 from __future__ import annotations
 
@@ -18,12 +18,9 @@ MARKER = "RELAY-SYNTH-9f3c1a-do-not-land"
 
 
 def _binary():
-    override = os.environ.get("AI_MEMORY_BIN")
+    override = os.environ.get("AI_MEMORY_LEGACY_BIN")
     if override and Path(override).is_file() and os.access(override, os.X_OK):
-        return Path(override)
-    for candidate in (Path.home() / ".local" / "bin" / "ai-memory", Path("/usr/bin/ai-memory")):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
+        return Path(override).resolve()
     return None
 
 
@@ -42,10 +39,10 @@ def _scrub(text, secret):
 
 
 class RealBinaryCase(unittest.TestCase):
-    def test_current_binary_is_rejected_and_a_scoped_write_does_not_land(self):
+    def test_legacy_binary_is_rejected_and_a_scoped_write_does_not_land(self):
         binary = _binary()
         if binary is None:
-            self.skipTest("ai-memory binary is not installed")
+            self.skipTest("set AI_MEMORY_LEGACY_BIN to an executable ai-memory binary without CAS")
         port = _free_port()
         self.assertNotEqual(port, 49374)
         self.assertNotEqual(port, 49376)

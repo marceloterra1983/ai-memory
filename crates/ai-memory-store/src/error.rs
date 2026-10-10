@@ -2,7 +2,44 @@
 
 use thiserror::Error;
 
-use ai_memory_core::MemoryError;
+use ai_memory_core::{MemoryError, PageId};
+
+/// Which conditional page write to enforce in the same transaction as the mutation.
+///
+/// Jev does not apply: the decision is UUID equality and row existence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageWriteGuard {
+    /// Insert only when the scope has no live (`is_latest = 1`) row at this path.
+    CreateOnly,
+    /// Supersede only when this id is still the live head at this path.
+    ExpectedHead(PageId),
+}
+
+/// Why a [`PageWriteGuard`] refused a write. No version was created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageWriteConflictReason {
+    /// `create_only` found a live head at the path.
+    AlreadyExists,
+    /// `expected_page_id` was not the live head (including when the path is absent).
+    StaleHead,
+}
+
+impl PageWriteConflictReason {
+    /// Stable wire value for MCP `data.reason`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AlreadyExists => "already_exists",
+            Self::StaleHead => "stale_head",
+        }
+    }
+}
+
+impl std::fmt::Display for PageWriteConflictReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Result alias used throughout the store crate.
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -182,6 +219,16 @@ pub enum StoreError {
     /// collision instead of a bare SQLite error.
     #[error("workstream name '{0}' is already taken in this checkout")]
     WorkstreamNameTaken(String),
+
+    /// A conditional page write lost to the live head. The transaction rolled
+    /// back, so no version, evidence, link, or index row was added.
+    #[error("page write conflict ({reason})")]
+    PageWriteConflict {
+        /// Which guard failed.
+        reason: PageWriteConflictReason,
+        /// The live head in this scope, or `None` when the path has no live row.
+        current_page_id: Option<PageId>,
+    },
 }
 
 impl StoreError {

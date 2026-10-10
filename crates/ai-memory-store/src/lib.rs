@@ -55,19 +55,19 @@ pub use decay::{
     salience_after_feedback,
 };
 pub use dream::{DREAM_MAX_HEADS, DREAM_SOURCE_MAX_BYTES, DreamHead, dream_source_digest};
-pub use error::{StoreError, StoreResult};
+pub use error::{PageWriteConflictReason, PageWriteGuard, StoreError, StoreResult};
 pub use grants::{GrantFilter, GrantListing, GrantOutcome, ProjectGrant};
 pub use maintenance::MaintenanceJob;
 pub use ops::{
     AdmittedSession, BootstrapChunkRecord, CompactSummary, Compaction, DateOnlyTtlPage,
     DeleteWorkspaceSummary, EmbedOutcome, EmbeddingWrite, EntityBackfillSummary,
     HookSessionAdmission, IdentityResolution, IngestObservationOutcome, LifecycleOnlyEndOutcome,
-    MAX_PENDING_INBOX_MESSAGES, MoveSessionSummary, MoveSummary, ObservationPruneOutcome,
-    OkfMigratedPage, PAGE_WINDOW_BACKFILL_BATCH, PageWindowBackfillSummary, PagesMode, PurgeMode,
-    PurgeSessionSummary, PurgeSummary, ReorgSummary, RepairSessionTimesSummary,
-    RepairedSessionTimes, SessionTimesCandidate, SessionTimesSkipReason, SkippedSessionTimes,
-    StaleAfterRepair, backfill_entity_index, backfill_page_windows,
-    backfill_page_windows_in_batches, purge_session, record_embed_failure,
+    LivePageHead, MAX_PENDING_INBOX_MESSAGES, MoveSessionSummary, MoveSummary,
+    ObservationPruneOutcome, OkfMigratedPage, PAGE_WINDOW_BACKFILL_BATCH,
+    PageWindowBackfillSummary, PagesMode, PurgeMode, PurgeSessionSummary, PurgeSummary,
+    ReorgSummary, RepairSessionTimesSummary, RepairedSessionTimes, SessionTimesCandidate,
+    SessionTimesSkipReason, SkippedSessionTimes, StaleAfterRepair, backfill_entity_index,
+    backfill_page_windows, backfill_page_windows_in_batches, purge_session, record_embed_failure,
 };
 pub use project_authz::{
     AccessMode, GrantLevel, ProjectAccess, ProjectAuthz, ProjectPrincipal,
@@ -84,7 +84,7 @@ pub use reader::{
     RELATED_WALK_MAX_NODES, ReaderPool, ReindexTargetStatus, RelatedNode, RelatedPage,
     RrfContributions, ScopeRow, SearchExplain, SessionDependentRows, SessionEndDisposition,
     SessionSummary, SettledPage, StatusCounts, StorageStatus, StoredEmbedding, StoredPageBody,
-    WorkspaceScopeRow, WorkspaceSummary, f32_vec_to_bytes,
+    StoredPageHead, WorkspaceScopeRow, WorkspaceSummary, f32_vec_to_bytes,
 };
 pub use retrieval_tuning::{RetrievalTuning, is_session_recall_query};
 pub use scope::{

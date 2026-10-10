@@ -1,6 +1,6 @@
 //! [`Wiki`] — the only correct write path for the markdown source-of-truth.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -173,15 +173,6 @@ pub struct Wiki {
     /// the directory rename and SQLite re-stamp so stale writes cannot land
     /// files under the old workspace while the project is in flight.
     mutation_lock: Arc<RwLock<()>>,
-    /// Per-page write serialization (#607, item 3). Two concurrent writes to
-    /// the *same* `(ws, proj, path)` would otherwise interleave their
-    /// file-rename and DB-upsert under the shared `mutation_lock` read guard,
-    /// transiently leaving on-disk markdown disagreeing with the DB `latest`
-    /// row. Each path gets its own async mutex, so same-path writers serialize
-    /// while different paths still run concurrently. The map is GC'd
-    /// opportunistically — entries no writer currently holds are dropped on the
-    /// next acquisition — so it stays bounded to currently-contended paths.
-    page_locks: Arc<std::sync::Mutex<HashMap<PageKey, Arc<tokio::sync::Mutex<()>>>>>,
     /// Scopes this process has already materialized `_meta.md` manifests for.
     /// Keeps [`Wiki::ensure_scope_manifests`] to one hash lookup per page
     /// write after the scope's first — the store query and the two manifest
@@ -265,7 +256,6 @@ impl Wiki {
             admission_chain: None,
             store_reader: None,
             mutation_lock: Arc::new(RwLock::new(())),
-            page_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             manifested_scopes: Arc::new(Mutex::new(HashSet::new())),
             reconcile_tombstones_deleted_pages: false,
         })
@@ -1724,6 +1714,9 @@ impl Wiki {
             self.ensure_project_workspace(workspace_id, project_id)
                 .await?;
             let abs = self.abs_path(workspace_id, project_id, &path);
+            let _file_lock = self
+                .lock_page_files(&[(workspace_id, project_id, path.clone())])
+                .await?;
             let installed =
                 replace_file_with_rollback_snapshot(&self.git, &abs, emitted.as_bytes())?;
             match self
@@ -2429,6 +2422,20 @@ impl Wiki {
                 .map(|(req, _, _, _)| (req.workspace_id, req.project_id, req.path.clone()))
                 .collect();
             let _page_guards = self.lock_pages(&batch_keys).await;
+            // Same acquisition order on every handle: in-memory path locks
+            // first, then the OS file locks sorted by lock path. The file
+            // locks stay across the source read, install, SQL, and rollback.
+            let mut file_keys = batch_keys;
+            if let Some(dream) = &dream {
+                for source in &dream.sources {
+                    file_keys.push((
+                        source.head.workspace_id,
+                        source.head.project_id,
+                        source.head.candidate.path.clone(),
+                    ));
+                }
+            }
+            let _file_locks = self.lock_page_files(&file_keys).await?;
             let checkpoint = if let Some(dream) = &dream {
                 if (dream.cancel)() {
                     return Err(dream_refused("dream cancelled before staging"));
@@ -2584,33 +2591,23 @@ impl Wiki {
         Ok((ids, checkpoint))
     }
 
-    /// Acquire the per-path write lock for one page, serializing concurrent
-    /// writers to the same `(ws, proj, path)` while different paths run
-    /// concurrently. See [`Wiki::page_locks`].
+    /// Acquire the per-path write lock for one page. The map lives on the
+    /// shared [`WriterHandle`], so two `Wiki` values using that writer
+    /// serialize the same `(ws, proj, path)` — including the file snapshot
+    /// and its rollback — while different paths still run concurrently.
     async fn lock_page(
         &self,
         workspace_id: WorkspaceId,
         project_id: ProjectId,
         path: &PagePath,
     ) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
-            let mut map = self.page_locks.lock().expect("page_locks mutex poisoned");
-            // Opportunistic GC under the same short critical section that hands
-            // out locks: an entry whose only remaining strong ref is the map's
-            // own (count == 1) has no live guard and no waiter, so drop it.
-            map.retain(|_, v| Arc::strong_count(v) > 1);
-            Arc::clone(
-                map.entry((workspace_id, project_id, path.clone()))
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-            )
-        };
-        lock.lock_owned().await
+        self.writer.lock_page(workspace_id, project_id, path).await
     }
 
     /// Acquire per-path write locks for a batch of pages in a deterministic
     /// global order (sorted by id/path bytes, deduped) so a batch write and any
-    /// concurrent single-page or batch writer can never deadlock. See
-    /// [`Wiki::page_locks`].
+    /// concurrent single-page or batch writer can never deadlock. The locks
+    /// live on the shared writer handle.
     async fn lock_pages(&self, keys: &[PageKey]) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
         let mut ordered: Vec<PageKey> = keys.to_vec();
         // The id newtypes are not `Ord`, so order by their byte / string
@@ -2631,6 +2628,45 @@ impl Wiki {
         guards
     }
 
+    /// Exclusive OS locks for `keys`, in lock-path order, acquired on a
+    /// blocking thread. Callers already hold [`Self::lock_pages`] (or the
+    /// exclusive mutation guard) so this cannot invert with the in-process
+    /// order. The returned guards cover snapshot, install, SQL, and rollback;
+    /// dropping them releases the `flock`.
+    async fn lock_page_files(&self, keys: &[PageKey]) -> WikiResult<Vec<PageFileLock>> {
+        let data_dir = self.data_dir().to_path_buf();
+        let mut paths: Vec<PathBuf> = keys
+            .iter()
+            .map(|(ws, proj, path)| page_file_lock_path(&data_dir, *ws, *proj, path))
+            .collect();
+        let guards = tokio::task::spawn_blocking(move || -> WikiResult<Vec<PageFileLock>> {
+            paths.sort();
+            paths.dedup();
+            let mut guards = Vec::with_capacity(paths.len());
+            for path in paths {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&path)?;
+                fs2::FileExt::lock_exclusive(&file)?;
+                guards.push(PageFileLock { _file: file });
+            }
+            Ok(guards)
+        })
+        .await
+        .map_err(|err| {
+            WikiError::Io(std::io::Error::other(format!(
+                "page file lock task failed: {err}"
+            )))
+        })??;
+        Ok(guards)
+    }
+
     /// Write `body` (with optional `frontmatter`) atomically to
     /// `<wiki_root>/<workspace_id>/<project_id>/<path>` and upsert the
     /// matching page row in the store.
@@ -2641,6 +2677,30 @@ impl Wiki {
     /// # Errors
     /// Returns [`WikiError`] for any filesystem, parsing, or store error.
     pub async fn write_page(&self, req: WritePageRequest) -> WikiResult<PageId> {
+        self.write_page_with_guard(req, None).await
+    }
+
+    /// [`Wiki::write_page`] that commits only when `guard` matches the live
+    /// head inside the store transaction. A conflict restores the file this
+    /// call installed over and does not leave a new version.
+    ///
+    /// # Errors
+    /// Returns [`WikiError::Store`] carrying
+    /// [`ai_memory_store::StoreError::PageWriteConflict`] when the guard loses,
+    /// or any error from [`Wiki::write_page`].
+    pub async fn write_page_guarded(
+        &self,
+        req: WritePageRequest,
+        guard: ai_memory_store::PageWriteGuard,
+    ) -> WikiResult<PageId> {
+        self.write_page_with_guard(req, Some(guard)).await
+    }
+
+    async fn write_page_with_guard(
+        &self,
+        req: WritePageRequest,
+        guard: Option<ai_memory_store::PageWriteGuard>,
+    ) -> WikiResult<PageId> {
         // Reject a path that cannot be materialised and checkpointed on every
         // supported platform, before anything is written.
         //
@@ -2772,6 +2832,7 @@ impl Wiki {
                 },
                 emitted.as_bytes(),
                 None,
+                guard,
             )
             .await?
         };
@@ -2801,6 +2862,7 @@ impl Wiki {
         page: NewPage,
         emitted: &[u8],
         expected: Option<(PageId, [u8; 32])>,
+        guard: Option<ai_memory_store::PageWriteGuard>,
     ) -> WikiResult<PageId> {
         self.ensure_project_workspace(page.workspace_id, page.project_id)
             .await?;
@@ -2808,14 +2870,34 @@ impl Wiki {
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let _file_lock = self
+            .lock_page_files(&[(page.workspace_id, page.project_id, page.path.clone())])
+            .await?;
+        if let Some(guard) = guard
+            && let Some(conflict) = self
+                .conflict_before_install(
+                    page.workspace_id,
+                    page.project_id,
+                    &page.path,
+                    &abs,
+                    guard,
+                )
+                .await?
+        {
+            return Err(conflict.into());
+        }
         let installed = replace_file_with_rollback_snapshot(&self.git, &abs, emitted)?;
-        let result = match expected {
-            Some((id, hash)) => {
-                self.writer
-                    .upsert_page_metadata_if_latest(page, id, hash)
-                    .await
+        let result = if let Some(guard) = guard {
+            self.writer.upsert_page_if(page, guard).await.map(Some)
+        } else {
+            match expected {
+                Some((id, hash)) => {
+                    self.writer
+                        .upsert_page_metadata_if_latest(page, id, hash)
+                        .await
+                }
+                None => self.writer.upsert_page(page).await.map(Some),
             }
-            None => self.writer.upsert_page(page).await.map(Some),
         };
         match result {
             Ok(Some(id)) => Ok(id),
@@ -2829,6 +2911,48 @@ impl Wiki {
                 Err(e.into())
             }
         }
+    }
+
+    /// Refuse a conditional write before the page file is replaced.
+    ///
+    /// `create_only` treats an existing file as `already_exists`, including
+    /// when the index has no live row (`current_page_id` is then `None`).
+    /// `expected_page_id` proceeds only when that id is the live head and the
+    /// file is either absent (the read path's db-fallback) or parses as that
+    /// head. A divergent file is not permission to overwrite.
+    async fn conflict_before_install(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &PagePath,
+        abs: &Path,
+        guard: ai_memory_store::PageWriteGuard,
+    ) -> WikiResult<Option<ai_memory_store::StoreError>> {
+        let disk = snapshot_existing_file(abs)?;
+        let head = self
+            .writer
+            .latest_page_head(workspace_id, project_id, path.as_str())
+            .await?;
+        let current_page_id = head.as_ref().map(|head| head.id);
+        let conflict = |reason| ai_memory_store::StoreError::PageWriteConflict {
+            reason,
+            current_page_id,
+        };
+        let refused = match guard {
+            ai_memory_store::PageWriteGuard::CreateOnly => disk.is_some() || head.is_some(),
+            ai_memory_store::PageWriteGuard::ExpectedHead(expected) => {
+                !expected_head_matches_disk(expected, disk.as_deref(), head.as_ref())
+            }
+        };
+        let reason = match guard {
+            ai_memory_store::PageWriteGuard::CreateOnly => {
+                ai_memory_store::PageWriteConflictReason::AlreadyExists
+            }
+            ai_memory_store::PageWriteGuard::ExpectedHead(_) => {
+                ai_memory_store::PageWriteConflictReason::StaleHead
+            }
+        };
+        Ok(refused.then(|| conflict(reason)))
     }
 
     /// Embed `body` (and its L0 `abstract:` line, if present) into
@@ -3212,6 +3336,72 @@ fn render_auto_improve_sidecar(detail: &AutoImproveProposalDetail) -> WikiResult
 struct InstalledFile {
     path: PathBuf,
     previous: Option<Vec<u8>>,
+}
+
+/// Stable lock file for one page, outside the git wiki tree.
+///
+/// The digest is the scope plus the relative path, so two processes that open
+/// the same data directory contend on the same file. The page file itself is
+/// replaced by rename and cannot carry the lock.
+pub(crate) fn page_file_lock_path(
+    data_dir: &Path,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+    path: &PagePath,
+) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::new()
+        .chain_update(workspace_id.as_bytes())
+        .chain_update([0])
+        .chain_update(project_id.as_bytes())
+        .chain_update([0])
+        .chain_update(path.as_str().as_bytes())
+        .finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    data_dir.join("page-locks").join(hex)
+}
+
+struct PageFileLock {
+    _file: std::fs::File,
+}
+
+/// `true` when `expected` is the live head and the file is the snapshot
+/// `memory_read_page` would attach to that head (including a missing file,
+/// which is served as db-fallback with the same id).
+fn expected_head_matches_disk(
+    expected: PageId,
+    disk: Option<&[u8]>,
+    head: Option<&ai_memory_store::LivePageHead>,
+) -> bool {
+    let Some(head) = head else {
+        return false;
+    };
+    if head.id != expected {
+        return false;
+    }
+    match disk {
+        None => true,
+        Some(bytes) => disk_matches_head(bytes, head),
+    }
+}
+
+fn disk_matches_head(bytes: &[u8], head: &ai_memory_store::LivePageHead) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let Ok(markdown) = parse(text) else {
+        return false;
+    };
+    if markdown.body != head.body {
+        return false;
+    }
+    let Ok(stored) = serde_json::from_str::<serde_json::Value>(&head.frontmatter_json) else {
+        return false;
+    };
+    stored == markdown.frontmatter
 }
 
 fn snapshot_existing_file(path: &Path) -> WikiResult<Option<Vec<u8>>> {

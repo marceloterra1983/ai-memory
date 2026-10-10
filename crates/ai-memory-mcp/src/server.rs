@@ -330,7 +330,10 @@ should be proposed from a completed session, or at explicit wrap-up \
   pass `scope: \"global\"` so it lands in the reserved `_global` scope \
   instead of the current project. When the user explicitly wants a \
   time-bounded note, pass `expires_at` as RFC3339 or `YYYY-MM-DD`; the \
-  TTL hides the page after expiry and outranks `pinned`.\n\
+  TTL hides the page after expiry and outranks `pinned`. \
+  `create_only: true` creates the path only when it is absent in that scope; \
+  `expected_page_id` replaces only the head `memory_read_page` returned. Do not \
+  pass both. Omit both for an unconditional write.\n\
 - `memory_read_page` — when the user asks to read, open, or show the \
   full content of a specific page. Accepts a `query` (searches FTS5 and \
   returns the top hit's full body) or a `path` (direct lookup). Follow \
@@ -340,7 +343,10 @@ should be proposed from a completed session, or at explicit wrap-up \
   not just snippets. Pass `include_related: true` (with an optional \
   `related_depth`, default 1, max 3) to also walk the link graph outward and \
   get a `related` array of the pages reachable from this one, each tagged \
-  with its hop `depth` and `direction`.\n\
+  with its hop `depth` and `direction`. A path read includes `page_id`, \
+  the UUID of the head whose stored body was returned, only when that \
+  snapshot matches the body. A divergent disk body omits `page_id`. A DB \
+  fallback includes the `page_id` of the row that supplied the body.\n\
 - `memory_read_session_observations` — when the user asks what actually \
   happened in a session, wants to check a compiled page against its raw \
   evidence, or needs the exact prompt/tool text behind a `memory_query` \
@@ -1614,6 +1620,16 @@ struct WritePageArgs {
     /// by the next forget sweep. Omit for pages that never expire.
     #[serde(default)]
     expires_at: Option<String>,
+    /// When true, write only if this path has no live head in the resolved
+    /// scope. Cannot be combined with `expected_page_id`. Default false keeps
+    /// the unconditional create-or-supersede write.
+    #[serde(default)]
+    create_only: bool,
+    /// UUID `page_id` of the head `memory_read_page` returned. The write lands
+    /// only when that head is still current in the resolved scope. Cannot be
+    /// combined with `create_only`. Omit for an unconditional write.
+    #[serde(default)]
+    expected_page_id: Option<String>,
 }
 
 #[tool_router]
@@ -3776,7 +3792,14 @@ impl AiMemoryServer {
         pass the `title` argument; passing it forces correct JSON-escaping \
         of the string and is a known source of `JSON parsing` errors when \
         the title contains quotes or punctuation (issue #67). Use `title` \
-        only when there's no usable H1 in the body.")]
+        only when there's no usable H1 in the body. \
+        \
+        Optional `create_only: true` writes only when the path has no live \
+        head in the resolved scope. Optional `expected_page_id` (the `page_id` \
+        from `memory_read_page`) writes only when that head is still current. \
+        Passing both is rejected before any write. Omitting both keeps an \
+        unconditional write. A lost race returns a page-write conflict and \
+        does not change the page.")]
     async fn memory_write_page(
         &self,
         Parameters(args): Parameters<WritePageArgs>,
@@ -3789,6 +3812,7 @@ impl AiMemoryServer {
                 None,
             ));
         };
+        let write_guard = parse_write_guard(&args)?;
         let tier_name = args.tier.as_deref().unwrap_or("semantic");
         let tier: Tier = tier_name
             .parse()
@@ -3894,23 +3918,25 @@ impl AiMemoryServer {
             None
         };
 
-        let page_id = wiki
-            .write_page(WritePageRequest {
-                workspace_id: ws,
-                project_id: proj,
-                path: path.clone(),
-                frontmatter,
-                body: args.body,
-                tier,
-                pinned: args.pinned,
-                title: args.title,
-                admission_ctx,
-                author_id,
-                actor,
-                evidence: Vec::new(),
-            })
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let request = WritePageRequest {
+            workspace_id: ws,
+            project_id: proj,
+            path: path.clone(),
+            frontmatter,
+            body: args.body,
+            tier,
+            pinned: args.pinned,
+            title: args.title,
+            admission_ctx,
+            author_id,
+            actor,
+            evidence: Vec::new(),
+        };
+        let written = match write_guard {
+            Some(guard) => wiki.write_page_guarded(request, guard).await,
+            None => wiki.write_page(request).await,
+        };
+        let page_id = written.map_err(map_page_write_error)?;
         let checkpoint = checkpoint_or_warn(wiki, format!("memory_write_page: {}", path.as_str()));
 
         ok_json(&serde_json::json!({
@@ -3936,8 +3962,10 @@ impl AiMemoryServer {
         `workspace` + `project` together for every project-scoped call. Use \
         this when the user asks to read, open, or show a specific page by \
         name or topic — not just snippets. Returns `{ path, title, body, \
-        frontmatter }` (plus `served_from` when a missing markdown file is \
-        served from the DB fallback). \
+        frontmatter }` plus `page_id` when that body is the live head's \
+        snapshot (omitted when the file disagrees with the head). A missing \
+        markdown file adds `served_from: \"db-fallback\"` and the `page_id` \
+        of the row that supplied the body. \
         \
         Set `include_related: true` to also walk the link graph outward from \
         this page and get a `related` array of the reachable pages, each with \
@@ -4054,14 +4082,6 @@ impl AiMemoryServer {
         // only on the success paths below, so an error read reinforces nothing.
         let bump_actor = Self::bump_actor_from_parts(&parts);
         let mut bump_ids: Vec<PageId> = Vec::new();
-        if let Some(seed_id) = self
-            .reader
-            .latest_page_id_by_ids(ws, proj, page_path.to_string())
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        {
-            bump_ids.push(seed_id);
-        }
         if let Some(nodes) = &related {
             bump_ids.extend(nodes.iter().map(|n| n.id));
         }
@@ -4074,21 +4094,37 @@ impl AiMemoryServer {
                 // frontmatter title was never filled otherwise read back
                 // titleless despite a proper `# Heading` (#599).
                 let title = ai_memory_wiki::derive_title(&md.frontmatter, &md.body, &page_path);
-                ok_json(&attach_related(serde_json::json!({
+                // One row supplies both the id and the body it stored. Attach
+                // page_id only when that snapshot is the body we return, so a
+                // divergent file cannot name the wrong head.
+                let head = self
+                    .reader
+                    .latest_head_by_ids(ws, proj, page_path.as_str())
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                let mut payload = serde_json::json!({
                     "path": page_path.to_string(),
                     "title": title,
                     "body": md.body,
                     "frontmatter": md.frontmatter,
-                })))
+                });
+                if let Some(head) = &head {
+                    bump_ids.push(head.id);
+                    if head_matches_returned(head, &md.body, &md.frontmatter) {
+                        payload["page_id"] = serde_json::Value::String(head.id.to_string());
+                    }
+                }
+                ok_json(&attach_related(payload))
             }
             Err(disk_err) if is_missing_wiki_file(&disk_err) => {
                 match self
                     .reader
-                    .page_body_by_ids(ws, proj, page_path.as_str())
+                    .latest_head_by_ids(ws, proj, page_path.as_str())
                     .await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?
                 {
                     Some(stored) => {
+                        bump_ids.push(stored.id);
                         let frontmatter: serde_json::Value =
                             serde_json::from_str(&stored.frontmatter_json)
                                 .unwrap_or(serde_json::Value::Null);
@@ -4102,6 +4138,7 @@ impl AiMemoryServer {
                             "title": title,
                             "body": stored.body,
                             "frontmatter": frontmatter,
+                            "page_id": stored.id.to_string(),
                             "served_from": "db-fallback",
                         })))
                     }
@@ -5792,6 +5829,65 @@ fn checkpoint_or_warn(wiki: &Wiki, message: impl AsRef<str>) -> Option<String> {
 
 fn is_missing_wiki_file(err: &WikiError) -> bool {
     matches!(err, WikiError::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn parse_write_guard(
+    args: &WritePageArgs,
+) -> Result<Option<ai_memory_store::PageWriteGuard>, McpError> {
+    if args.create_only && args.expected_page_id.is_some() {
+        return Err(McpError::invalid_params(
+            "create_only and expected_page_id cannot be combined",
+            None,
+        ));
+    }
+    if args.create_only {
+        return Ok(Some(ai_memory_store::PageWriteGuard::CreateOnly));
+    }
+    let Some(raw) = args.expected_page_id.as_deref() else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(McpError::invalid_params(
+            "expected_page_id must be a UUID",
+            None,
+        ));
+    }
+    let id = PageId::from_str(trimmed)
+        .map_err(|_| McpError::invalid_params("expected_page_id must be a UUID", None))?;
+    Ok(Some(ai_memory_store::PageWriteGuard::ExpectedHead(id)))
+}
+
+fn map_page_write_error(err: WikiError) -> McpError {
+    match err {
+        WikiError::Store(ai_memory_store::StoreError::PageWriteConflict {
+            reason,
+            current_page_id,
+        }) => McpError::new(
+            rmcp::model::ErrorCode(-32009),
+            "page write conflict",
+            Some(serde_json::json!({
+                "code": "page_write_conflict",
+                "reason": reason.as_str(),
+                "current_page_id": current_page_id.map(|id| id.to_string()),
+            })),
+        ),
+        other => McpError::internal_error(other.to_string(), None),
+    }
+}
+
+fn head_matches_returned(
+    head: &ai_memory_store::StoredPageHead,
+    body: &str,
+    frontmatter: &serde_json::Value,
+) -> bool {
+    if head.body != body {
+        return false;
+    }
+    let Ok(stored) = serde_json::from_str::<serde_json::Value>(&head.frontmatter_json) else {
+        return false;
+    };
+    stored == *frontmatter
 }
 
 /// Description of how long it's been since the last observation.
@@ -8442,6 +8538,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(parts),
             )
@@ -9122,6 +9221,9 @@ mod tests {
             workspace: None,
             scope: scope.map(str::to_string),
             expires_at: None,
+
+            create_only: false,
+            expected_page_id: None,
         };
 
         server
@@ -11539,6 +11641,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(parts),
             )
@@ -11619,6 +11724,9 @@ mod tests {
                         workspace: None,
                         scope: None,
                         expires_at: None,
+
+                        create_only: false,
+                        expected_page_id: None,
                     }),
                     OptionalParts(test_parts_default()),
                 )
@@ -11662,6 +11770,9 @@ mod tests {
                     workspace: Some("default".into()),
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(test_parts_default()),
             )
@@ -11728,6 +11839,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(parts),
             )
@@ -11835,6 +11949,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(test_parts_default()),
             )
@@ -11992,6 +12109,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(parts()),
             )
@@ -12084,6 +12204,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(alice_parts),
             )
@@ -12485,6 +12608,9 @@ mod tests {
                             workspace: None,
                             scope: None,
                             expires_at: None,
+
+                            create_only: false,
+                            expected_page_id: None,
                         }),
                         OptionalParts(parts),
                     )
@@ -12579,6 +12705,9 @@ mod tests {
                             workspace: None,
                             scope: None,
                             expires_at: None,
+
+                            create_only: false,
+                            expected_page_id: None,
                         }),
                         OptionalParts(parts),
                     )
@@ -12681,6 +12810,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(test_parts_default()),
             )
@@ -12747,6 +12879,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(parts()),
             )
@@ -12838,6 +12973,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(test_parts_default()),
             )
@@ -12933,6 +13071,9 @@ mod tests {
                     workspace: Some("alpha".into()),
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(parts()),
             )
@@ -12951,6 +13092,9 @@ mod tests {
                     workspace: Some("beta".into()),
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(parts()),
             )
@@ -13054,6 +13198,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(parts()),
             )
@@ -14996,6 +15143,9 @@ mod tests {
                     workspace: None,
                     scope: None,
                     expires_at: None,
+
+                    create_only: false,
+                    expected_page_id: None,
                 }),
                 OptionalParts(parts()),
             )

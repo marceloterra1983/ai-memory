@@ -267,8 +267,8 @@ async fn read_page_throttle_no_double_bump() {
     );
 }
 
-/// The bump is additive: a plain read's response payload is exactly the four
-/// documented fields, unchanged by reinforcement.
+/// The bump is additive: a plain read's response payload is exactly the
+/// documented read fields, unchanged by reinforcement.
 #[tokio::test]
 async fn read_page_response_payload_unchanged() {
     let h = harness().await;
@@ -285,7 +285,7 @@ async fn read_page_response_payload_unchanged() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        vec!["body", "frontmatter", "path", "title"],
+        vec!["body", "frontmatter", "page_id", "path", "title"],
         "reinforcement must not add fields to the read_page payload: {resp}"
     );
 }

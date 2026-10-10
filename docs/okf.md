@@ -26,9 +26,10 @@ how existing stores migrate.
 ai-memory's wiki is natively an **Open Knowledge Format** bundle from
 2.0 on: every page a consumer reads off disk is a conformant OKF
 concept file, and a project's wiki directory is a conformant bundle.
-"Native" means the wiki files *are* the OKF files — no export step
-forks the truth (an `export --okf` / `import --okf` pair still exists
-for moving bundles across tools).
+"Native" means the wiki files *are* the OKF files. `export-okf`
+packages a validated copy for moving bundles across tools. Import uses the
+native wiki directory and watcher (or `reindex`), as described below;
+there is no dedicated import command.
 
 ## Target: OKF v0.2
 

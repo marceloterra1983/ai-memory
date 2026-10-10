@@ -1,8 +1,11 @@
 # Remote git backup example
 
 Sample scripts + unit files that push an ai-memory install to a remote git
-repository on a daily cadence, keeping a tarball on a second location for the
-SQLite index and models cache that the mirror repo deliberately excludes.
+repository on a daily cadence, keeping a second copy of the selected files
+in a tarball. Both the mirror and this tarball exclude SQLite, models, logs,
+and configured secret patterns. For DB-only state, take a separate
+`ai-memory backup --to <tarball>`; only that command's archive uses the layout
+accepted by `ai-memory restore`.
 
 See [`docs/backup.md`](../../backup.md) for the walkthrough. The pieces in this
 directory are:

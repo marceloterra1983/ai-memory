@@ -88,19 +88,19 @@ docker cp ai-memory:/data/backups/ai-memory-backup-okf-v0.2-<date>.tar.gz .
 
 `AI_MEMORY_BACKUP_DIR` still wins when set (point it at another
 mounted volume if you prefer). Deleting the archive — from inside or
-outside the container — clears the homepage notice, same as on a
-workstation.
+outside the container — clears the archive reminder in `ai-memory status`.
+The homepage dialog still explains the migration and git-checkpoint recovery.
 
 ## After the migration
 
 The first visit to the wiki homepage opens a one-time dialog explaining
 the upgrade and the recovery steps, with a "do not show me again"
-checkbox (per browser; a future migration shows it again). Separately,
-a banner shows the archive's location, size and date until you delete
-the archive file:
+checkbox (per browser; a future migration shows it again). The dialog includes
+the archive's location while it exists; `ai-memory status` keeps the durable
+archive reminder. The separate persistent homepage banner was removed in 2.0.1.
 
-- **Everything looks right?** Delete the archive; the notice disappears
-  on its own.
+- **Everything looks right?** Delete the archive when you no longer need that
+  recovery point; the status reminder disappears on its own.
 - **Something is missing?** Restore (below).
 
 Verify the migration if you like:
@@ -126,9 +126,14 @@ tar -xzf ~/ai-memory-backup-okf-v0.2-<date>.tar.gz -C <data_dir>
 # 4. start the OLD (1.x) binary against it
 ```
 
-Surgical alternative (keeps post-migration work, reverts only the wiki
-files): the `pre-okf-migration checkpoint` commit in the wiki's git
-history, followed by `ai-memory reindex`.
+The `pre-okf-migration checkpoint` commit can recover pre-migration wiki files,
+but reverting to it does not preserve later wiki edits. Preserve later work
+separately before choosing that recovery point. `ai-memory reindex` requires a
+stopped server and a clean derived database; it refuses an existing populated
+store and cannot reconstruct DB-only state. Follow
+[`lifecycle-ops.md#reindex`](lifecycle-ops.md#reindex) for those limits. This is
+wiki recovery, not a substitute for the full pre-migration archive when
+downgrading the database.
 
 ## Downgrade guard
 
@@ -153,6 +158,7 @@ ai-memory export-okf --project myproject -o myproject-bundle.tar.gz
 ```
 
 Importing a foreign bundle needs no command: unpack its concept files
-into a project's wiki directory and the watcher (or `ai-memory
-reindex`) ingests them; anything missing from their frontmatter is
-filled at write time.
+into a project's wiki directory and the running watcher ingests them;
+anything missing from their frontmatter is filled at write time. Offline
+`ai-memory reindex` is an alternative only when rebuilding a clean database,
+not an in-place import into a populated store.

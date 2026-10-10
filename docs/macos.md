@@ -70,14 +70,14 @@ tar -xzf ai-memory-macos-aarch64.tar.gz
 ./ai-memory serve --transport http --bind 127.0.0.1:49374
 ```
 
-> **The server from step 3 must stay running for every other command.**
+> **The server from step 3 must stay running for capture, recall, and HTTP clients.**
 > `ai-memory init` only creates the data dir — it does **not** start a
-> server. `bootstrap`, `install-hooks`, `install-mcp`, and `status` are all
-> clients that talk to the running server over HTTP, so running them while
-> nothing is serving fails with `Connection refused (os error 61)` /
-> `could not reach http://localhost:49374`. Leave `serve` running in its own
-> terminal (or set it up as a login service, below), then run the rest in a
-> second terminal.
+> server. `bootstrap` and `status` talk to the running server over HTTP, so
+> running them while nothing is serving fails with `Connection refused
+> (os error 61)` / `could not reach http://localhost:49374`. `install-hooks`
+> and `install-mcp` render or update local agent configuration and can run
+> before the server starts. Leave `serve` running in its own terminal (or
+> set it up as a login service, below) before using capture and recall.
 
 In a second terminal, wire the agent:
 
@@ -154,12 +154,12 @@ automatically (no `--source` needed from the repo root):
 ./target/release/ai-memory install-mcp   --client claude-code --apply
 ```
 
-If you symlink the built binary onto `PATH` for convenience (e.g.
-`ln -sf "$(pwd)/target/release/ai-memory" ~/.local/bin/ai-memory`), do it
-*after* the `install-hooks` call above, not before — see the `install-hooks`
-symlink caution in Scenario A
-([#546](https://github.com/akitaonrails/ai-memory/issues/546)); it applies
-here too and is the exact layout that bug was filed against.
+You can symlink the built binary onto `PATH` for convenience (e.g.
+`ln -sf "$(pwd)/target/release/ai-memory" ~/.local/bin/ai-memory`). Current
+builds resolve the symlink before locating the hooks bundle; the Scenario A
+caution applies to v1.38.x and older
+([#546](https://github.com/akitaonrails/ai-memory/issues/546)). Keep the
+symlink target available when rebuilding or moving the checkout.
 
 ## Scenario C: Docker Wrapper
 
@@ -211,6 +211,14 @@ open "companions/ai-memory-macos/dist/AI Memory.app"
 Drag `AI Memory.app` to `/Applications` so the LaunchAgent path stays stable
 across rebuilds. The menu extra has no Dock icon.
 
+The app XML-escapes binary, home and data-directory paths in its LaunchAgent
+plist and reads installed arguments through the property-list parser. Its
+command runner drains both output pipes while the child runs and reaps its own
+child on timeout, escalating to SIGKILL if SIGTERM does not stop it. Native
+regressions for these behaviors run with
+`swift test --package-path companions/ai-memory-macos` on macOS with Swift 6;
+Linux Rust checks do not validate the Swift companion.
+
 1. **Install & Start Server** — runs bundled `ai-memory init` if
    `~/Library/Application Support/ai-memory/config.toml` is missing, renders
    `packaging/launchd/com.github.akitaonrails.ai-memory.plist`, and bootstraps
@@ -241,9 +249,10 @@ Notarization and a Homebrew cask are not part of this companion yet.
 
 ## Run as a Login Service (launchd)
 
-Scenarios A–C leave the server in the foreground: close that terminal and
-capture stops. Scenario D already installs this LaunchAgent from **Install &
-Start Server**. The macOS counterpart of a systemd user unit is a
+Scenarios A and B leave the server in the foreground: close that terminal
+and capture stops. Scenario C uses `docker run -d`, so its container keeps
+running after the terminal closes. Scenario D already installs this
+LaunchAgent from **Install & Start Server**. The macOS counterpart of a systemd user unit is a
 **LaunchAgent** — a plist in `~/Library/LaunchAgents/` that the per-user
 launchd domain starts at login and restarts on failure. The repo ships one at
 `packaging/launchd/com.github.akitaonrails.ai-memory.plist`, and the macOS
@@ -257,7 +266,7 @@ tarball (Scenario A) or the repo root (Scenario B):
 ```bash
 # launchd creates the log files but not their parent directory, and a missing
 # one is a silent redirect failure.
-mkdir -p ~/Library/Logs/ai-memory
+mkdir -p ~/Library/Logs/ai-memory ~/Library/LaunchAgents
 
 # Wherever you keep the binary: ~/Applications/ai-memory/ai-memory for a
 # release tarball, ./target/release/ai-memory for a source build.
@@ -305,10 +314,12 @@ does not re-read the definition.
 
 ### If you configure a bearer token
 
-`AI_MEMORY_AUTH_TOKEN` is read from the process environment only — it is not a
-`config.toml` key, and launchd has no `EnvironmentFile`. A single-user loopback
-setup needs no token at all. If you do set one, add it to your rendered plist
-and tighten the file, because `~/Library/LaunchAgents` is not private:
+The server reads `[auth].bearer_token` from `config.toml`;
+`AI_MEMORY_AUTH_TOKEN` overrides it when present in the server environment.
+A single-user loopback setup needs no token. Configure it in the data dir's
+private `config.toml`, or add the environment override to the rendered plist
+and tighten that file, because `~/Library/LaunchAgents` is not private.
+launchd has no `EnvironmentFile`:
 
 ```xml
   <key>EnvironmentVariables</key>
@@ -321,6 +332,11 @@ and tighten the file, because `~/Library/LaunchAgents` is not private:
 ```bash
 chmod 600 ~/Library/LaunchAgents/com.github.akitaonrails.ai-memory.plist
 ```
+
+For Scenario D, enter the same token in the app's **Settings**. Its HTTP
+health check reads the app's Keychain token; it does not read `config.toml`.
+Saving a token there authenticates the app's requests and does not configure
+the LaunchAgent's server token.
 
 ### Removing the agent
 
@@ -385,16 +401,14 @@ wrapper's `posix` shell-script path does not. Re-run `install-hooks --agent
   first, or symlink the binary onto `PATH` once you're done wiring hooks (see
   the Scenario A/B notes above) so plain `ai-memory` works everywhere.
 - **`install-hooks` wires the wrong (or no) `hooks/` bundle even though the
-  tarball was extracted whole:** if the binary is reached through a symlink
-  (e.g. you put it on `PATH` before running `install-hooks`), macOS discovery
-  does not resolve the symlink and searches the wrong parent directories —
-  see [#546](https://github.com/akitaonrails/ai-memory/issues/546). On a
-  clean machine this fails outright with `Error: could not locate hooks
-  directory. Tried: [...]`; if a hooks cache from an earlier install already
-  exists under `~/Library/Application Support/ai-memory`, it can silently
-  reuse that stale copy instead and report success. Run `install-hooks` via
-  the real extracted/built path instead of the symlink
-  until that's fixed.
+  tarball was extracted whole:** check the binary version and symlink target.
+  The symlink-discovery defect
+  [#546](https://github.com/akitaonrails/ai-memory/issues/546) was fixed in
+  v1.39.0. On v1.38.x and older, invoke the real extracted/built path or
+  upgrade; those versions may miss the bundle or reuse an older data-dir
+  hooks cache. On current builds, a missing or unresolvable target still
+  needs to be repaired, and `could not locate hooks directory` lists the
+  candidates to inspect.
 - **No Dock icon after opening AI Memory.app:** that is the menu extra. Look
   in the menu bar (brain / status symbol), not the Dock.
 - **Menu extra says "Runtime not bundled":** `swift run` from the package

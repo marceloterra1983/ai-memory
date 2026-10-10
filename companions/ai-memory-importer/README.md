@@ -55,13 +55,15 @@ stubs for them.
 ## Safety contract
 
 - Default mode is dry-run; live mode requires `--apply`.
-- Live mode requires explicit `--workspace`, `--project`, and
+- Live mode requires an explicit `--workspace`, destination project
+  (`--project` for OMC; the JSON envelope's `project` for conversations), and
   `--manifest-out <path>`.
-- Live writes use only `POST /admin/write-page`; the importer never opens
-  ai-memory SQLite or wiki files directly and never deletes pages.
+- OMC pages use `POST /admin/write-page`; external conversations use
+  `POST /hook/batch`. The importer never opens ai-memory SQLite or wiki files
+  directly and never deletes pages.
 - The destination workspace/project must already exist unless
   `--create-destination` is passed.
-- Existing destination pages abort the import unless `--overwrite` is passed.
+- For OMC, existing destination pages abort the import unless `--overwrite` is passed.
   The importer also re-checks each page immediately before writing.
   This is best-effort protection: a concurrent writer could still race between
   the check and `/admin/write-page`, so avoid running competing import/write jobs
@@ -72,16 +74,21 @@ stubs for them.
   and reserved/internal destination prefixes are rejected. Duplicate generated
   destination paths abort planning.
 - Dry-run output does not print full page bodies unless `--show-body` is passed.
-- Only endpoint-supported metadata is mapped: `title`, `kind`, `tier`, `tags`,
-  `pinned`, and `body`. Unknown frontmatter is ignored.
+- For OMC, only endpoint-supported metadata is mapped: `title`, `kind`, `tier`,
+  `tags`, `pinned`, and `body`. Unknown frontmatter is ignored.
 - Auth comes only from `AI_MEMORY_AUTH_TOKEN`; there is intentionally no CLI
   token argument.
+- HTTP redirects are refused for preflight, page writes and conversation
+  batches. Imported content stays at the selected `--server-url`; a redirect
+  error reports the HTTP status without its location or response body.
 - External conversations are fully parsed, schema-checked, bounded, and
   sanitized before any manifest or HTTP request is created. Unknown fields and
   roles fail closed. Limits are 2 MiB per file, 128 messages, and 1 MiB total
   message content. Oversized individual messages are UTF-8-safely truncated to
   the same durable hook caps: 16 KiB for user prompts and 2,000 bytes for
   extension messages. The dry-run and manifest report the truncation count.
+- Invalid conversation JSON reports its error category, line, and column;
+  diagnostics do not copy source field values.
 - Conversation bodies receive client-side credential redaction before replay
   and then cross ai-memory's normal server sanitizer as a second boundary.
 - Stable session IDs derive from `(workspace, project, source, session_id)`.

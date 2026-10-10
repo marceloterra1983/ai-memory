@@ -89,6 +89,12 @@ Webhooks fire on these `op` values today (extensible enum):
   operator, no page path (handoffs live in their own table, not the wiki tree).
   Fired by the MCP tools **and** by the automatic hook paths: the SessionEnd
   baton (`handoff_begin`) and the session-start claim (`handoff_accept`).
+- `message_send` / `message_pop` / `message_cancel` — cross-project inbox
+  delivery, consumption, or sender cancellation. These carry scope and actor,
+  no page body. `message_send` checks the recipient project; pop and cancel
+  check the acting project's inbox or outbox. Blocking reject-policy hooks
+  run before the mutation; observers run after a message is actually inserted,
+  popped, or cancelled. See [Agent messaging](agent-messaging.md).
 
 The three handoff lifecycle ops are dispatched in one fixed order, the same
 from every path that raises them: the webhooks that can refuse — `blocking`
@@ -202,12 +208,13 @@ terminal `purge_project` notification is unchanged.
 ```http
 POST <webhook.url>
 Content-Type: application/json
-X-Memory-Op: write_page | consolidate | delete | purge_project | purge_workspace | move_project
-             | move_session | handoff_begin | handoff_accept | handoff_cancel
+X-Memory-Op: write_page | consolidate | delete | purge_project | purge_session | purge_workspace
+             | move_project | move_session | handoff_begin | handoff_accept | handoff_cancel
+             | message_send | message_pop | message_cancel
 ```
 
-(The header is one of those ten values; the second line is a continuation of
-the list, not a second header.)
+(The header is one of those fourteen values; the extra lines continue the
+list, not additional headers.)
 
 ```jsonc
 {
@@ -228,7 +235,7 @@ the list, not a second header.)
       "client": "72836f52-...",              // DCR client UUID
       "session_id": "019e6d-..."
     },
-    "op": "write_page",                      // write_page | consolidate | delete | purge_project | purge_session | purge_workspace | move_project | move_session
+    "op": "write_page",                      // same operation value as X-Memory-Op above
     "partial_failure": true                  // purge_project/purge_session/purge_workspace only, and ONLY when set
                                              //   (skipped on the wire when false).
                                              //   true → the DB rows were purged but
@@ -276,8 +283,9 @@ all of them — including the handoff lifecycle ops above, where "abort" means
 ## 5. Workspace / project names
 
 The engine resolves `workspace_id` and `project_id` into the same
-human-readable names the UI and on-disk wiki use, so webhooks can
-address pages by name without re-implementing UUID lookup. Resolution
+human-readable names the UI and wiki manifests expose, so webhooks can
+address scopes by name without re-implementing UUID lookup. Wiki directory
+components remain workspace and project UUIDs. Resolution
 happens just before the chain fires; both fields are empty when the
 wiki was built without [`Wiki::with_store_reader`] (e.g. legacy
 embedders, tests that wire a chain without a reader).
@@ -285,9 +293,9 @@ embedders, tests that wire a chain without a reader).
 External webhooks should treat the names as opaque strings (workspace /
 project values use the same validation as `--workspace` / `--project`
 CLI flags). They are stable for the lifetime of the workspace / project
-— the engine doesn't rename them silently. `rename-project` is a manual
-op that an operator runs and that will eventually trigger a fresh
-webhook fan-out if you wire one.
+— the engine doesn't rename them silently. An operator's `rename-project`
+or `rename-workspace` changes the names in subsequent webhook payloads;
+the rename itself does not raise an admission event.
 
 ## 6. Loop prevention
 
@@ -315,7 +323,8 @@ Constants are exported from the `ai-memory-wiki` crate root:
 |---|---|---|
 | `MAX_ADMISSION_WEBHOOKS` | `16` | Chain length. `AdmissionChain::new` errors out beyond this — a misconfigured template (helm loop, duplicated block) can't push N hooks into the write-path. |
 | `MAX_RESPONSE_BYTES` | `1 MiB` | Webhook response body. Beyond this the response is dropped (treated as no-op + `warn`). |
-| Per-webhook `timeout_ms` | operator-set (default `2000`) | Single request. The chain is sequential, so total worst case ≈ `Σ timeout_ms`; automatic session-start handoff acceptance additionally caps the whole deciding chain at 750 ms. |
+| `MAX_WEBHOOK_TIMEOUT_MS` | `30000` ms | Maximum request timeout; configured values are clamped to `1..=30000` ms. |
+| Per-webhook `timeout_ms` | operator-set (default `2000`) | Single request, bounded by the clamp above. The chain is sequential, so total worst case ≈ `Σ timeout_ms`; automatic session-start handoff acceptance additionally caps the whole deciding chain at 750 ms. |
 
 ## 8. Configuration
 
@@ -420,14 +429,15 @@ persisting. `body` is left untouched (not in the response).
 // → 204 No Content
 ```
 
-The webhook materialises the page into a local clone of an external
-repo, batches commits, and pushes asynchronously. The engine doesn't
-wait for the push — only the local enqueue runs inside the write path
-under the webhook's `timeout_ms`.
+With `blocking = false` as configured above, the engine dispatches the
+webhook after the durable write and does not wait for its response. The sink
+can materialise the page, batch commits, and push independently. Dispatch
+shares the bounded observer budget described above and may be dropped when
+that budget is saturated.
 
 ## 10. Tests
 
-`crates/ai-memory-wiki/tests/admission.rs` covers the wire contract end
+`crates/ai-memory-wiki/tests/suite/admission.rs` covers the wire contract end
 to end against an axum loopback server. Categories:
 
 - Mutating frontmatter and body propagates correctly.

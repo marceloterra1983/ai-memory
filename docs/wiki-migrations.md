@@ -77,7 +77,7 @@ Open `crates/ai-memory-wiki/src/migrations/mod.rs` and append to the
 pub fn registry() -> Vec<Box<dyn WikiMigration>> {
     vec![
         // existing entries...
-        Box::new(super::m2026_06_01_1200_rename_logs_dir::RenameLogs2026),
+        Box::new(m2026_06_01_1200_rename_logs_dir::RenameLogs2026),
     ]
 }
 ```
@@ -153,7 +153,7 @@ command or a consolidation job, not a migration.
 If a migration needs to update the SQLite index alongside the file moves, use
 `WriterHandle` methods. Never open a second `Connection`; never call
 `ops::*` directly from a migration. This upholds invariant #2 (single-writer
-actor) from `CLAUDE.md`.
+actor) from `AGENTS.md`.
 
 ## Tracking
 

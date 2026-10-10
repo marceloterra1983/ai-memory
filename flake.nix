@@ -8,16 +8,13 @@
 # The build is self-contained: SQLite is bundled via rusqlite's `bundled`
 # feature, libgit2 is vendored via git2's `vendored-libgit2` feature, and
 # TLS uses rustls (webpki-roots) — no OpenSSL, no system-library hunting.
-# The only extra step is TAILWIND_SKIP=1 so the web crate's build script
-# uses the vendored static/tailwind.css instead of downloading the
-# Tailwind CLI (which a sandboxed Nix build cannot do).
+# The web crate copies the committed static/tailwind.css on ordinary builds,
+# so the sandbox needs no Tailwind download or build environment override.
 #
-# `doCheck = false` skips the packaging test suite. Those tests exercise
-# `bin/ai-memory`, a Docker-wrapper shell script that needs `docker` or
-# `podman` on PATH — they are host-environment tests, not build tests,
-# and are not Nix's responsibility. Run them manually with
-# `nix develop -c cargo test -p ai-memory-cli --test packaging` if your
-# machine has Docker.
+# This derivation builds the native binary without executing tests. Run the
+# CLI suite from the development shell:
+# `nix develop -c cargo test -p ai-memory-cli --test suite packaging::`.
+# Packaging tests use isolated filesystem fixtures and Docker/Podman stubs.
 
 {
   description = "Long-term memory for AI coding agents";
@@ -77,19 +74,11 @@
           # No nativeBuildInputs needed — the build is fully self-contained
           # (SQLite bundled, libgit2 vendored, rustls with webpki-roots).
 
-          # Skip the Tailwind CLI download in the sandbox. The build script
-          # falls back to the vendored static/tailwind.css committed to the
-          # repo (see crates/ai-memory-web/build.rs).
-          TAILWIND_SKIP = "1";
-
           buildType = "release";
 
-          # The packaging test suite (tests/packaging.rs) exercises the
-          # Docker-wrapper shell script `bin/ai-memory` and needs
-          # docker/podman on PATH — not available in a Nix sandbox. The
-          # rest of the workspace test suite (unit tests + integration)
-          # does not need them and can be run via `nix develop -c cargo
-          # test --workspace` on a machine with Docker.
+          # Run the complete workspace suite through the development shell:
+          # `nix develop -c cargo test --workspace --all-targets`.
+          # This derivation keeps the build and test steps separate.
           doCheck = false;
 
           # Install the bundled hook scripts alongside the binary,
@@ -127,17 +116,13 @@
             pkgs.cargo-watch
           ];
 
-          # Same escape hatch for local `cargo build` / `cargo test` —
-          # prevents the web crate from trying to download Tailwind.
-          TAILWIND_SKIP = "1";
-
           shellHook = ''
             echo ""
             echo "ai-memory dev shell — Rust $(rustc --version)"
             echo ""
             echo "  cargo build --workspace          # build"
             echo "  cargo test --workspace           # unit + integration tests"
-            echo "  cargo test -p ai-memory-cli --test packaging  # needs docker"
+            echo "  cargo test -p ai-memory-cli --test suite packaging::"
             echo ""
           '';
         };

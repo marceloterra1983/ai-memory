@@ -27,6 +27,7 @@ fn command_with_home(home: &Path) -> Command {
         std::fs::create_dir_all(dir).unwrap();
     }
     command
+        .current_dir(home)
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", config_home)
@@ -84,6 +85,33 @@ fn managed_skill_content() -> String {
         "---\nname: test\n---\n{}\nmanaged test skill\n",
         MANAGED_MARKER
     )
+}
+
+#[test]
+fn uninstall_fixture_keeps_instruction_mutations_inside_its_home() {
+    let _guard = cli_test_lock();
+    let home = tempfile::tempdir().unwrap();
+    let instructions = home.path().join("AGENTS.md");
+    write_file(
+        &instructions,
+        "user instructions\n<!-- ai-memory:start -->\nmanaged instructions\n<!-- ai-memory:end -->\n",
+    );
+    let mut command = command_with_home(home.path());
+    // Refuse to invoke a destructive fixture if it inherited the runner's cwd.
+    assert_eq!(command.get_current_dir(), Some(home.path()));
+    let output = command
+        .args(["uninstall", "--only", "instructions", "--apply", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "uninstall failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&instructions).unwrap(),
+        "user instructions\n"
+    );
 }
 
 #[test]
@@ -1215,7 +1243,7 @@ fn uninstall_dry_run_previews_purge() {
 /// so the actual sysinfo scan itself stays covered, not just the refusal
 /// logic downstream of it. Asserts `--purge-data` refuses up front, leaving
 /// the wiring intact. Run with:
-/// `cargo test -p ai-memory-cli --test removal -- --ignored`.
+/// `cargo test -p ai-memory-cli --test suite removal::purge_data_refuses_when_sibling_alive -- --ignored`.
 #[test]
 #[ignore]
 fn purge_data_refuses_when_sibling_alive() {

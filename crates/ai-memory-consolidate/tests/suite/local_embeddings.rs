@@ -13,7 +13,7 @@
 //! ```bash
 //! cargo run -p ai-memory-eval -- retrieval --sample 1 --embeddings local
 //! AI_MEMORY_TEST_MODELS_DIR=$PWD/evals/models \
-//!   cargo test -p ai-memory-consolidate --test local_embeddings -- --ignored
+//!   cargo test -p ai-memory-consolidate --lib integration::local_embeddings -- --ignored
 //! ```
 
 use std::path::Path;

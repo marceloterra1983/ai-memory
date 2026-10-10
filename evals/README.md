@@ -10,9 +10,11 @@ One Rust binary (`ai-memory-eval`) with two subcommands:
   live in `docs/benchmarks/`.
 
 **This is not part of the shipped binary.** It's a workspace member
-purely so it shares deps + builds with the rest. `cargo build` from
-the repo root will compile it, but it's never bundled into the
-docker image and never run by CI.
+purely so it shares dependencies with the rest. Build it with `cargo build
+-p ai-memory-eval` or `cargo build --workspace`; a bare root `cargo build`
+excludes it through `default-members`. It is never bundled into the Docker
+image. CI compiles and tests the workspace, but does not run live-provider
+evaluations or fetch the benchmark dataset.
 
 ## When to reach for this
 
@@ -297,6 +299,10 @@ Honest-numbers notes:
 - each session's original date is prepended to its turn text, since a
   replayed history must carry its own timestamps (the official
   harness exposes the same information to retrievers);
-- competitors' published numbers (e.g. agentmemory 0.967 R@5,
-  mcp-memory-service 0.804 R@5) are answer-evidence Recall@5 on this
-  same v1 dataset, comparable to our `hit@5`.
+- compare the same dataset and evidence granularity. agentmemory's 0.967 R@5
+  is from its `coding-agent-life-v1` workload, not LongMemEval-S; its cited
+  LongMemEval-S value is 0.952. mcp-memory-service reports 0.804 turn-level and
+  0.860 session-level R@5. Our `hit@5` is session-level. These are the dated
+  figures recorded in [the comparison](../docs/comparison.md) and
+  [landscape research](../docs/research-2026-landscape.md), not fresh benchmark
+  reruns or proof of superiority across different evidence units.

@@ -170,6 +170,12 @@ if [[ -z "$expected_sum" || "$actual_sum" != "$expected_sum" ]]; then
     echo "hook bundle checksum mismatch; refusing installation" >&2
     exit 1
 fi
+shared_source="$TMP/_lib.sh"
+if ! tar -xOf "$TMP/$ARCHIVE" "hooks/_lib.sh" > "$shared_source" || [[ ! -s "$shared_source" ]]; then
+    echo "shared helper hooks/_lib.sh is missing from the verified release bundle; refusing installation" >&2
+    exit 1
+fi
+install -m 0644 "$shared_source" "$TO/_lib.sh"
 echo "Installing ai-memory hooks for $AGENT into $DEST"
 for name in "${SCRIPTS[@]}"; do
     member="hooks/$AGENT/${name}.sh"

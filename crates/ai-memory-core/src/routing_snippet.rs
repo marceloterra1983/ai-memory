@@ -311,10 +311,9 @@ mod tests {
     /// The committed root `AGENTS.md` carries this managed block between the
     /// ai-memory markers. It is generated out-of-band
     /// (`ai-memory install-instructions --target AGENTS.md`) and committed
-    /// separately, so nothing forces it to track [`SNIPPET_BODY`]. This guard
-    /// fails when the two drift — regenerate to fix it. Only `AGENTS.md` is
-    /// checked (root `CLAUDE.md` imports it with `@AGENTS.md` and carries no
-    /// block of its own; `README.md` is prose).
+    /// separately, so nothing forces it to track [`SNIPPET_BODY`]. The owner's
+    /// AGENTS-only repository policy replaces exactly the generic bridge advice;
+    /// the rest must match. The shipped installer still serves other projects.
     #[test]
     fn committed_agents_md_matches_snippet_body() {
         // From `crates/ai-memory-core` up to the repo root.
@@ -328,11 +327,28 @@ mod tests {
             .expect("committed AGENTS.md must contain the ai-memory end marker");
         let region = &agents_md[start..end + MARKER_END.len()];
 
+        let bridge_advice = "Claude Code loads `CLAUDE.md` and does not read `AGENTS.md`. In a project\n\
+where `AGENTS.md` is canonical, give `CLAUDE.md` a bare `@AGENTS.md` import\n\
+line. Without it a rule written to `AGENTS.md` is absent from context at\n\
+session start and reaches Claude Code only if the agent opens the file.";
+        let repository_policy = "This repository uses only `AGENTS.md` for agent instructions, by the owner's\n\
+policy. Do not create a root `CLAUDE.md` bridge here. Other repositories may\n\
+choose a Claude import bridge; the product's generic installer supports their\n\
+choice without imposing it on this checkout.";
+        let generic = full_block();
+        assert_eq!(generic.matches(bridge_advice).count(), 1);
+        let expected = generic.replace(bridge_advice, repository_policy);
+        assert!(
+            !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../CLAUDE.md")
+                .exists(),
+            "the owner's AGENTS-only policy forbids a root CLAUDE.md bridge"
+        );
+
         assert_eq!(
             region,
-            full_block().trim_end(),
-            "committed AGENTS.md managed block is stale vs SNIPPET_BODY — \
-             regenerate with `ai-memory install-instructions --target AGENTS.md --no-skills`"
+            expected.trim_end(),
+            "committed AGENTS.md must match SNIPPET_BODY with only the exact repository policy override"
         );
     }
 }

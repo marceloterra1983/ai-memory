@@ -36,6 +36,16 @@ pub enum IngestObservationOutcome {
     AlreadyComplete,
 }
 
+/// Project authorization required by a database user's hook admission.
+#[derive(Clone, Copy, Debug)]
+pub struct HookProjectAuthorization {
+    /// The authenticated viewer whose project grants apply.
+    pub viewer: ai_memory_core::UserId,
+    /// Whether this event also writes artifacts in the persisted session scope.
+    /// SessionEnd always needs that scope; this flag covers turn checkpoints.
+    pub writes_session_scope: bool,
+}
+
 /// Unforgeable writer-issued session capability for hook follow-up mutations.
 #[derive(Clone, Debug)]
 pub struct AdmittedSession {
@@ -2578,6 +2588,47 @@ pub fn admit_hook_session_event(
     ingest_key: Option<&str>,
     moved_from_cwd: Option<&str>,
 ) -> StoreResult<HookSessionAdmission> {
+    admit_hook_session_event_inner(
+        conn,
+        session,
+        obs,
+        owner_filter,
+        ingest_key,
+        moved_from_cwd,
+        None,
+    )
+}
+
+/// Hook admission with grants checked on the same transaction as the write.
+pub(crate) fn admit_hook_session_event_authorized(
+    conn: &mut Connection,
+    session: &NewSession,
+    obs: &NewObservation,
+    owner_filter: &OwnerFilter,
+    ingest_key: Option<&str>,
+    moved_from_cwd: Option<&str>,
+    authorization: &HookProjectAuthorization,
+) -> StoreResult<HookSessionAdmission> {
+    admit_hook_session_event_inner(
+        conn,
+        session,
+        obs,
+        owner_filter,
+        ingest_key,
+        moved_from_cwd,
+        Some(authorization),
+    )
+}
+
+fn admit_hook_session_event_inner(
+    conn: &mut Connection,
+    session: &NewSession,
+    obs: &NewObservation,
+    owner_filter: &OwnerFilter,
+    ingest_key: Option<&str>,
+    moved_from_cwd: Option<&str>,
+    authorization: Option<&HookProjectAuthorization>,
+) -> StoreResult<HookSessionAdmission> {
     if obs.session_id != session.id
         || obs.workspace_id != session.workspace_id
         || obs.project_id != session.project_id
@@ -2603,6 +2654,28 @@ pub fn admit_hook_session_event(
         params![session.id.as_bytes()],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
     ).optional()?;
+    if let Some(authorization) = authorization {
+        let authorize = |workspace_id, project_id| -> StoreResult<()> {
+            crate::project_authz::resolve_project_authz(
+                &tx,
+                workspace_id,
+                project_id,
+                &crate::ProjectPrincipal::user(authorization.viewer),
+                true,
+            )?
+            .authorize(crate::ProjectAccess::Write)
+            .map_err(|_| StoreError::ProjectWriteForbidden)
+        };
+        authorize(session.workspace_id, session.project_id)?;
+        if (session_end || authorization.writes_session_scope || moved_from_cwd.is_some())
+            && let Some((workspace, project, ..)) = &existing
+        {
+            authorize(
+                WorkspaceId::from_slice(workspace)?,
+                ProjectId::from_slice(project)?,
+            )?;
+        }
+    }
     let (owner, ended_at, ended_count, stored_cwd, scope) = match existing {
         Some((ws, project, agent, owner, ended_at, ended_count, cwd)) => {
             // Corrupt owners fail closed, including for Any recovery. Owner

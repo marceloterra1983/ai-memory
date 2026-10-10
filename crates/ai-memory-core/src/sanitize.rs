@@ -7,9 +7,9 @@
 //!   subsystem that writes user-facing text to disk (hook ingress,
 //!   consolidator, wiki writer, MCP `memory_handoff_begin`).
 //! - [`Sanitized<T>`] is the typed boundary: the *only* way to construct
-//!   one is through [`Sanitized::new`], which forces the caller to hand
-//!   over an already-scrubbed value. Without this, you can't accidentally
-//!   persist raw text by skipping the sanitizer.
+//!   one is through [`Sanitized::new`], which scrubs and bounds the title
+//!   and body with the supplied sanitizer. Its private field prevents callers
+//!   from wrapping raw observations without that step.
 //!
 //! ## What we redact
 //!

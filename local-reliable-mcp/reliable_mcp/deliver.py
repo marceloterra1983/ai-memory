@@ -107,7 +107,8 @@ def _online(box, intent: dict, client: Client) -> dict:
         if was_unknown:
             if kind == "present" and matches(intent, page) and not _explicit_guard_blocks(intent, kind, page):
                 return _deliver(box, intent, page["page_id"], None)
-            if kind == "present":
+            # An explicit expected head supplies the baseline for an atomic CAS.
+            if kind == "present" and intent["cas"]["mode"] != "expected_page_id":
                 return _conflict(box, intent, page["page_id"])
     return _send_observed(box, intent, client, kind, page)
 

@@ -18,7 +18,7 @@ from tests.fake_backend import Backend
 from tests.http import file_mode, post_json, request, rpc, tool_text
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = Path("/home/marce/.agents/tools/ai-memory/install-ai-memory.sh")
+INSTALLER = ROOT / "tests" / "fixtures" / "install-ai-memory-before-ready.sh"
 SECRET_BODY = "SECRET-BODY-do-not-log"
 SECRET_TOKEN = "Bearer SECRET-TOKEN-do-not-log"
 
@@ -178,6 +178,138 @@ class IngressCase(unittest.TestCase):
         page = self.backend.store.pages[("demo", "demo", "notes/lost.md")]
         self.assertEqual(intent["status"], "delivered")
         self.assertEqual(intent["page_id"], page["page_id"])
+
+    def _restart_relay_while_backend_offline(self):
+        from reliable_mcp.relay import Relay
+
+        self.relay.stop()
+        self.relay = Relay(
+            listen="127.0.0.1:0",
+            backend=self.backend.url,
+            outbox=self.outbox,
+            auto_drain_seconds=0,
+        )
+        self.relay.start()
+        self.mcp = f"{self.relay.url}/mcp"
+
+    def test_offline_expected_update_survives_restart_and_writes_once(self):
+        path = "notes/offline-update.md"
+        old = self.backend.store.force_put("demo", "demo", path, "# Old\n\nold")
+        self.backend.stop()
+        body = "# Updated\n\nexact update\n"
+        metadata = {
+            "title": "Offline update",
+            "tier": "procedural",
+            "pinned": True,
+            "tags": ["offline", "cas"],
+            "expires_at": "2027-01-01T00:00:00Z",
+        }
+        receipt = _write(self, body, path=path, expected_page_id=old["page_id"], **metadata)
+        self.assertEqual(receipt["status"], "PENDING")
+        self.assertIsNone(receipt["page_id"])
+        intent_path = self.outbox / "ops" / receipt["operation_id"] / "intent.json"
+        intent = json.loads(intent_path.read_text())
+        guard = {"mode": "expected_page_id", "expected_page_id": old["page_id"]}
+        self.assertEqual(intent["baseline"], {"state": "unknown"})
+        self.assertEqual(intent["cas"], guard)
+        self.assertEqual(intent["client_cas"], guard)
+        self.assertFalse(intent.get("write_started"))
+        self._restart_relay_while_backend_offline()
+        self.backend.restart()
+
+        self.assertEqual(self.relay.drain(), 1)
+        intent = json.loads(intent_path.read_text())
+        self.assertEqual(intent["status"], "delivered")
+        self.assertTrue(intent["write_started"])
+        page = self.backend.store.pages[("demo", "demo", path)]
+        self.assertEqual(page["body"], body)
+        for key, value in metadata.items():
+            self.assertEqual(page[key], value)
+        self.assertEqual(str(uuid.UUID(intent["page_id"])), page["page_id"])
+        self.assertNotEqual(page["page_id"], old["page_id"])
+        self.assertEqual(intent["checkpoint"], "synth")
+        self.assertEqual(self.backend.store.write_count, 1)
+        writes = [item for item in self.backend.store.captured if _is_write(item)]
+        self.assertEqual(len(writes), 1)
+        arguments = json.loads(writes[0]["body"])["params"]["arguments"]
+        self.assertEqual(arguments["expected_page_id"], old["page_id"])
+        self.assertNotIn("create_only", arguments)
+        self.assertEqual(self.relay.drain(), 0)
+        self.assertEqual(self.backend.store.write_count, 1)
+        confirmed = _write(self, body, path=path, expected_page_id=old["page_id"], **metadata)
+        self.assertEqual(confirmed["status"], "DELIVERED")
+        self.assertEqual(confirmed["page_id"], page["page_id"])
+        self.assertEqual(self.backend.store.write_count, 1)
+
+    def test_offline_restart_refuses_unguarded_create_only_stale_and_missing_heads(self):
+        body = "# Queued\n\nours"
+        cases = [
+            ("auto", {}, "# Other\n\ntheirs"),
+            ("null", {"expected_page_id": None}, "# Other\n\ntheirs"),
+            ("create", {"create_only": True}, body),
+            ("stale", {"expected_page_id": str(uuid.uuid4())}, body),
+            ("missing", {"expected_page_id": str(uuid.uuid4())}, None),
+        ]
+        self.backend.stop()
+        operations = []
+        for name, guard, current_body in cases:
+            path = f"notes/offline-{name}.md"
+            if name == "stale":
+                old = self.backend.store.force_put("demo", "demo", path, "# Old\n\nold")
+                guard = {"expected_page_id": old["page_id"]}
+            receipt = _write(self, body, path=path, **guard)
+            self.assertEqual(receipt["status"], "PENDING")
+            current = None
+            if current_body is not None:
+                current = self.backend.store.force_put("demo", "demo", path, current_body)
+            operations.append((name, path, receipt["operation_id"], current))
+        self._restart_relay_while_backend_offline()
+        self.backend.restart()
+
+        self.assertEqual(self.relay.drain(), 0)
+        for name, path, operation_id, current in operations:
+            with self.subTest(guard=name):
+                intent = json.loads((self.outbox / "ops" / operation_id / "intent.json").read_text())
+                self.assertEqual(intent["status"], "conflict")
+                self.assertEqual(intent["reason"], "divergent_head")
+                self.assertIsNone(intent["page_id"])
+                self.assertFalse(intent.get("write_started"))
+                self.assertEqual(intent["current_head_page_id"], current["page_id"] if current else None)
+                self.assertEqual(self.backend.store.pages.get(("demo", "demo", path)), current)
+        self.assertEqual(self.backend.store.write_count, 0)
+        self.assertFalse(any(_is_write(item) for item in self.backend.store.captured))
+        self.assertEqual(self.relay.drain(), 0)
+
+    def test_offline_expected_update_keeps_atomic_cas_after_restart(self):
+        path = "notes/offline-cas-race.md"
+        old = self.backend.store.force_put("demo", "demo", path, "# Old\n\nold")
+        self.backend.stop()
+        receipt = _write(self, "# New\n\nnew", path=path, expected_page_id=old["page_id"])
+        self.assertEqual(receipt["status"], "PENDING")
+        self._restart_relay_while_backend_offline()
+        self.backend.restart()
+        self.backend.store.allow_write.clear()
+        result = {}
+
+        def drain():
+            result["delivered"] = self.relay.drain()
+
+        thread = threading.Thread(target=drain)
+        thread.start()
+        try:
+            self.assertTrue(self.backend.store.write_entered.wait(5))
+            moved = self.backend.store.force_put("demo", "demo", path, "# Moved\n\nmoved")
+        finally:
+            self.backend.store.allow_write.set()
+            thread.join(6)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["delivered"], 0)
+        intent = json.loads((self.outbox / "ops" / receipt["operation_id"] / "intent.json").read_text())
+        self.assertEqual(intent["status"], "conflict")
+        self.assertTrue(intent["write_started"])
+        self.assertEqual(intent["current_head_page_id"], moved["page_id"])
+        self.assertEqual(self.backend.store.pages[("demo", "demo", path)], moved)
+        self.assertEqual(self.backend.store.write_count, 0)
 
     def test_unknown_baseline_does_not_overwrite_divergent_head(self):
         self.backend.stop()

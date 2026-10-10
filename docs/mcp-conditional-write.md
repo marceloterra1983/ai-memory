@@ -53,6 +53,12 @@ transaction check; the guarded call restores the file it replaced. Omitting
 both guards keeps the unconditional write; that write takes the same flock
 so its rollback cannot restore bytes over another holder.
 
+`memory_read_page` marks verified absence with `error.data.code`:
+`page_not_found` for an absent page, or `scope_not_found` for an unknown
+scope. The existing error codes and messages remain unchanged; callers
+must not interpret message text as absence. Authorization and I/O errors
+do not carry these markers.
+
 A lost race does not create a version and does not change markdown, links, or
 evidence. The JSON-RPC error is `-32009` with data:
 

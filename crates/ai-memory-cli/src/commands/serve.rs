@@ -2470,23 +2470,24 @@ async fn configure_embedder(
              docs/local-embeddings.md if this host has no network)",
         )?;
     }
-    let built: ai_memory_llm::LlmResult<Arc<dyn Embedder>> = if !config.dream.scopes.is_empty()
+    let mut cfg = cfg;
+    if !config.dream.scopes.is_empty()
         && cfg.provider == ai_memory_llm::EmbedderChoice::OpenAiCompat
     {
-        let endpoint = cfg
+        if cfg
             .base_url
             .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("DREAM requires explicit local embedding endpoint"))?;
-        ai_memory_llm::OpenAiCompatEmbedder::new_local(endpoint, cfg.model.clone(), cfg.dim).map(
-            |embedder| {
-                Arc::new(
-                    embedder.with_prefixes(cfg.query_prefix.clone(), cfg.document_prefix.clone()),
-                ) as Arc<dyn Embedder>
-            },
-        )
-    } else {
-        build_embedder(cfg)
-    };
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            anyhow::bail!("DREAM requires explicit local embedding endpoint");
+        }
+        // Dream documents stay on the local client. The query URL, when set,
+        // is validated and applied once inside `build_embedder`.
+        cfg.local_only = true;
+    }
+    let built = build_embedder(cfg);
     let embedder = match built {
         Ok(e) => e,
         Err(e) if defaulted => {

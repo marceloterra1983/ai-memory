@@ -26,6 +26,13 @@ run_autowire = false
 # also serves the explicit scoped `embed` command after an applied batch.
 embedding_provider = "openai-compat"
 embedding_base_url = "http://127.0.0.1:8002/v1"
+# Optional. Queries only; dream document embeddings stay on embedding_base_url.
+# In dream mode this URL must itself be a literal loopback endpoint:
+# the factory validates it before building, and queries are served by the
+# same bounded local client as documents (no truncate, no retry, no
+# redirect, 8 KiB request cap). A remote or non-literal query URL fails
+# configuration.
+# embedding_query_base_url = "http://127.0.0.1:18003/v1"
 embedding_model = "REPLACE_WITH_VERIFIED_LOCAL_EMBEDDING_MODEL"
 embedding_dim = 1024
 
@@ -64,7 +71,8 @@ Draft requests use a dedicated credential-free OpenAI-compatible client, with
 literal loopback endpoints, no redirects, proxies, retries or provider fallback.
 The semantic endpoint is fixed to `http://127.0.0.1:8787/v1/systemone`; port 8789
 is rejected. Configuring dream also selects the restricted transport for the
-local OpenAI-compatible embedder. Admission remains required; dream refuses
+local OpenAI-compatible embedder: document embeddings and any configured
+query endpoint both stay on that bounded local path. Admission remains required; dream refuses
 remote admission destinations and any admission/sanitizer mutation of a gated
 draft. Local service operators must verify the actual backend behind each alias.
 

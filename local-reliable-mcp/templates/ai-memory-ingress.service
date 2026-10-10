@@ -1,0 +1,12 @@
+[Unit]
+Description=ai-memory reliable MCP ingress
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.agents/tools/ai-memory/reliable-mcp/reliable-mcp serve --listen 127.0.0.1:49374 --backend http://127.0.0.1:49376
+Restart=on-failure
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

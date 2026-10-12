@@ -3334,18 +3334,31 @@ async fn process_authorized(
         // Other harnesses are not gated: Claude Code also sets `agent_type` on
         // a top-level `--agent` session, which still owns its baton.
         let child_session = env.agent == AgentKind::OpenCode && body_is_subagent(&env.raw);
-        let handoff = (!managed && !child_session).then(|| {
-            build_auto_handoff(
-                page_ws,
-                page_proj,
-                env.agent,
-                session_id,
-                env.cwd.clone(),
-                &observations,
-                handoff_owner,
-                turn_checkpoint,
-            )
-        });
+        let handoff = (!managed && !child_session)
+            .then(|| {
+                build_auto_handoff(
+                    page_ws,
+                    page_proj,
+                    env.agent,
+                    session_id,
+                    env.cwd.clone(),
+                    &observations,
+                    handoff_owner,
+                    turn_checkpoint,
+                )
+            })
+            .filter(|handoff| {
+                // A prompt echo or tool inventory is history, not pending work.
+                // Live turn checkpoints still carry the native session's context.
+                turn_checkpoint
+                    || handoff
+                        .next_steps
+                        .iter()
+                        .any(|step| !step.trim().is_empty() && !step.starts_with("Tools used:"))
+                    || handoff.open_questions.iter().any(|question| {
+                        !question.trim().is_empty() && !question.starts_with("Continue from:")
+                    })
+            });
         // Automatic SessionEnd handoffs are the bulk of handoff traffic;
         // skipping admission here would leave a webhook seeing only the
         // MCP-initiated minority and silently not enforcing its policy.
@@ -4343,7 +4356,7 @@ mod tests {
                     },
                     serde_json::json!({
                         "session_id": session.to_string(),
-                        "prompt": "preserve completed fixture work",
+                        "prompt": "Which fixture work remains to be completed?",
                         "turn_checkpoint": name == "stop",
                     }),
                 )
@@ -6679,7 +6692,7 @@ mod tests {
                 serde_json::json!({
                     "session_id": sid,
                     "cwd": cwd.to_string_lossy(),
-                    "prompt": "finish cleanly",
+                    "prompt": "Which checks remain before finishing?",
                 }),
             )
         };
@@ -9852,6 +9865,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_end_without_actionable_content_does_not_open_handoff() {
+        for (prompt, tool, stop) in [
+            (Some("responda ok"), None, true),
+            (Some("Canary word"), Some("Bash"), true),
+            (Some("tipo: revisar\nesforço: 2"), Some("Read"), true),
+            (Some("ok"), None, true),
+            (None, Some("Bash"), true),
+            (None, Some("Bash"), false),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let state = make_state(&tmp).await;
+            let session = SessionId::new().to_string();
+            for event in ["user-prompt", "post-tool-use", "stop", "session-end"] {
+                if (event == "user-prompt" && prompt.is_none())
+                    || (event == "post-tool-use" && tool.is_none())
+                    || (event == "stop" && !stop)
+                {
+                    continue;
+                }
+                let env = HookEnvelope::from_query_and_body(
+                    HookQuery {
+                        event: event.into(),
+                        agent: Some("claude-code".into()),
+                        ..Default::default()
+                    },
+                    serde_json::json!({
+                        "session_id": session,
+                        "prompt": prompt,
+                        "tool_name": tool,
+                    }),
+                );
+                process(&state, env, None, Vec::new()).await.unwrap();
+            }
+            assert!(
+                !open_handoff_exists(&state).await,
+                "a completed session with prompt {prompt:?} and tool {tool:?} has no actionable continuation",
+            );
+            assert!(!session_pages(&state).await.is_empty());
+            assert_eq!(
+                state
+                    .reader
+                    .latest_completed_session_for_project(state.workspace_id, state.project_id)
+                    .await
+                    .unwrap(),
+                Some(SessionId::from_native(&session)),
+                "skipping the baton must still close and summarize the session",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_end_actionable_handoffs_remain_scoped() {
+        for (prompt, tool, stop) in [
+            ("Which migration remains?", None, true),
+            ("Apply the migration", Some("Edit"), false),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let state = make_state(&tmp).await;
+            let session = SessionId::new().to_string();
+            for event in ["user-prompt", "post-tool-use", "stop", "session-end"] {
+                if (event == "post-tool-use" && tool.is_none()) || (event == "stop" && !stop) {
+                    continue;
+                }
+                let env = HookEnvelope::from_query_and_body(
+                    HookQuery {
+                        event: event.into(),
+                        agent: Some("claude-code".into()),
+                        ..Default::default()
+                    },
+                    serde_json::json!({
+                        "session_id": session,
+                        "prompt": prompt,
+                        "tool_name": tool,
+                    }),
+                );
+                process(&state, env, None, Vec::new()).await.unwrap();
+            }
+            let foreign_ws = state
+                .writer
+                .get_or_create_workspace("foreign")
+                .await
+                .unwrap();
+            let foreign_proj = state
+                .writer
+                .get_or_create_project(state.workspace_id, "foreign", None)
+                .await
+                .unwrap();
+            for (ws, proj) in [
+                (state.workspace_id, foreign_proj),
+                (foreign_ws, state.project_id),
+            ] {
+                assert!(
+                    state
+                        .reader
+                        .startup_handoff(
+                            ws,
+                            proj,
+                            None,
+                            ai_memory_core::OwnerFilter::Any,
+                            Timestamp::now()
+                        )
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "an actionable baton must not be readable from another project or workspace",
+                );
+            }
+            let handoff = state
+                .reader
+                .startup_handoff(
+                    state.workspace_id,
+                    state.project_id,
+                    None,
+                    ai_memory_core::OwnerFilter::Any,
+                    Timestamp::now(),
+                )
+                .await
+                .unwrap()
+                .expect("a concrete question or file work interrupted before Stop keeps a baton");
+            assert_eq!(
+                handoff.origin.from_session_id,
+                Some(SessionId::from_native(&session))
+            );
+            assert!(!handoff.content.open_questions.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn lifecycle_only_session_ends_without_page_handoff_or_consolidation() {
         let tmp = TempDir::new().unwrap();
         let mut state = make_state(&tmp).await;
@@ -9957,7 +10098,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let state = make_state(&tmp).await;
         let sid = "13131313-1313-1313-1313-131313131313";
-        for event in ["session-start", "pre-tool-use", "session-end"] {
+        for event in ["session-start", "post-tool-use", "session-end"] {
             let env = HookEnvelope::from_query_and_body(
                 HookQuery {
                     event: event.into(),
@@ -9995,7 +10136,7 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some(),
-            "tool activity is substantive even without a user prompt"
+            "file activity without a normal Stop keeps a baton even without a user prompt"
         );
     }
 
@@ -10337,7 +10478,7 @@ mod tests {
                 serde_json::json!({
                     "session_id": session,
                     "agent_type": "reviewer",
-                    "prompt": "Review the patch",
+                    "prompt": "Which patch issues remain unresolved?",
                     "_ai_memory_assistant": { "version": 1, "excerpt": "Found two bugs" },
                 }),
             );
@@ -10962,6 +11103,7 @@ mod tests {
                 serde_json::json!({
                     "session_id": managed_session.to_string(),
                     "cwd": tmp.path(),
+                    "prompt": "Which step remains?",
                 }),
             );
             process(&state, envelope, None, Vec::new()).await.unwrap();
@@ -10995,6 +11137,7 @@ mod tests {
                 serde_json::json!({
                     "session_id": direct_session.to_string(),
                     "cwd": tmp.path(),
+                    "prompt": "Which step remains?",
                 }),
             );
             process(&state, envelope, None, Vec::new()).await.unwrap();
@@ -11363,6 +11506,10 @@ mod tests {
     }
 
     fn session_envelope(event: &str, session: &str, cwd: &str) -> HookEnvelope {
+        let mut body = serde_json::json!({ "session_id": session, "cwd": cwd });
+        if matches!(HookEvent::parse(event), HookEvent::UserPrompt) {
+            body["prompt"] = serde_json::json!("Which step remains?");
+        }
         HookEnvelope::from_query_and_body(
             HookQuery {
                 event: event.into(),
@@ -11372,7 +11519,7 @@ mod tests {
                 project: Some("scratch".into()),
                 ..Default::default()
             },
-            serde_json::json!({ "session_id": session, "cwd": cwd }),
+            body,
         )
     }
 
@@ -11457,8 +11604,7 @@ mod tests {
             "the webhook refused the handoff, so none may be inserted",
         );
 
-        // Default config (no admission chain at all) keeps creating the baton —
-        // the behaviour every single-operator install has today.
+        // With no admission chain, the same actionable session keeps its baton.
         let default_tmp = TempDir::new().unwrap();
         let default_state = make_state(&default_tmp).await;
         let default_cwd = default_tmp.path().to_string_lossy().into_owned();
@@ -11558,7 +11704,11 @@ mod tests {
                     url: format!(
                         "http://h/hook?event={event}&agent=claude-code&workspace=default&project=scratch"
                     ),
-                    body: serde_json::json!({ "session_id": session, "cwd": cwd }),
+                    body: serde_json::json!({
+                        "session_id": session,
+                        "cwd": cwd,
+                        "prompt": "Which step remains?",
+                    }),
                 })
                 .collect::<Vec<_>>();
             let mut headers = HeaderMap::new();
@@ -12219,7 +12369,7 @@ mod tests {
                     ingest_key: key.map(str::to_owned),
                     ..Default::default()
                 },
-                serde_json::json!({"session_id": sid.to_string(), "prompt": "finish work"}),
+                serde_json::json!({"session_id": sid.to_string(), "prompt": "Which work remains unfinished?"}),
             )
         };
         process(&state, fire("user-prompt-submit", None), None, Vec::new())
@@ -14856,6 +15006,7 @@ mod tests {
                     },
                     serde_json::json!({
                         "session_id": sid.to_string(), "cwd": "/repo", "turn_id": "turn-1",
+                        "prompt": "Which checks remain for the native tool result?",
                         "hook_event_name": event, "tool_name": "Bash",
                         "tool_use_id": "call-native-1", "tool_input": {"command": "PRIVATE_INPUT"},
                         "tool_response": {"content": [{"type": "text", "text": format!("{project}: PRIVATE_CONTENT")} ]},
@@ -14864,6 +15015,7 @@ mod tests {
             };
             for event in [
                 "SessionStart",
+                "UserPromptSubmit",
                 "PreToolUse",
                 "PostToolUse",
                 "PreToolUse",
@@ -14888,7 +15040,7 @@ mod tests {
             let observations = state.reader.observations_for_session(sid).await.unwrap();
             assert_eq!(
                 observations.len(),
-                4,
+                5,
                 "tool retries must not append observations"
             );
             assert!(
@@ -15449,7 +15601,7 @@ mod tests {
             ),
             (
                 "user-prompt-submit",
-                serde_json::json!({ "session_id": session_id, "cwd": "/repo", "prompt": "safe observation" }),
+                serde_json::json!({ "session_id": session_id, "cwd": "/repo", "prompt": "Which safe observation still needs verification?" }),
             ),
         ] {
             process(

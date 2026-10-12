@@ -16,10 +16,15 @@ is not a general prompt/output DLP filter.
 
 ## Cross-agent handoff
 
-You normally do not create handoffs by hand. With lifecycle hooks
-installed, session-end capture writes the handoff and the next
-session-start hook fetches it. Manual handoffs are project-wide and take
-precedence over automatic SessionEnd handoffs. Among automatic handoffs that
+With lifecycle hooks installed, a substantive SessionEnd writes a session
+summary and publishes an automatic handoff only when its generated questions
+or next steps contain an actionable continuation signal. A `Tools used: …`
+list or `Continue from: …` prompt echo alone does not qualify; the history
+remains in the session summary without adding an open handoff. OpenCode's
+completed-turn checkpoints retain their continuation handoffs while the native
+session remains open. The next session-start hook fetches a pending handoff.
+Manual handoffs are project-wide and take precedence over automatic SessionEnd
+handoffs. Among automatic handoffs that
 match the receiving directory by path boundary, the newest is delivered;
 creating a new automatic handoff expires prior open automatic handoffs from
 that exact directory, and acceptance expires older matching automatic

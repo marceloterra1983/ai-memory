@@ -235,9 +235,11 @@ mod slow {
 
         async fn seed_handoff(&self) {
             let sid = SessionId::new();
+            let mut prompt = self.event(sid, "orchestrator-a", "prompt", "user-prompt-submit");
+            prompt["body"]["prompt"] = json!(format!("{MARKER}: Which step remains?"));
             self.batch(&[
                 self.event(sid, "orchestrator-a", "start", "session-start"),
-                self.event(sid, "orchestrator-a", "prompt", "user-prompt-submit"),
+                prompt,
                 self.event(sid, "orchestrator-a", "end", "session-end"),
             ])
             .await;

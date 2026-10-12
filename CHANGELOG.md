@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scope/access/latest/expiry guards intact, and exposed the negated lexical
   strength used by RRF in query explanations.
   (local-20261013; private integration, no upstream issue opened)
+- Stopped SessionEnd from opening automatic handoffs containing only tool
+  history or a prompt echo, while preserving session summaries, actionable
+  continuations, manual-handoff precedence and OpenCode turn checkpoints.
+  (local-20261012; private integration, no upstream issue opened)
 - Retained the native-hook worker's open lock descriptor while waiting for a
   preservation guard handoff, and closed its lock and database cleanly when
   cancelled before acquisition. (local-20261010; private integration, no upstream issue opened)

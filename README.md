@@ -325,7 +325,8 @@ wrapper automatically uses Podman when Docker is not installed. Set
 
 On Linux/macOS, that's it. Start a Claude Code session as usual - every
 prompt and tool call now lands in ai-memory, and the next session you
-open in this project will see a handoff with where you left off.
+open in this project receives a pending handoff when there is actionable
+continuation work. Session history remains in summary pages.
 On macOS the native binary is the recommended path when you do not need
 Docker — either the [menu bar app](#macos-menu-bar-app) above or a
 [release tarball / launchd agent](docs/macos.md). Later updates for that
@@ -374,7 +375,8 @@ timestamped backups next to any file they touch.
 
 Day to day, you mostly do not think about ai-memory. Hooks capture
 prompts, tool calls, and session boundaries; session end turns them into
-readable wiki pages; the next session starts with a handoff.
+readable wiki pages; actionable continuation signals create a handoff for the
+next session. A tool list or prompt echo alone does not fill the handoff queue.
 
 - Ask "where did we leave off?" to continue from the pending handoff.
 - Ask "have we discussed X?" or "search memory for Y" to query the wiki.

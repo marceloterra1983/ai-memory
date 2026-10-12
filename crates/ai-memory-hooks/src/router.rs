@@ -3347,18 +3347,7 @@ async fn process_authorized(
                     turn_checkpoint,
                 )
             })
-            .filter(|handoff| {
-                // A prompt echo or tool inventory is history, not pending work.
-                // Live turn checkpoints still carry the native session's context.
-                turn_checkpoint
-                    || handoff
-                        .next_steps
-                        .iter()
-                        .any(|step| !step.trim().is_empty() && !step.starts_with("Tools used:"))
-                    || handoff.open_questions.iter().any(|question| {
-                        !question.trim().is_empty() && !question.starts_with("Continue from:")
-                    })
-            });
+            .flatten();
         // Automatic SessionEnd handoffs are the bulk of handoff traffic;
         // skipping admission here would leave a webhook seeing only the
         // MCP-initiated minority and silently not enforcing its policy.
@@ -3537,6 +3526,49 @@ fn is_ephemeral_session(observations: &[ai_memory_core::Observation]) -> bool {
     })
 }
 
+/// Continuation signals stay separate from the text presented to the receiver.
+enum AutoHandoffItems {
+    UnresolvedQuestion(String),
+    InterruptedFileWork,
+    MidTaskExit(String),
+    PromptEcho(String),
+    ToolInventory(Vec<String>),
+    None,
+}
+
+impl AutoHandoffItems {
+    fn has_pending_work(&self) -> bool {
+        matches!(
+            self,
+            Self::UnresolvedQuestion(_) | Self::InterruptedFileWork | Self::MidTaskExit(_)
+        )
+    }
+
+    fn into_items(self) -> Vec<String> {
+        match self {
+            Self::UnresolvedQuestion(prompt) => {
+                vec![format!(
+                    "Unresolved question: {}",
+                    cap_handoff_text(&prompt)
+                )]
+            }
+            Self::InterruptedFileWork => vec![
+                "Session ended without a normal stop while working with files".into(),
+                "Check the working tree for uncommitted or unverified changes".into(),
+            ],
+            Self::MidTaskExit(prompt) => vec![format!(
+                "Continue from (mid-task exit): {}",
+                cap_handoff_text(&prompt)
+            )],
+            Self::PromptEcho(prompt) => {
+                vec![format!("Continue from: {}", cap_handoff_text(&prompt))]
+            }
+            Self::ToolInventory(tools) => vec![format!("Tools used: {}", tools.join(", "))],
+            Self::None => Vec::new(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_auto_handoff(
     workspace_id: WorkspaceId,
@@ -3547,7 +3579,7 @@ fn build_auto_handoff(
     observations: &[ai_memory_core::Observation],
     owner_user: Option<String>,
     turn_checkpoint: bool,
-) -> NewHandoff {
+) -> Option<NewHandoff> {
     // Prefer obs.body (the full prompt) over obs.title (first-line +
     // truncated to 80 chars for log/list display). When body is
     // empty fall back to title so we never produce an empty entry.
@@ -3595,6 +3627,19 @@ fn build_auto_handoff(
     }
     let first_prompt = prompts.first().cloned();
     let last_prompt = prompts.last().cloned();
+    let open_questions = derive_open_questions(observations, &last_prompt);
+    let next_steps = if tools.is_empty() {
+        AutoHandoffItems::None
+    } else {
+        AutoHandoffItems::ToolInventory(tools.into_iter().map(str::to_owned).collect())
+    };
+    // A prompt echo or tool inventory is history, not pending work. Only
+    // OpenCode emits live turn checkpoints, which preserve native context.
+    let should_open =
+        turn_checkpoint || open_questions.has_pending_work() || next_steps.has_pending_work();
+    if !should_open {
+        return None;
+    }
     let mut summary = match (&first_prompt, &last_prompt) {
         (Some(first), Some(last)) if first == last => format!("Session focused on: {}", cap(first)),
         (Some(first), Some(last)) => format!("Started: {}\n\nLast: {}", cap(first), cap(last),),
@@ -3629,17 +3674,9 @@ fn build_auto_handoff(
             .into_iter()
             .collect()
     } else {
-        derive_open_questions(observations, &last_prompt)
+        open_questions.into_items()
     };
-    let next_steps = if tools.is_empty() {
-        Vec::new()
-    } else {
-        vec![format!(
-            "Tools used: {}",
-            tools.into_iter().collect::<Vec<_>>().join(", ")
-        )]
-    };
-    NewHandoff {
+    Some(NewHandoff {
         workspace_id,
         project_id,
         from_session_id: Some(session_id),
@@ -3648,10 +3685,10 @@ fn build_auto_handoff(
         cwd: cwd.map(std::path::PathBuf::from),
         summary,
         open_questions,
-        next_steps,
+        next_steps: next_steps.into_items(),
         files_touched: Vec::new(),
         owner_user,
-    }
+    })
 }
 
 /// Derive the `open_questions` field for an automatic SessionEnd handoff
@@ -3666,16 +3703,15 @@ fn build_auto_handoff(
 ///
 /// Heuristics (first match wins):
 /// 1. Last prompt ends with `?` or `？` → tag as an unresolved question.
-/// 2. Last tool was an edit/write/patch with no subsequent Stop → the
-///    session ended before verification; advise the receiver to run tests.
+/// 2. Last tool was file activity with no Stop → flag an interrupted session.
 /// 3. Has Stop but no SessionEnd → mid-task exit; use the last
 ///    *substantive* prompt (filtering acknowledgments).
-/// 4. Normal end → last substantive prompt as "Continue from: …".
-/// 5. Fallback → empty Vec (same as the old behaviour when no prompts).
+/// 4. Normal end → last substantive prompt as a non-pending echo.
+/// 5. Fallback → no items (same as the old behaviour when no prompts).
 fn derive_open_questions(
     observations: &[ai_memory_core::Observation],
     last_prompt: &Option<String>,
-) -> Vec<String> {
+) -> AutoHandoffItems {
     let last_of_kind = |kind: ObservationKind| -> Option<&ai_memory_core::Observation> {
         observations.iter().rev().find(|o| o.kind == kind)
     };
@@ -3691,7 +3727,7 @@ fn derive_open_questions(
     if let Some(p) = last_prompt_obs {
         let body = p.body.trim();
         if body.ends_with('?') || body.ends_with('？') {
-            return vec![format!("Unresolved question: {}", cap_handoff_text(body))];
+            return AutoHandoffItems::UnresolvedQuestion(body.to_owned());
         }
     }
 
@@ -3715,10 +3751,7 @@ fn derive_open_questions(
         let touched_files =
             crate::payload::tool_family_from_title(&tool.title) == Some(ToolFamily::File);
         if touched_files && last_stop.is_none() {
-            return vec![
-                "Session ended without a normal stop while working with files".into(),
-                "Check the working tree for uncommitted or unverified changes".into(),
-            ];
+            return AutoHandoffItems::InterruptedFileWork;
         }
     }
 
@@ -3728,18 +3761,15 @@ fn derive_open_questions(
         if !body.is_empty() && !is_acknowledgment(body) {
             // Heuristic 3 signal: no SessionEnd → flag as mid-task.
             if !has_session_end && last_stop.is_some() {
-                return vec![format!(
-                    "Continue from (mid-task exit): {}",
-                    cap_handoff_text(body)
-                )];
+                return AutoHandoffItems::MidTaskExit(body.to_owned());
             }
             // Heuristic 4: normal end.
-            return vec![format!("Continue from: {}", cap_handoff_text(body))];
+            return AutoHandoffItems::PromptEcho(body.to_owned());
         }
     }
 
     // Fallback: no substantive prompt → empty (same as old behaviour).
-    Vec::new()
+    AutoHandoffItems::None
 }
 
 /// Whether a prompt is a pure acknowledgment with no substantive content.
@@ -4356,7 +4386,11 @@ mod tests {
                     },
                     serde_json::json!({
                         "session_id": session.to_string(),
-                        "prompt": "Which fixture work remains to be completed?",
+                        "prompt": if event == "stop" {
+                            "preserve completed fixture work"
+                        } else {
+                            "Which fixture work remains to be completed?"
+                        },
                         "turn_checkpoint": name == "stop",
                     }),
                 )
@@ -9916,10 +9950,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_end_imperative_with_edit_and_normal_stop_does_not_open_handoff() {
+        for tool in ["Edit", "Write"] {
+            let tmp = TempDir::new().unwrap();
+            let state = make_state(&tmp).await;
+            let session = SessionId::new().to_string();
+            for event in ["user-prompt", "post-tool-use", "stop", "session-end"] {
+                let env = HookEnvelope::from_query_and_body(
+                    HookQuery {
+                        event: event.into(),
+                        agent: Some("claude-code".into()),
+                        ..Default::default()
+                    },
+                    serde_json::json!({
+                        "session_id": session,
+                        "prompt": "Apply the migration",
+                        "tool_name": tool,
+                    }),
+                );
+                process(&state, env, None, Vec::new()).await.unwrap();
+            }
+            assert!(
+                !open_handoff_exists(&state).await,
+                "an imperative followed by {tool} and a normal Stop is completed work",
+            );
+            assert!(!session_pages(&state).await.is_empty());
+            assert_eq!(
+                state
+                    .reader
+                    .latest_completed_session_for_project(state.workspace_id, state.project_id)
+                    .await
+                    .unwrap(),
+                Some(SessionId::from_native(&session)),
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn session_end_actionable_handoffs_remain_scoped() {
         for (prompt, tool, stop) in [
             ("Which migration remains?", None, true),
             ("Apply the migration", Some("Edit"), false),
+            ("Apply the migration", Some("Write"), false),
         ] {
             let tmp = TempDir::new().unwrap();
             let state = make_state(&tmp).await;
@@ -12757,16 +12829,21 @@ mod tests {
             })
             .await
             .unwrap();
-        let handoff = build_auto_handoff(
+        // A legacy prompt-echo baton can still need tail recovery, even though
+        // the current generator would no longer open it.
+        let handoff = NewHandoff {
             workspace_id,
             project_id,
-            AgentKind::Codex,
-            session_id,
-            None,
-            &observations,
-            None,
-            false,
-        );
+            from_agent: AgentKind::Codex,
+            from_session_id: Some(session_id),
+            to_agent: None,
+            cwd: None,
+            summary: "Session focused on: finish".into(),
+            open_questions: vec!["Continue from: finish".into()],
+            next_steps: Vec::new(),
+            files_touched: Vec::new(),
+            owner_user: None,
+        };
         state
             .writer
             .end_session_with_handoff(session_id, Some(page_id), handoff)
@@ -16126,7 +16203,7 @@ mod tests {
             mk_obs(ObservationKind::Stop, "stop", ""),
         ];
         let last = Some("what is the return type?".to_string());
-        let q = derive_open_questions(&obs, &last);
+        let q = derive_open_questions(&obs, &last).into_items();
         assert_eq!(q.len(), 1);
         assert!(q[0].starts_with("Unresolved question:"));
         assert!(q[0].contains("return type"));
@@ -16148,7 +16225,7 @@ mod tests {
             // No Stop observation — session ended mid-task.
         ];
         let last = Some("fix the bug".to_string());
-        let q = derive_open_questions(&obs, &last);
+        let q = derive_open_questions(&obs, &last).into_items();
         assert_eq!(q.len(), 2, "got: {q:?}");
         assert!(q[0].contains("without a normal stop"), "got: {q:?}");
         assert!(q[1].contains("working tree"), "got: {q:?}");
@@ -16171,7 +16248,7 @@ mod tests {
             // No Stop observation — session ended mid-task.
         ];
         let last = Some("fix the bug".to_string());
-        let q = derive_open_questions(&obs, &last);
+        let q = derive_open_questions(&obs, &last).into_items();
         assert_eq!(q.len(), 2, "got: {q:?}");
         assert!(q[0].contains("without a normal stop"), "got: {q:?}");
         assert!(q[1].contains("working tree"), "got: {q:?}");
@@ -16187,7 +16264,7 @@ mod tests {
                 mk_obs(ObservationKind::UserPrompt, "fix bug", "fix the bug"),
                 mk_obs(ObservationKind::PostToolUse, bogus, "edited main.rs"),
             ];
-            let q = derive_open_questions(&obs, &Some("fix the bug".to_string()));
+            let q = derive_open_questions(&obs, &Some("fix the bug".to_string())).into_items();
             assert!(
                 q.iter().all(|s| !s.contains("without a normal stop")),
                 "title {bogus:?} is not a canonical tool family and must not \
@@ -16217,16 +16294,18 @@ mod tests {
                 "tool_family: non-file\noutcome: success",
             ),
         ];
+        // A live OpenCode checkpoint keeps context-only tool inventories.
         let handoff = build_auto_handoff(
             WorkspaceId::new(),
             ProjectId::new(),
-            AgentKind::ClaudeCode,
+            AgentKind::OpenCode,
             SessionId::new(),
             None,
             &observations,
             None,
-            false,
-        );
+            true,
+        )
+        .unwrap();
         assert!(
             handoff
                 .next_steps
@@ -16244,13 +16323,14 @@ mod tests {
         let handoff = build_auto_handoff(
             WorkspaceId::new(),
             ProjectId::new(),
-            AgentKind::ClaudeCode,
+            AgentKind::OpenCode,
             SessionId::new(),
             None,
             &with_real_tool,
             None,
-            false,
-        );
+            true,
+        )
+        .unwrap();
         assert!(
             handoff.next_steps.iter().any(|s| s == "Tools used: Edit"),
             "a real tool name must still be listed; got: {:?}",
@@ -16270,7 +16350,7 @@ mod tests {
                 "tool_family: search-list\noutcome: success",
             ),
         ];
-        let q = derive_open_questions(&obs, &Some("find the caller".to_string()));
+        let q = derive_open_questions(&obs, &Some("find the caller".to_string())).into_items();
         assert_eq!(q.len(), 1, "got: {q:?}");
         assert!(q[0].starts_with("Continue from:"), "got: {q:?}");
     }
@@ -16284,7 +16364,7 @@ mod tests {
             mk_obs(ObservationKind::UserPrompt, "ack", "好的"),
         ];
         let last = Some("好的".to_string());
-        let q = derive_open_questions(&obs, &last);
+        let q = derive_open_questions(&obs, &last).into_items();
         // "好的" is filtered → fallback to empty.
         assert!(q.is_empty(), "expected empty for acknowledgment, got {q:?}");
     }
@@ -16301,7 +16381,7 @@ mod tests {
             mk_obs(ObservationKind::SessionEnd, "end", ""),
         ];
         let last = Some("fix the bug in main.rs".to_string());
-        let q = derive_open_questions(&obs, &last);
+        let q = derive_open_questions(&obs, &last).into_items();
         assert_eq!(q.len(), 1);
         assert!(q[0].starts_with("Continue from:"));
         assert!(q[0].contains("fix the bug"));
@@ -16314,7 +16394,7 @@ mod tests {
             mk_obs(ObservationKind::Stop, "stop", ""),
         ];
         let last = None;
-        let q = derive_open_questions(&obs, &last);
+        let q = derive_open_questions(&obs, &last).into_items();
         assert!(q.is_empty());
     }
 
@@ -16326,7 +16406,7 @@ mod tests {
             "这个函数的返回值能不能是None？",
         )];
         let last = Some("这个函数的返回值能不能是None？".to_string());
-        let q = derive_open_questions(&obs, &last);
+        let q = derive_open_questions(&obs, &last).into_items();
         assert_eq!(q.len(), 1);
         assert!(q[0].starts_with("Unresolved question:"));
     }
@@ -16349,7 +16429,7 @@ mod tests {
             ),
         ];
         let last = Some("also check the tests".to_string());
-        let q = derive_open_questions(&obs, &last);
+        let q = derive_open_questions(&obs, &last).into_items();
         assert_eq!(q.len(), 1);
         assert!(q[0].contains("mid-task exit"), "got: {q:?}");
     }

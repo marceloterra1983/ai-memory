@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stopped SessionEnd from opening automatic handoffs containing only tool
   history or a prompt echo, while preserving session summaries, actionable
   continuations, manual-handoff precedence and OpenCode turn checkpoints.
+  Replaced formatted-prefix checks with typed continuation signals before
+  rendering, and covered imperative Edit/Write work followed by a normal Stop
+  as completed work without a handoff.
   (local-20261012; private integration, no upstream issue opened)
 - Retained the native-hook worker's open lock descriptor while waiting for a
   preservation guard handoff, and closed its lock and database cleanly when

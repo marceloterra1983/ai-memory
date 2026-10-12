@@ -78,10 +78,10 @@ from hook paths.
    `## [YYYY-MM-DDTHH:MM:SSZ] <event> | <title>` line.
 3. On true `SessionEnd` events for substantive sessions, the server synthesises
    a `sessions/<id>.md` summary page (rule-based, no LLM) and opens a `Handoff`
-   row only when the generated questions or next steps contain an actionable
-   continuation signal. `Tools used: …` and `Continue from: …` alone stay in
-   the session history without creating an open handoff. OpenCode's live-turn
-   continuation checkpoints retain their existing handoffs. One SQLite
+   row only when the derived questions or next steps carry a typed pending-work
+   signal, checked before formatting. `Tools used: …` and `Continue from: …`
+   alone stay in the session history without creating an open handoff. OpenCode's
+   live-turn continuation checkpoints retain their existing handoffs. One SQLite
    transaction inserts any eligible automatic handoff, stamps the session
    ended, and records the covered observation count, so recovery never sees
    only half of those DB effects. A later SessionEnd re-runs the path only when

@@ -10,3 +10,4 @@ mod fallback_provider;
 mod local_embedding_chunks;
 mod openai_compat_embedder;
 mod openai_compat_strict;
+mod query_embedding_cache;

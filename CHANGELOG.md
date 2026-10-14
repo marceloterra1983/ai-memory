@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Reduced repeated OpenAI-compatible query inference with a bounded, ephemeral
+  vector cache isolated to each embedder configuration. Kept documents uncached
+  and page retrieval, scope/access checks, version and TTL filtering live on
+  every search. (local-20261014; private integration, no upstream issue opened)
 - Preserved equal BM25 evidence with tied midranks, retained the strongest
   graph origin before deduplication and truncation, and fused authorized API
   search scopes through one bounded FTS window pair. Prevented common-term

@@ -360,6 +360,8 @@ impl Embedder for OpenAiEmbedder {
 /// keyless), and vectors are stored under the distinct provider label
 /// `openai-compat` so the `{provider, model, dim}` refuse-on-mismatch
 /// check treats them as their own family.
+/// Query embeddings have an instance-local, bounded 60-second cache. Every
+/// retrieval still searches the current page index; documents are never cached.
 pub struct OpenAiCompatEmbedder {
     client: reqwest::Client,
     local_client: Option<crate::DreamLocalClient>,
@@ -386,6 +388,7 @@ pub struct OpenAiCompatEmbedder {
     /// [`Self::base_url`] (and the dream local client, when that is how this
     /// embedder was built). Never inferred from the text.
     query_base_url: Option<String>,
+    query_cache: crate::query_embedding_cache::QueryEmbeddingCache,
 }
 
 impl OpenAiCompatEmbedder {
@@ -415,6 +418,7 @@ impl OpenAiCompatEmbedder {
             query_prefix: String::new(),
             document_prefix: String::new(),
             query_base_url: None,
+            query_cache: Default::default(),
         })
     }
 
@@ -463,6 +467,7 @@ impl OpenAiCompatEmbedder {
             query_prefix: String::new(),
             document_prefix: String::new(),
             query_base_url: None,
+            query_cache: Default::default(),
         })
     }
 
@@ -500,6 +505,7 @@ impl OpenAiCompatEmbedder {
     ) -> Self {
         self.query_prefix = query_prefix.into();
         self.document_prefix = document_prefix.into();
+        self.query_cache = Default::default();
         self
     }
 
@@ -514,6 +520,7 @@ impl OpenAiCompatEmbedder {
     /// redirect).
     #[must_use]
     pub fn with_query_base_url(mut self, url: impl Into<String>) -> Self {
+        self.query_cache = Default::default();
         let url = url.into();
         let trimmed = url.trim();
         self.query_base_url = if trimmed.is_empty() {
@@ -564,6 +571,17 @@ impl Embedder for OpenAiCompatEmbedder {
 
     async fn embed_query(&self, text: &str) -> LlmResult<Vec<f32>> {
         let prefixed = prepend_prefix(&self.query_prefix, text);
+        if let Some(vector) = self.query_cache.get(&prefixed) {
+            return Ok(vector);
+        }
+        let vector = self.embed_query_uncached(&prefixed).await?;
+        self.query_cache.insert(&prefixed, &vector, self.dim);
+        Ok(vector)
+    }
+}
+
+impl OpenAiCompatEmbedder {
+    async fn embed_query_uncached(&self, prefixed: &str) -> LlmResult<Vec<f32>> {
         if let Some(url) = self.query_base_url.as_deref() {
             // The typed method routes the endpoint; the URL is an operator
             // setting, never parsed out of the query text. Dream-local mode
@@ -573,7 +591,7 @@ impl Embedder for OpenAiCompatEmbedder {
             if self.local_client.is_some() {
                 let endpoint = normalize_openai_base(url, "embeddings");
                 let client = crate::DreamLocalClient::new(&endpoint)?;
-                return dream_local_embed(&client, &self.model, self.dim, &prefixed).await;
+                return dream_local_embed(&client, &self.model, self.dim, prefixed).await;
             }
             return openai_style_embed(
                 &self.client,
@@ -581,14 +599,14 @@ impl Embedder for OpenAiCompatEmbedder {
                 self.api_key.as_ref(),
                 &self.model,
                 self.dim,
-                &prefixed,
+                prefixed,
             )
             .await;
         }
         if let Some(client) = &self.local_client {
-            return dream_local_embed(client, &self.model, self.dim, &prefixed).await;
+            return dream_local_embed(client, &self.model, self.dim, prefixed).await;
         }
-        self.embed_text(&prefixed).await
+        self.embed_text(prefixed).await
     }
 }
 

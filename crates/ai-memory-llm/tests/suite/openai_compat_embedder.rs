@@ -29,6 +29,43 @@ fn embedding_body(dim: usize) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn query_cache_reuses_only_queries_and_different_queries_still_infer() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let vector = if body["input"] == "query: second" {
+                vec![0.0, 1.0]
+            } else {
+                vec![1.0, 0.0]
+            };
+            ResponseTemplate::new(200).set_body_json(json!({"data":[{"embedding":vector}]}))
+        })
+        .mount(&server)
+        .await;
+    let e = OpenAiCompatEmbedder::new(format!("{}/v1", server.uri()), None, "model", 2)
+        .unwrap()
+        .with_prefixes("query: ", "passage: ");
+    assert_eq!(e.embed_query("first").await.unwrap(), vec![1.0, 0.0]);
+    assert_eq!(e.embed_query("second").await.unwrap(), vec![0.0, 1.0]);
+    assert_eq!(e.embed_query("first").await.unwrap(), vec![1.0, 0.0]);
+    assert_eq!(
+        recorded(&server).await.len(),
+        2,
+        "an intervening query must not force repeated inference of the first query"
+    );
+    e.embed_document("first").await.unwrap();
+    e.embed_document("first").await.unwrap();
+    e.embed("first").await.unwrap();
+    assert_eq!(
+        recorded(&server).await.len(),
+        5,
+        "documents are never cached"
+    );
+}
+
+#[tokio::test]
 async fn keyless_embed_sends_no_authorization_header() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

@@ -92,6 +92,7 @@ pub mod types;
 
 mod auth_file;
 mod codex_responses;
+mod query_embedding_cache;
 mod response;
 mod stored_token;
 mod text;

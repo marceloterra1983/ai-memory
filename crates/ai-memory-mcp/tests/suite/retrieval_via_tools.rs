@@ -89,6 +89,22 @@ async fn harness() -> Harness {
 /// Drive one tool over the real JSON-RPC transport and return the decoded
 /// tool payload (the JSON a client actually renders).
 async fn call(router: &Router, name: &str, arguments: Value) -> Value {
+    let v = call_rpc(router, name, arguments).await;
+    if let Some(err) = v.get("error") {
+        panic!("JSON-RPC error: {err}");
+    }
+    let joined = v
+        .pointer("/result/content")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("missing result.content: {v}"))
+        .iter()
+        .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_json::from_str(&joined).unwrap_or_else(|e| panic!("tool text not JSON: {joined}: {e}"))
+}
+
+async fn call_rpc(router: &Router, name: &str, arguments: Value) -> Value {
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -108,19 +124,237 @@ async fn call(router: &Router, name: &str, arguments: Value) -> Value {
         .await
         .expect("body");
     let text = String::from_utf8(bytes.to_vec()).expect("utf8");
-    let v: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("non-JSON: {text}: {e}"));
-    if let Some(err) = v.get("error") {
-        panic!("JSON-RPC error: {err}\nfull: {text}");
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("non-JSON: {text}: {e}"))
+}
+
+#[tokio::test]
+async fn query_cache_keeps_vector_search_scope_heads_expiry_and_access_live() {
+    use ai_memory_llm::OpenAiCompatEmbedder;
+    use axum::{Extension, Json, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let requests = count.clone();
+    let backend = Router::new().route(
+        "/v1/embeddings",
+        post(move |Json(body): Json<Value>| {
+            let requests = requests.clone();
+            async move {
+                assert_eq!(body["input"], "unlisted lookup");
+                requests.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"data":[{"embedding":[1.0,0.0]}]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, backend).await.unwrap() });
+    let h = harness().await;
+    let user = h
+        .store
+        .writer
+        .create_human_user(
+            ai_memory_core::NewUser {
+                username: "reader".into(),
+                name: None,
+                email: None,
+            },
+            ai_memory_core::UserRole::User,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    h.store
+        .writer
+        .set_access_mode(h.proj, ai_memory_store::AccessMode::Restricted)
+        .await
+        .unwrap();
+    h.store
+        .writer
+        .grant_memory(user, h.proj, ai_memory_store::GrantLevel::Read, None)
+        .await
+        .unwrap();
+    let embedder = Arc::new(OpenAiCompatEmbedder::new_local(endpoint, "synthetic", 2).unwrap());
+    let router = mount(
+        AiMemoryServer::new(h.store.reader.clone(), h.store.writer.clone(), h.ws, h.proj)
+            .with_embedder(embedder),
+    )
+    .layer(Extension(ai_memory_core::AuthorizedViewer(user)))
+    .layer(Extension(ai_memory_core::AuthLevel::User));
+    let mut head = page(h.ws, h.proj, "notes/head.md", "Current", "first edition");
+    let old_id = h.store.writer.upsert_page(head.clone()).await.unwrap();
+    let mut expiring = page(
+        h.ws,
+        h.proj,
+        "notes/expiry.md",
+        "Temporary",
+        "temporary edition",
+    );
+    let ttl_id = h.store.writer.upsert_page(expiring.clone()).await.unwrap();
+    let foreign_ws = h
+        .store
+        .writer
+        .get_or_create_workspace("foreign")
+        .await
+        .unwrap();
+    let foreign_proj = h
+        .store
+        .writer
+        .get_or_create_project(foreign_ws, PROJ, None)
+        .await
+        .unwrap();
+    let foreign_id = h
+        .store
+        .writer
+        .upsert_page(page(
+            foreign_ws,
+            foreign_proj,
+            "notes/foreign.md",
+            "Foreign",
+            "foreign edition",
+        ))
+        .await
+        .unwrap();
+    for id in [old_id, ttl_id, foreign_id] {
+        h.store
+            .writer
+            .store_embedding(
+                id,
+                [1.0_f32, 0.0]
+                    .iter()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect(),
+                "openai-compat".into(),
+                "synthetic".into(),
+                2,
+            )
+            .await
+            .unwrap();
     }
-    let joined = v
-        .pointer("/result/content")
-        .and_then(|c| c.as_array())
-        .unwrap_or_else(|| panic!("missing result.content: {text}"))
-        .iter()
-        .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    serde_json::from_str(&joined).unwrap_or_else(|e| panic!("tool text not JSON: {joined}: {e}"))
+    let args = || query_args("unlisted lookup", json!({"explain":true}));
+    let initial = call(&router, "memory_query", args()).await;
+    assert!(
+        hit_for(&initial, "notes/head.md").unwrap()["score_details"]["vector_rank"].is_number(),
+        "vector-only hit must prove a real vector search"
+    );
+    assert!(hit_for(&initial, "notes/expiry.md").is_some());
+    assert!(hit_for(&initial, "notes/foreign.md").is_none());
+    assert!(
+        initial["streams_active"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("vector"))
+    );
+
+    head.body = "second edition".into();
+    let new_id = h.store.writer.upsert_page(head).await.unwrap();
+    h.store
+        .writer
+        .store_embedding(
+            new_id,
+            [1.0_f32, 0.0]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect(),
+            "openai-compat".into(),
+            "synthetic".into(),
+            2,
+        )
+        .await
+        .unwrap();
+    expiring.expires_at = Some(jiff::Timestamp::UNIX_EPOCH);
+    expiring.frontmatter_json["expires_at"] = json!("1970-01-01T00:00:00Z");
+    let expired_id = h.store.writer.upsert_page(expiring).await.unwrap();
+    h.store
+        .writer
+        .store_embedding(
+            expired_id,
+            [1.0_f32, 0.0]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect(),
+            "openai-compat".into(),
+            "synthetic".into(),
+            2,
+        )
+        .await
+        .unwrap();
+    let fresh = call(&router, "memory_query", args()).await;
+    assert_eq!(
+        hit_for(&fresh, "notes/head.md").unwrap()["id"],
+        new_id.to_string()
+    );
+    assert!(
+        hits(&fresh)
+            .iter()
+            .all(|hit| hit["id"] != old_id.to_string())
+    );
+    assert!(
+        hit_for(&fresh, "notes/expiry.md").is_none(),
+        "cached query vector must not cache TTL results"
+    );
+    assert!(hit_for(&fresh, "notes/foreign.md").is_none());
+    let expired = call(
+        &router,
+        "memory_query",
+        query_args(
+            "unlisted lookup",
+            json!({"explain":true,"include_expired":true}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        hit_for(&expired, "notes/expiry.md").unwrap()["id"],
+        expired_id.to_string()
+    );
+    let history = call(
+        &router,
+        "memory_query",
+        query_args(
+            "unlisted lookup",
+            json!({"explain":true,"include_superseded":true}),
+        ),
+    )
+    .await;
+    assert!(
+        hits(&history)
+            .iter()
+            .any(|hit| hit["id"] == old_id.to_string() && hit["superseded"] == true)
+    );
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "each search must reuse only the vector, not the page results"
+    );
+
+    h.store
+        .writer
+        .revoke_memory(user, h.proj, None)
+        .await
+        .unwrap();
+    let denied = call_rpc(&router, "memory_query", args()).await;
+    assert!(
+        denied.get("error").is_some(),
+        "warm query must recheck the revoked grant"
+    );
+    h.store
+        .writer
+        .grant_memory(user, h.proj, ai_memory_store::GrantLevel::Read, None)
+        .await
+        .unwrap();
+    assert!(
+        hit_for(
+            &call(&router, "memory_query", args()).await,
+            "notes/head.md"
+        )
+        .is_some()
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    task.abort();
 }
 
 fn page(ws: WorkspaceId, proj: ProjectId, path: &str, title: &str, body: &str) -> NewPage {

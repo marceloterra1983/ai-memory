@@ -236,6 +236,21 @@ normal reopen retries brief finalization conflicts, while an unclean process
 death remains bounded by the renewable lease expiry. See [Managed cross-harness
 workstreams](managed-workstreams.md).
 
+## Query embedding reuse
+
+OpenAI-compatible query embeddings reuse valid vectors for up to 60 seconds
+from insertion, with 128 entries and at most 8192 dimensions per entry (4 MiB
+of retained vector values). The cache is owned by one embedder instance and
+cleared when its endpoint or prefixes change; models, dimensions, credentials
+and provider instances never share entries. Keys are SHA-256 digests of the
+complete prefixed input; no query text or vector is written to disk. Errors,
+nonfinite, zero and dimension-mismatched vectors are never cached. Documents
+always infer normally. Each `memory_query` still searches the current SQLite
+index with its scope, access, TTL and latest-version guards, including an
+actual vector search when `streams_active` reports `vector`. This removes
+repeated inference cost without memoizing page results; cold and expired
+queries still pay the provider's full latency.
+
 ## Hook event vocabulary
 
 The core observation vocabulary is a closed set of agent lifecycle

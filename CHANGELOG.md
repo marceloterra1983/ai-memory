@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Preserved equal BM25 evidence with tied midranks, retained the strongest
+  graph origin before deduplication and truncation, and fused authorized API
+  search scopes through one bounded FTS window pair. Prevented common-term
+  title votes from eclipsing informative body matches while keeping grants,
+  exact scope tuples, current versions, expiry and shared-page reads intact.
+  (local-20261014; private integration, no upstream issue opened)
 - Preserved topical title and strong body evidence in bounded FTS candidate
   pools, and weighted hybrid retrieval votes by lexical, cosine, entity and
   source-seed strength before source authority. The two FTS field windows of

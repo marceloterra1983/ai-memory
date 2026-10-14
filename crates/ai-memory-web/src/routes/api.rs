@@ -1,9 +1,8 @@
 //! JSON routes for third-party read-only frontends.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use ai_memory_core::{ObservationKind, PageId, PagePath, ProjectId, SessionId, WorkspaceId};
+use ai_memory_core::{ObservationKind, PagePath, ProjectId, SessionId, WorkspaceId};
 use ai_memory_store::{
     BriefingSnapshot, HealthPage, ObservationOrder, ObservationPage, ObservationRecord, PageHit,
     RelatedPage, ScopeName, ScopeResolutionError, SessionSummary, lookup_existing_scope_guarded,
@@ -335,7 +334,7 @@ async fn search_with_request(
     }
     let hits = match scoped_search_mode(state, &request, viewer).await? {
         SearchMode::Global => state.reader.search_pages(term, limit, viewer).await,
-        SearchMode::Scoped(scopes) => search_scopes(state, scopes, term, limit).await,
+        SearchMode::Scoped(scopes) => search_scopes(state, scopes, term, limit, viewer).await,
     }
     .map_err(internal_error)?;
 
@@ -415,38 +414,20 @@ async fn search_scopes(
     scopes: Vec<ResolvedSearchScope>,
     term: String,
     limit: usize,
+    viewer: Option<ai_memory_core::UserId>,
 ) -> ai_memory_store::StoreResult<Vec<PageHit>> {
-    let mut hits_by_id: HashMap<PageId, PageHit> = HashMap::new();
-    for scope in scopes {
-        let hits = state
-            .reader
-            .search_pages_for_project(
-                scope.workspace_id,
-                scope.project_id,
-                term.clone(),
-                limit,
-                None,
-            )
-            .await?;
-        for hit in hits {
-            hits_by_id
-                .entry(hit.id)
-                .and_modify(|existing| {
-                    if hit.rank < existing.rank {
-                        *existing = hit.clone();
-                    }
-                })
-                .or_insert(hit);
-        }
-    }
-    let mut hits: Vec<PageHit> = hits_by_id.into_values().collect();
-    hits.sort_by(|a, b| {
-        a.rank
-            .partial_cmp(&b.rank)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    hits.truncate(limit);
-    Ok(hits)
+    state
+        .reader
+        .search_pages_in_scopes(
+            scopes
+                .into_iter()
+                .map(|scope| (scope.workspace_id, scope.project_id))
+                .collect(),
+            term,
+            limit,
+            viewer,
+        )
+        .await
 }
 
 async fn recent_handler(

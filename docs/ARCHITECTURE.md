@@ -124,8 +124,17 @@ from hook paths.
    same prepared `MATCH` expression, preserving explicit field restrictions.
    Each window is bounded independently (20 candidates at a store search
    limit of 3); deduplicated pages retain their strongest normalized field score.
-   Informative BM25 scores use reciprocal rank, while SQLite's floored IDF
-   scores retain their relative magnitude. Both field windows share one read
+   Informative BM25 scores use reciprocal rank; exact ties share the average
+   position of their group, so SQL row order does not create evidence and a
+   tied group does not multiply first-place votes. Original candidate order
+   breaks remaining ties without changing the score, keeping repeated queries
+   stable. SQLite's floored IDF body
+   scores retain their relative magnitude. When body evidence is informative,
+   floored-IDF title scores are calibrated against that body peak rather than
+   receiving a full ordinal vote. API searches over explicit scopes apply the
+   authorized tuple union before both candidate limits and normalize once,
+   rather than comparing independently normalized project scores.
+   Both field windows share one read
    transaction so concurrent supersession cannot mix page versions. This keeps
    strong body evidence and long pages with topical titles eligible without admitting nonmatches.
    The hybrid contribution is `strength / (60 + stream_rank)`: normalized FTS
@@ -133,6 +142,8 @@ from hook paths.
    `[0, 1]`, and entity name coverage weighted by inverse frequency. Partial entity names remain candidates, but full-name
    word coverage affects their weight before the candidate limit. Graph
    neighbours inherit the strongest evidence strength of their source seeds.
+   Seeds are stably ordered by strength before graph deduplication and the
+   candidate limit, with explanation paths permuted alongside their ids.
    The entity index is derived from the canonical frontmatter `entities`
    list, and an empty index contributes no candidates or score. Before final
    truncation, a bounded authority multiplier adjusts relevance using canonical

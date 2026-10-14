@@ -1008,6 +1008,165 @@ async fn api_search_post_accepts_multi_scope_body() {
 }
 
 #[tokio::test]
+async fn api_multi_scope_search_preserves_strong_evidence_over_common_title_matches() {
+    use ai_memory_core::{AuthorizedViewer, NewUser};
+    use ai_memory_store::{AccessMode, GrantLevel};
+
+    let (_tmp, store, wiki) = setup().await;
+    store
+        .writer
+        .set_new_project_mode(AccessMode::Restricted)
+        .await
+        .unwrap();
+    let ws = store
+        .writer
+        .get_or_create_workspace("ranking")
+        .await
+        .unwrap();
+    let viewer = store
+        .writer
+        .create_user(
+            NewUser {
+                username: "reader".into(),
+                name: None,
+                email: None,
+            },
+            [71; ai_memory_store::TOKEN_HASH_LEN],
+        )
+        .await
+        .unwrap();
+    let author = store
+        .writer
+        .create_user(
+            NewUser {
+                username: "author".into(),
+                name: None,
+                email: None,
+            },
+            [72; ai_memory_store::TOKEN_HASH_LEN],
+        )
+        .await
+        .unwrap();
+    for name in ["answer", "weak-one", "weak-two", "weak-three", "background"] {
+        let proj = store
+            .writer
+            .get_or_create_project(ws, name, None)
+            .await
+            .unwrap();
+        store
+            .writer
+            .grant_memory(viewer, proj, GrantLevel::Read, None)
+            .await
+            .unwrap();
+        if name == "background" {
+            // The common term has only FTS5's IDF floor; the other query term
+            // identifies one answer. These pages are outside the request.
+            for index in 0..20 {
+                store
+                    .writer
+                    .upsert_page(new_page(
+                        ws,
+                        proj,
+                        &format!("notes/background-{index}.md"),
+                        "Inventory",
+                        "common ordinary reference background",
+                    ))
+                    .await
+                    .unwrap();
+            }
+            continue;
+        }
+        let mut page = if name == "answer" {
+            new_page(ws, proj, "answer.md", "Useful answer", "common rare")
+        } else {
+            // A title match supplies a separate field vote. A body-only
+            // common match does not exercise the local-normalization bug.
+            let mut page = new_page(ws, proj, "rule.md", "Common", "routine reference");
+            page.frontmatter_json = serde_json::json!({"kind": "rule", "tags": ["canonical"]});
+            page.pinned = true;
+            page
+        };
+        page.author_id = Some(author);
+        store.writer.upsert_page(page).await.unwrap();
+    }
+    let forbidden = store
+        .writer
+        .get_or_create_project(ws, "forbidden", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(new_page(
+            ws,
+            forbidden,
+            "private.md",
+            "Rare common",
+            "rare common",
+        ))
+        .await
+        .unwrap();
+
+    let app = api_router(store.reader.clone(), wiki.clone());
+    let get = |uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .extension(AuthorizedViewer(viewer))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    // A scope list fails closed before ranking. A legitimate reader still
+    // sees a page authored by a different operator.
+    let (status, _) =
+        get("/search?q=common%20rare&scope=ranking/answer&scope=ranking/forbidden&limit=3").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) =
+        get("/search?q=common%20rare&scope=ranking/answer&scope=ranking/missing&limit=3").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        store
+            .reader
+            .list_projects_with_stats(None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|project| project.project_name != "missing"),
+        "a search must not create a missing scope"
+    );
+    let (status, body) = get("/search?q=common%20rare&scope=ranking/answer&limit=3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["project"], "answer");
+
+    let (status, body) = get("/search?q=common%20rare&scope=ranking/answer&scope=ranking/weak-one&scope=ranking/weak-two&scope=ranking/weak-three&limit=3").await;
+    assert_eq!(status, StatusCode::OK);
+    let hits = body.as_array().unwrap();
+    assert_eq!(hits.len(), 3);
+    assert!(
+        hits.iter().any(|hit| hit["project"] == "answer"),
+        "the two-term answer must survive three common-title matches: {body}"
+    );
+    assert_eq!(
+        hits[0]["project"], "answer",
+        "real two-term BM25 evidence must remain comparable between scopes"
+    );
+    assert!(hits.iter().all(|hit| hit["project"] != "background"));
+    assert!(hits.iter().all(|hit| hit["project"] != "forbidden"));
+}
+
+#[tokio::test]
 async fn api_routes_do_not_accept_writes() {
     let (_tmp, store, wiki) = setup().await;
 
@@ -1019,6 +1178,161 @@ async fn api_routes_do_not_accept_writes() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn api_multi_scope_search_keeps_tuple_grants_and_live_versions() {
+    use ai_memory_core::{AuthorizedViewer, NewUser};
+    use ai_memory_store::{AccessMode, GrantLevel};
+
+    let (_tmp, store, wiki) = setup().await;
+    store
+        .writer
+        .set_new_project_mode(AccessMode::Restricted)
+        .await
+        .unwrap();
+    let viewer = store
+        .writer
+        .create_user(
+            NewUser {
+                username: "reader".into(),
+                name: None,
+                email: None,
+            },
+            [73; ai_memory_store::TOKEN_HASH_LEN],
+        )
+        .await
+        .unwrap();
+    let first = store.writer.get_or_create_workspace("first").await.unwrap();
+    let second = store
+        .writer
+        .get_or_create_workspace("second")
+        .await
+        .unwrap();
+    let mut projects = Vec::new();
+    for (ws, name, path, grant) in [
+        (first, "app", "first-live.md", true),
+        (second, "app", "second-live.md", true),
+        (first, "other", "outside.md", true),
+        (first, "denied", "denied.md", false),
+    ] {
+        let proj = store
+            .writer
+            .get_or_create_project(ws, name, None)
+            .await
+            .unwrap();
+        if grant {
+            store
+                .writer
+                .grant_memory(viewer, proj, GrantLevel::Read, None)
+                .await
+                .unwrap();
+        }
+        store
+            .writer
+            .upsert_page(new_page(ws, proj, path, "Boundarysignal", "boundarysignal"))
+            .await
+            .unwrap();
+        projects.push(proj);
+    }
+    let mut expired = new_page(
+        first,
+        projects[0],
+        "expired.md",
+        "Boundarysignal",
+        "boundarysignal",
+    );
+    expired.expires_at = Some("2000-01-01T00:00:00Z".parse().unwrap());
+    store.writer.upsert_page(expired).await.unwrap();
+    store
+        .writer
+        .upsert_page(new_page(
+            first,
+            projects[0],
+            "version.md",
+            "Boundarysignal old",
+            "boundarysignal",
+        ))
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(new_page(
+            first,
+            projects[0],
+            "version.md",
+            "Current version",
+            "unrelated",
+        ))
+        .await
+        .unwrap();
+
+    let app = api_router(store.reader.clone(), wiki.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/search?q=boundarysignal&scope=first/app&scope=second/app&limit=100")
+                .extension(AuthorizedViewer(viewer))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let hits = body.as_array().unwrap();
+    assert_eq!(
+        hits.len(),
+        2,
+        "only requested live versions may appear: {body}"
+    );
+    assert!(hits.iter().any(|hit| hit["path"] == "first-live.md"));
+    assert!(hits.iter().any(|hit| hit["path"] == "second-live.md"));
+
+    // The new store entry point also defends itself when called with raw
+    // tuples: workspace and project must agree, grants still apply, and an
+    // empty explicit union must never turn into global search.
+    let mismatched = store
+        .reader
+        .search_pages_in_scopes(
+            vec![(first, projects[1])],
+            "boundarysignal".into(),
+            100,
+            Some(viewer),
+        )
+        .await
+        .unwrap();
+    assert!(
+        mismatched.is_empty(),
+        "a foreign project must not match a workspace tuple: {mismatched:?}"
+    );
+    let guarded = store
+        .reader
+        .search_pages_in_scopes(
+            vec![(first, projects[0]), (first, projects[3])],
+            "boundarysignal".into(),
+            100,
+            Some(viewer),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        guarded.len(),
+        1,
+        "a denied raw project must stay hidden: {guarded:?}"
+    );
+    assert_eq!(guarded[0].path.as_str(), "first-live.md");
+    assert!(
+        store
+            .reader
+            .search_pages_in_scopes(Vec::new(), "boundarysignal".into(), 100, Some(viewer),)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

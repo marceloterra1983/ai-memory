@@ -211,6 +211,69 @@ async fn strong_vector_anchor_keeps_a_useful_graph_neighbor() {
 }
 
 #[tokio::test]
+async fn adding_weak_fts_link_preserves_strong_graph_origin() {
+    let f = fixture(1.0).await;
+    for number in 0..2 {
+        f.store
+            .writer
+            .upsert_page(page(
+                f.ws,
+                f.proj,
+                &format!("notes/direct-{number}.md"),
+                "orchard conduit",
+                "orchard conduit orchard conduit orchard conduit",
+            ))
+            .await
+            .unwrap();
+    }
+    let weak_page = page(
+        f.ws,
+        f.proj,
+        "notes/weak.md",
+        "distant reference",
+        "orchard archive material",
+    );
+    let weak = f.store.writer.upsert_page(weak_page.clone()).await.unwrap();
+    let target = f.neighbors[3];
+    let diagnostic = search(&f, f.ws, 10).await;
+    assert!(
+        !diagnostic
+            .iter()
+            .any(|(hit, _)| f.foreign.contains(&hit.id)),
+        "prioritizing the strong graph origin must still refuse its foreign links"
+    );
+    let (_, weak_details) = diagnostic.iter().find(|(hit, _)| hit.id == weak).unwrap();
+    assert!(weak_details.fts_rank.is_some());
+    assert!(-weak_details.fts_score.unwrap() < 0.5);
+    let before = search(&f, f.ws, 3).await;
+    let (_, before_details) = before.iter().find(|(hit, _)| hit.id == target).unwrap();
+    assert_eq!(
+        before_details.graph_via.as_ref().unwrap().seed_path,
+        "notes/anchor.md"
+    );
+
+    let mut weak_page = weak_page;
+    weak_page.links = vec![link(None, None, "_rules/neighbor-3.md")];
+    weak_page.frontmatter_json = serde_json::json!({"links": ["_rules/neighbor-3.md"]});
+    let linked_weak = f.store.writer.upsert_page(weak_page).await.unwrap();
+    assert_ne!(
+        linked_weak, weak,
+        "the link metadata must create a new version"
+    );
+    let after = search(&f, f.ws, 3).await;
+    let (_, after_details) = after
+        .iter()
+        .find(|(hit, _)| hit.id == target)
+        .expect("adding a weak FTS link must not evict a neighbor of the strong vector seed");
+    assert_eq!(
+        after_details.graph_via.as_ref().unwrap().seed_path,
+        "notes/anchor.md",
+        "the strongest origin must supply the retained graph provenance"
+    );
+    assert_eq!(after_details.rrf.graph, before_details.rrf.graph);
+}
+
+#[tokio::test]
 async fn graph_expansion_refuses_foreign_links_and_wrong_workspace_pair() {
     let f = fixture(1.0).await;
     let hits = search(&f, f.ws, 10).await;

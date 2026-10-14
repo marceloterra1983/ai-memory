@@ -1016,3 +1016,271 @@ async fn rpc_method(router: &Router, method: &str, params: Value) -> Value {
     let text = String::from_utf8(bytes.to_vec()).expect("utf8");
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("non-JSON: {text}: {e}"))
 }
+
+// Stable row data, including version timestamps, attribution and retention.
+// Access reinforcement is asynchronous and independent of the editorial edit.
+fn stable_head_snapshot(h: &Harness, path: &str) -> Vec<rusqlite::types::Value> {
+    let conn =
+        rusqlite::Connection::open_with_flags(h.store.db_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT * FROM pages WHERE workspace_id = ?1 \
+        AND project_id = ?2 AND path = ?3 AND is_latest = 1",
+        )
+        .unwrap();
+    let columns: Vec<_> = stmt
+        .column_names()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, name)| {
+            (!matches!(*name, "last_accessed_at" | "access_count")).then_some(i)
+        })
+        .collect();
+    stmt.query_row(
+        rusqlite::params![h.ws.as_bytes(), h.proj.as_bytes(), path],
+        |row| columns.iter().map(|i| row.get(*i)).collect(),
+    )
+    .unwrap()
+}
+
+// A legacy file remains untouched by reindex; only the index gains generated.
+async fn legacy_page(h: &Harness, path: &str) -> (String, Value, String) {
+    let file = page_file(h.tmp.path(), h.ws, h.proj, path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let md = ai_memory_wiki::Markdown {
+        frontmatter: json!({
+            "title": "Legacy", "type": "Note", "tier": "semantic", "pinned": true,
+            "salience": 0.7, "author": "human:fixture", "custom": {"keep": true},
+            "expires_at": "2099-01-01T00:00:00Z", "stale_after": "2099-01-01T00:00:00Z"
+        }),
+        body: "# Legacy\n\nfixture body".into(),
+    };
+    let original = ai_memory_wiki::emit(&md).unwrap();
+    std::fs::write(&file, &original).unwrap();
+    let wiki = Wiki::new(h.tmp.path(), h.store.writer.clone()).unwrap();
+    let id = wiki
+        .reindex_page(h.ws, h.proj, PagePath::new(path).unwrap())
+        .await
+        .unwrap();
+    let raw = wiki
+        .read_page(h.ws, h.proj, &PagePath::new(path).unwrap())
+        .unwrap();
+    let head = h
+        .store
+        .reader
+        .latest_head_by_ids(h.ws, h.proj, path)
+        .await
+        .unwrap()
+        .unwrap();
+    let stored: Value = serde_json::from_str(&head.frontmatter_json).unwrap();
+    assert_eq!(raw.body, head.body);
+    assert!(raw.frontmatter.get("generated").is_none());
+    assert!(stored["generated"]["by"].is_string());
+    assert!(stored["generated"]["at"].is_string());
+    let mut without_generated = stored.clone();
+    without_generated
+        .as_object_mut()
+        .unwrap()
+        .remove("generated");
+    assert_eq!(raw.frontmatter, without_generated);
+    assert_eq!(file_text(&file), original);
+    (id.to_string(), stored, original)
+}
+
+/// Break: a reviewed, generated-only editorial repair changes the head,
+/// material metadata, version timestamps or the body instead of restoring binding.
+#[tokio::test]
+async fn legacy_generated_editorial_repair_restores_read_and_cas_without_a_new_head() {
+    let h = harness().await;
+    let path = "notes/legacy-generated.md";
+    let (id, stored, original) = legacy_page(&h, path).await;
+    let file = page_file(h.tmp.path(), h.ws, h.proj, path);
+    assert!(
+        read(&h.router, path, PROJ_NAME)
+            .await
+            .get("page_id")
+            .is_none()
+    );
+    let rejected = rpc(
+        &h.router,
+        "memory_write_page",
+        write_args(path, "overwrite", json!({"expected_page_id": id})),
+    )
+    .await;
+    conflict(&rejected, "stale_head");
+    assert_eq!(file_text(&file), original);
+
+    let before = stable_head_snapshot(&h, path);
+    let evidence = evidence_count(&h.store, h.ws, h.proj, path);
+    // Simulate the operator's reviewed editorial change only in this tempdir.
+    // Insert one field without reserializing existing frontmatter or body bytes.
+    let close = original.find("\n---\n").unwrap() + 1;
+    let insertion = format!("generated: {}\n", stored["generated"]);
+    let repaired = format!("{}{}{}", &original[..close], insertion, &original[close..]);
+    ai_memory_wiki::write_atomic(&file, repaired.as_bytes()).unwrap();
+    let wiki = Wiki::new(h.tmp.path(), h.store.writer.clone()).unwrap();
+    let indexed = wiki
+        .reindex_page(h.ws, h.proj, PagePath::new(path).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(indexed.to_string(), id, "repair must preserve the version");
+    assert_eq!(stable_head_snapshot(&h, path), before);
+    assert_eq!(evidence_count(&h.store, h.ws, h.proj, path), evidence);
+    let head = h
+        .store
+        .reader
+        .latest_head_by_ids(h.ws, h.proj, path)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&head.frontmatter_json).unwrap(),
+        stored
+    );
+    let seen = read(&h.router, path, PROJ_NAME).await;
+    assert_eq!(seen["page_id"], id);
+    assert_eq!(seen["frontmatter"], stored);
+    assert_eq!(seen["body"], "# Legacy\n\nfixture body");
+    assert!(seen.get("served_from").is_none());
+    assert_eq!(file_text(&file), repaired);
+    assert_eq!(version_count(&h.store, h.ws, h.proj, path), 1);
+    let successor = write(
+        &h.router,
+        path,
+        "# Legacy\n\nCAS successor",
+        json!({"expected_page_id": id}),
+    )
+    .await;
+    assert_ne!(successor["page_id"], id);
+    assert_eq!(version_count(&h.store, h.ws, h.proj, path), 2);
+}
+
+/// Break: derived provenance is mistaken for proof of legacy origin, masking
+/// a modern page's unindexed removal of the entire generated block.
+#[tokio::test]
+async fn legacy_generated_derivation_cannot_distinguish_modern_metadata_removal() {
+    let h = harness().await;
+    // Wiki and SQL stamp independently. Choose a write that completed within
+    // one UTC second to prove the proposed SQL-derived timestamp also matches.
+    let mut same_second = None;
+    for index in 0..4 {
+        let path = format!("notes/modern-generated-removed-{index}.md");
+        let written = write(&h.router, &path, "# Modern\n\nfixture body", json!({})).await;
+        let file = page_file(h.tmp.path(), h.ws, h.proj, &path);
+        let md = ai_memory_wiki::parse(&file_text(&file)).unwrap();
+        let conn = rusqlite::Connection::open_with_flags(
+            h.store.db_path(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let updated: i64 = conn
+            .query_row(
+                "SELECT updated_at FROM pages WHERE workspace_id = ?1 \
+            AND project_id = ?2 AND path = ?3 AND is_latest = 1",
+                rusqlite::params![h.ws.as_bytes(), h.proj.as_bytes(), path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let sql_at = jiff::Timestamp::from_microsecond(updated)
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        if md.frontmatter["generated"]["at"] == sql_at {
+            same_second = Some((path, written, file, md, sql_at));
+            break;
+        }
+    }
+    let (path, written, file, mut md, sql_at) = same_second.expect("same-second modern write");
+    let id = written["page_id"].as_str().unwrap();
+    let stored = md.frontmatter.clone();
+    md.frontmatter.as_object_mut().unwrap().remove("generated");
+    // A deterministic projection can reconstruct exactly the same FM for an
+    // edited modern file as for legacy_page: that does not authorize binding.
+    let mut candidate = md.frontmatter.clone();
+    ai_memory_core::okf::conform_frontmatter(&path, &mut candidate);
+    ai_memory_core::okf::stamp_generated_at(&mut candidate, &sql_at);
+    assert_eq!(candidate, stored);
+    let removed = ai_memory_wiki::emit(&md).unwrap();
+    std::fs::write(&file, &removed).unwrap();
+    assert!(
+        read(&h.router, &path, PROJ_NAME)
+            .await
+            .get("page_id")
+            .is_none()
+    );
+    let rejected = rpc(
+        &h.router,
+        "memory_write_page",
+        write_args(&path, "overwrite", json!({"expected_page_id": id})),
+    )
+    .await;
+    conflict(&rejected, "stale_head");
+    assert_eq!(file_text(&file), removed);
+    assert_eq!(version_count(&h.store, h.ws, h.proj, &path), 1);
+}
+
+/// Break: legacy projection conceals material metadata edits or generated
+/// provenance supplied on disk; both Read and CAS must refuse the binding.
+#[tokio::test]
+async fn legacy_generated_never_masks_disk_divergence() {
+    let h = harness().await;
+    let path = "notes/legacy-divergent.md";
+    let (id, stored, original) = legacy_page(&h, path).await;
+    let file = page_file(h.tmp.path(), h.ws, h.proj, path);
+    let before = stable_head_snapshot(&h, path);
+    let evidence = evidence_count(&h.store, h.ws, h.proj, path);
+    let cases = [
+        ("pinned", json!(false)),
+        ("tier", json!("procedural")),
+        ("salience", json!(0.1)),
+        ("expires_at", json!("2000-01-01T00:00:00Z")),
+        ("stale_after", json!("2098-01-01T00:00:00Z")),
+        ("type", json!("Fact")),
+        ("author", json!("human:other")),
+        ("custom", json!({"keep": false})),
+        ("generated", Value::Null),
+        (
+            "generated",
+            json!({"by": "human:other", "at": stored["generated"]["at"]}),
+        ),
+        (
+            "generated",
+            json!({"by": stored["generated"]["by"], "at": "2000-01-01T00:00:00Z"}),
+        ),
+        (
+            "generated",
+            json!({"by": stored["generated"]["by"], "at": stored["generated"]["at"], "extra": true}),
+        ),
+    ];
+    for (key, value) in cases {
+        let mut md = ai_memory_wiki::parse(&original).unwrap();
+        md.frontmatter[key] = value;
+        let divergent = ai_memory_wiki::emit(&md).unwrap();
+        std::fs::write(&file, &divergent).unwrap();
+        let seen = read(&h.router, path, PROJ_NAME).await;
+        assert!(seen.get("page_id").is_none(), "masked {key}");
+        assert_eq!(seen["frontmatter"], md.frontmatter, "rewrote {key}");
+        let rejected = rpc(
+            &h.router,
+            "memory_write_page",
+            write_args(path, "overwrite", json!({"expected_page_id": id})),
+        )
+        .await;
+        assert_eq!(
+            conflict(&rejected, "stale_head").as_deref(),
+            Some(id.as_str())
+        );
+        assert_eq!(file_text(&file), divergent);
+        assert_eq!(stable_head_snapshot(&h, path), before);
+        assert_eq!(evidence_count(&h.store, h.ws, h.proj, path), evidence);
+        assert_eq!(version_count(&h.store, h.ws, h.proj, path), 1);
+    }
+    std::fs::write(&file, &original).unwrap();
+    assert!(
+        read(&h.router, path, PROJ_NAME)
+            .await
+            .get("page_id")
+            .is_none()
+    );
+}

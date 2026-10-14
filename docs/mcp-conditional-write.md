@@ -15,6 +15,24 @@ and frontmatter in the response. A file that disagrees with the head omits
 `page_id`. When the markdown file is missing, `served_from` is `db-fallback`
 and `page_id` is the id of the same row that supplied `body`.
 
+### Legacy index-only provenance
+
+A watcher/reindex can index a legacy Markdown file without changing it. The
+store fills `generated.by` and `generated.at`, leaving frontmatter unequal
+and the path read without `page_id`. Do not infer missing provenance during
+Read or CAS: removing `generated` from a modern file can produce the same
+state, including an `at` matching the SQL version timestamp.
+
+A reviewed editorial repair can insert only the exact persisted `generated`
+object into the source file. Verify the scoped head, exact file hash, body,
+and every other frontmatter field before review and again before editing.
+Preserve `by` and `at` verbatim; parsing the candidate must match the entire
+stored frontmatter. An unchanged canonical reindex then retains the same
+head and version metadata, and the existing exact Read/CAS guards bind it.
+The current API has no provenance-only repair operation: normal page writes
+can restamp `generated.at`, and relation curation refuses this skew. The
+operator must review the specific editorial candidate before application.
+
 ## `memory_write_page`
 
 Both arguments are optional. Omitting them keeps the unconditional write.

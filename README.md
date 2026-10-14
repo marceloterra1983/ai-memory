@@ -451,7 +451,9 @@ optional vector RRF, bounded source-authority adjustment, and bounded
 raw-observation fallback for non-global searches.
 
 FTS keeps title and full-text candidates for the same query, so a long page's
-topical title can remain visible. Hybrid fusion weights each stream's vote by
+topical title can remain visible. Equal BM25 scores share a midrank; API searches
+across explicit scopes fuse their authorized candidates together. Graph neighbors
+retain their strongest source before deduplication. Hybrid fusion weights each stream's vote by
 its evidence strength before applying source authority; several weak matches
 do not automatically beat a strong match. See the architecture's
 [retrieval flow](docs/ARCHITECTURE.md#data-flow) for score details.

@@ -480,6 +480,24 @@ fn authority_candidate_limit(limit: usize) -> usize {
         .min(limit.saturating_add(AUTHORITY_MAX_EXTRA_CANDIDATES))
 }
 
+// Midranks preserve tied evidence without giving every tied page a full
+// first-place vote. That would multiply a weak field's influence by its ties.
+fn fts_tie_ranks<T>(stream: &[(T, PageAuthority)], rank: &impl Fn(&T) -> f64) -> Vec<f64> {
+    let mut ranks = vec![0.0; stream.len()];
+    let mut start = 0;
+    while start < stream.len() {
+        let score = rank(&stream[start].0);
+        let end = start
+            + stream[start..]
+                .iter()
+                .take_while(|(hit, _)| rank(hit) == score)
+                .count();
+        ranks[start..end].fill((start + 1 + end) as f64 / 2.0);
+        start = end;
+    }
+    ranks
+}
+
 /// Preserve strong topic matches alongside body/path evidence. Adding the
 /// field scores rewards incidental overlap; the better reciprocal rank keeps
 /// a long, topical page competitive without counting that overlap twice.
@@ -494,59 +512,82 @@ fn merge_fts_candidates<T, K: Eq + std::hash::Hash>(
     struct Candidate<T> {
         hit: T,
         authority: PageAuthority,
-        normal_rank: usize,
-        title_rank: usize,
+        normal_rank: f64,
+        title_rank: f64,
         normal_score: f64,
+        title_score: f64,
+        order: usize,
     }
     let peak = normal.first().map_or(0.0, |(hit, _)| rank(hit).abs());
     let mut candidates = std::collections::HashMap::new();
-    for (index, (hit, authority)) in normal.into_iter().enumerate() {
+    let normal_ranks = fts_tie_ranks(&normal, &rank);
+    let title_ranks = fts_tie_ranks(&titles, &rank);
+    let normal_count = normal.len();
+    for (order, ((hit, authority), normal_rank)) in normal.into_iter().zip(normal_ranks).enumerate()
+    {
+        let score = rank(&hit);
         candidates.insert(
             key(&hit),
             Candidate {
-                normal_score: rank(&hit),
+                normal_score: score,
                 hit,
                 authority,
-                normal_rank: index + 1,
-                title_rank: usize::MAX,
+                normal_rank,
+                title_rank: f64::INFINITY,
+                title_score: 0.0,
+                order,
             },
         );
     }
-    for (index, (hit, authority)) in titles.into_iter().enumerate() {
+    for (order, ((hit, authority), title_rank)) in titles.into_iter().zip(title_ranks).enumerate() {
         // MATCH still covers all fields so both rankers share term statistics.
         // A page matched only in its body/path supplies no title evidence.
         if rank(&hit) >= 0.0 {
             continue;
         }
+        let score = rank(&hit);
         candidates
             .entry(key(&hit))
-            .and_modify(|candidate| candidate.title_rank = index + 1)
+            .and_modify(|candidate| {
+                candidate.title_rank = title_rank;
+                candidate.title_score = score;
+            })
             .or_insert(Candidate {
                 hit,
                 authority,
-                normal_rank: usize::MAX,
-                title_rank: index + 1,
+                normal_rank: f64::INFINITY,
+                title_rank,
                 normal_score: 0.0,
+                title_score: score,
+                order: normal_count + order,
             });
     }
     let mut candidates: Vec<_> = candidates.into_values().collect();
     for candidate in &mut candidates {
         let normal_score = if peak > floor_bound {
-            1.0 / candidate.normal_rank as f64
+            1.0 / candidate.normal_rank
         } else {
             // SQLite floors IDF at 1e-6 and caps each phrase's TF contribution
             // at k1 + 1 = 2.2. Turning scores in that floor range into ordinal
             // ranks magnifies tiny frequency differences over page authority.
             candidate.normal_score.abs() / peak.max(f64::MIN_POSITIVE)
         };
-        let title_score = 1.0 / candidate.title_rank as f64;
+        let title_score = if peak > floor_bound && candidate.title_score.abs() <= floor_bound {
+            // A common-term title at SQLite's IDF floor cannot supply a full
+            // ordinal vote beside informative body evidence in another scope.
+            candidate.title_score.abs() / peak
+        } else {
+            1.0 / candidate.title_rank
+        };
         set_rank(&mut candidate.hit, -normal_score.max(title_score));
     }
     candidates.sort_by(|a, b| {
         rank(&a.hit)
             .total_cmp(&rank(&b.hit))
-            .then_with(|| a.title_rank.cmp(&b.title_rank))
-            .then_with(|| a.normal_rank.cmp(&b.normal_rank))
+            .then_with(|| a.title_rank.total_cmp(&b.title_rank))
+            .then_with(|| a.normal_rank.total_cmp(&b.normal_rank))
+            // Keep repeated queries stable without adding score evidence.
+            .then_with(|| a.order.cmp(&b.order))
     });
     candidates
         .into_iter()
@@ -554,7 +595,7 @@ fn merge_fts_candidates<T, K: Eq + std::hash::Hash>(
             // Common-term IDF floors carry no calibrated magnitude: preserve
             // the existing uniform RRF vote rather than magnifying TF/length
             // differences over bounded session intent and page authority.
-            let strength = if peak <= floor_bound && candidate.normal_rank != usize::MAX {
+            let strength = if peak <= floor_bound && candidate.normal_rank.is_finite() {
                 1.0
             } else {
                 (-rank(&candidate.hit)).clamp(0.0, 1.0)
@@ -2081,8 +2122,40 @@ impl ReaderPool {
         limit: usize,
         viewer: Option<UserId>,
     ) -> StoreResult<Vec<PageHit>> {
+        self.search_pages_filtered(query, limit, viewer, None).await
+    }
+
+    /// Search the union of explicit workspace/project tuples with one shared
+    /// FTS candidate window and authority rerank. An empty union returns no hits.
+    ///
+    /// `viewer` additionally restricts both field windows to readable projects.
+    /// Scope names must be resolved without creating projects before this call.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn search_pages_in_scopes(
+        &self,
+        scopes: Vec<(WorkspaceId, ProjectId)>,
+        query: String,
+        limit: usize,
+        viewer: Option<UserId>,
+    ) -> StoreResult<Vec<PageHit>> {
+        self.search_pages_filtered(query, limit, viewer, Some(scopes))
+            .await
+    }
+
+    async fn search_pages_filtered(
+        &self,
+        query: String,
+        limit: usize,
+        viewer: Option<UserId>,
+        scopes: Option<Vec<(WorkspaceId, ProjectId)>>,
+    ) -> StoreResult<Vec<PageHit>> {
         let fts_query = normalize_fts_query(&query, &self.fts_stopwords);
-        if fts_query.is_empty() || limit == 0 {
+        if fts_query.is_empty()
+            || limit == 0
+            || scopes.as_ref().is_some_and(|scopes| scopes.is_empty())
+        {
             return Ok(Vec::new());
         }
         self.with_conn(move |conn| {
@@ -2100,6 +2173,21 @@ impl ReaderPool {
                 Value::Integer(now_us()),
             ];
             bound.extend(visible_params);
+            let scoped = if let Some(scopes) = scopes {
+                let mut clauses = Vec::with_capacity(scopes.len());
+                for (workspace_id, project_id) in scopes {
+                    let workspace_param = bound.len() + 1;
+                    let project_param = workspace_param + 1;
+                    bound.push(Value::Blob(workspace_id.as_bytes().to_vec()));
+                    bound.push(Value::Blob(project_id.as_bytes().to_vec()));
+                    clauses.push(format!(
+                        "(pages.workspace_id = ?{workspace_param} AND pages.project_id = ?{project_param})"
+                    ));
+                }
+                format!(" AND ({})", clauses.join(" OR "))
+            } else {
+                String::new()
+            };
             let mut streams = Vec::with_capacity(2);
             for score in ["pages_fts.rank", "bm25(pages_fts, 1, 0, 0)"] {
                 let sql = format!(
@@ -2109,7 +2197,7 @@ impl ReaderPool {
                             pages.frontmatter_json, {kind_expr} AS kind \
                      FROM pages_fts \
                      JOIN pages ON pages.rowid = pages_fts.rowid \
-                     WHERE pages_fts MATCH ?1 AND pages.is_latest = 1{not_expired}{visible} \
+                     WHERE pages_fts MATCH ?1 AND pages.is_latest = 1{not_expired}{visible}{scoped} \
                      ORDER BY {score} \
                      LIMIT ?2",
                     not_expired = not_expired("pages", "?3"),
@@ -5772,6 +5860,24 @@ impl ReaderPool {
                 }
             }
         }
+        // Expansion keeps the first origin before deduplication and its limit.
+        // Put stronger seeds first so a weaker link cannot erase that evidence.
+        let mut seed_order: Vec<usize> = (0..seed_ids.len()).collect();
+        seed_order.sort_by(|left, right| {
+            let strength =
+                |index: usize| seed_strengths.get(&seed_ids[index]).copied().unwrap_or(0.0);
+            strength(*right).total_cmp(&strength(*left))
+        });
+        if let Some(paths) = &mut seed_paths {
+            *paths = seed_order
+                .iter()
+                .map(|index| paths[*index].clone())
+                .collect();
+        }
+        seed_ids = seed_order
+            .into_iter()
+            .map(|index| seed_ids[index])
+            .collect();
         // A link is indirect evidence: it cannot be stronger than its seed.
         let graph_strengths: Vec<f64> = seed_ids
             .iter()

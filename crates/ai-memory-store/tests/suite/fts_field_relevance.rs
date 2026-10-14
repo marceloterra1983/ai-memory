@@ -194,6 +194,74 @@ async fn strongest_body_evidence_survives_session_authority_penalty() {
 }
 
 #[tokio::test]
+async fn equal_body_scores_allow_canonical_authority_to_promote_last_rule() {
+    let (_tmp, store, ws, proj) = fixture().await;
+    for index in 0..20 {
+        store
+            .writer
+            .upsert_page(page(
+                ws,
+                proj,
+                &format!("notes/background-{index}.md"),
+                "Inventory background",
+                "Ordinary inventory background",
+                Tier::Semantic,
+            ))
+            .await
+            .unwrap();
+    }
+    // Equal-length paths, titles and bodies give exactly tied BM25 scores.
+    // The maintained rule is inserted last, after the low-authority sessions.
+    for index in 0..5 {
+        store
+            .writer
+            .upsert_page(page(
+                ws,
+                proj,
+                &format!("sessions/match-{index}.md"),
+                "Inventory record",
+                "quartz recovery evidence",
+                Tier::Episodic,
+            ))
+            .await
+            .unwrap();
+    }
+    let mut rule = page(
+        ws,
+        proj,
+        "_rules/match-5.md",
+        "Inventory record",
+        "quartz recovery evidence",
+        Tier::Semantic,
+    );
+    rule.pinned = true;
+    rule.frontmatter_json = serde_json::json!({"tags": ["canonical"]});
+    let rule_id = store.writer.upsert_page(rule).await.unwrap();
+    let raw_scores = store.reader.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT pages_fts.rank FROM pages_fts WHERE pages_fts MATCH 'quartz' ORDER BY pages_fts.rank")?;
+        let scores = stmt.query_map([], |row| row.get::<_, f64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(scores)
+    }).await.unwrap();
+    assert_eq!(raw_scores.len(), 6);
+    assert!(raw_scores[0] < -0.1);
+    assert!(
+        raw_scores.iter().all(|score| *score == raw_scores[0]),
+        "the fixture must contain real BM25 ties"
+    );
+    let hits = store
+        .reader
+        .search_pages_for_project(ws, proj, "quartz".into(), 3, None)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 3);
+    assert_eq!(
+        hits[0].id, rule_id,
+        "equal body evidence must leave room for authority: {hits:?}"
+    );
+}
+
+#[tokio::test]
 async fn explicit_body_column_does_not_promote_title_only_matches() {
     let (_tmp, store, ws, proj) = fixture().await;
     let title_only = store

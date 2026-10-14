@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Preserved topical title and strong body evidence in bounded FTS candidate
+  pools, and weighted hybrid retrieval votes by lexical, cosine, entity and
+  source-seed strength before source authority. The two FTS field windows of
+  one search share a read transaction, so a concurrent supersession cannot
+  mix two versions of the same path. Kept query syntax, requested limits and
+  scope/access/latest/expiry guards intact, and exposed the negated lexical
+  strength used by RRF in query explanations.
+  (local-20261013; private integration, no upstream issue opened)
 - Retained the native-hook worker's open lock descriptor while waiting for a
   preservation guard handoff, and closed its lock and database cleanly when
   cancelled before acquisition. (local-20261010; private integration, no upstream issue opened)

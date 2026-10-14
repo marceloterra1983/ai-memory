@@ -480,10 +480,94 @@ fn authority_candidate_limit(limit: usize) -> usize {
         .min(limit.saturating_add(AUTHORITY_MAX_EXTRA_CANDIDATES))
 }
 
-fn rerank_page_hits(candidates: Vec<(PageHit, PageAuthority)>, limit: usize) -> Vec<PageHit> {
+/// Preserve strong topic matches alongside body/path evidence. Adding the
+/// field scores rewards incidental overlap; the better reciprocal rank keeps
+/// a long, topical page competitive without counting that overlap twice.
+fn merge_fts_candidates<T, K: Eq + std::hash::Hash>(
+    normal: Vec<(T, PageAuthority)>,
+    titles: Vec<(T, PageAuthority)>,
+    floor_bound: f64,
+    key: impl Fn(&T) -> K,
+    rank: impl Fn(&T) -> f64,
+    set_rank: impl Fn(&mut T, f64),
+) -> Vec<(T, PageAuthority, f64)> {
+    struct Candidate<T> {
+        hit: T,
+        authority: PageAuthority,
+        normal_rank: usize,
+        title_rank: usize,
+        normal_score: f64,
+    }
+    let peak = normal.first().map_or(0.0, |(hit, _)| rank(hit).abs());
+    let mut candidates = std::collections::HashMap::new();
+    for (index, (hit, authority)) in normal.into_iter().enumerate() {
+        candidates.insert(
+            key(&hit),
+            Candidate {
+                normal_score: rank(&hit),
+                hit,
+                authority,
+                normal_rank: index + 1,
+                title_rank: usize::MAX,
+            },
+        );
+    }
+    for (index, (hit, authority)) in titles.into_iter().enumerate() {
+        // MATCH still covers all fields so both rankers share term statistics.
+        // A page matched only in its body/path supplies no title evidence.
+        if rank(&hit) >= 0.0 {
+            continue;
+        }
+        candidates
+            .entry(key(&hit))
+            .and_modify(|candidate| candidate.title_rank = index + 1)
+            .or_insert(Candidate {
+                hit,
+                authority,
+                normal_rank: usize::MAX,
+                title_rank: index + 1,
+                normal_score: 0.0,
+            });
+    }
+    let mut candidates: Vec<_> = candidates.into_values().collect();
+    for candidate in &mut candidates {
+        let normal_score = if peak > floor_bound {
+            1.0 / candidate.normal_rank as f64
+        } else {
+            // SQLite floors IDF at 1e-6 and caps each phrase's TF contribution
+            // at k1 + 1 = 2.2. Turning scores in that floor range into ordinal
+            // ranks magnifies tiny frequency differences over page authority.
+            candidate.normal_score.abs() / peak.max(f64::MIN_POSITIVE)
+        };
+        let title_score = 1.0 / candidate.title_rank as f64;
+        set_rank(&mut candidate.hit, -normal_score.max(title_score));
+    }
+    candidates.sort_by(|a, b| {
+        rank(&a.hit)
+            .total_cmp(&rank(&b.hit))
+            .then_with(|| a.title_rank.cmp(&b.title_rank))
+            .then_with(|| a.normal_rank.cmp(&b.normal_rank))
+    });
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            // Common-term IDF floors carry no calibrated magnitude: preserve
+            // the existing uniform RRF vote rather than magnifying TF/length
+            // differences over bounded session intent and page authority.
+            let strength = if peak <= floor_bound && candidate.normal_rank != usize::MAX {
+                1.0
+            } else {
+                (-rank(&candidate.hit)).clamp(0.0, 1.0)
+            };
+            (candidate.hit, candidate.authority, strength)
+        })
+        .collect()
+}
+
+fn rerank_page_hits(candidates: Vec<(PageHit, PageAuthority, f64)>, limit: usize) -> Vec<PageHit> {
     let mut hits: Vec<PageHit> = candidates
         .into_iter()
-        .map(|(mut hit, authority)| {
+        .map(|(mut hit, authority, _strength)| {
             hit.rank = authority.adjust_rank(hit.rank);
             hit
         })
@@ -498,12 +582,12 @@ fn rerank_page_hits(candidates: Vec<(PageHit, PageAuthority)>, limit: usize) -> 
 }
 
 fn rerank_page_hits_with_meta(
-    candidates: Vec<(PageHitWithMeta, PageAuthority)>,
+    candidates: Vec<(PageHitWithMeta, PageAuthority, f64)>,
     limit: usize,
 ) -> Vec<PageHitWithMeta> {
     let mut hits: Vec<PageHitWithMeta> = candidates
         .into_iter()
-        .map(|(mut hit, authority)| {
+        .map(|(mut hit, authority, _strength)| {
             hit.rank = authority.adjust_rank(hit.rank);
             hit
         })
@@ -654,7 +738,7 @@ pub struct GraphVia {
     pub edge: Option<String>,
 }
 
-/// Per-stream RRF contributions (`1/(k+rank)`, k=60) for one hit.
+/// Per-stream RRF contributions (`strength/(k+rank)`, k=60) for one hit.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RrfContributions {
     /// FTS5 stream contribution (0.0 when the hit missed that stream).
@@ -687,7 +771,7 @@ pub struct SearchExplain {
     /// 1-based rank in the FTS5 stream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fts_rank: Option<usize>,
-    /// Raw FTS5 (bm25-based) score — lower is better.
+    /// Negated lexical strength used by RRF before authority — lower is better.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fts_score: Option<f64>,
     /// 1-based rank in the vector stream.
@@ -711,7 +795,7 @@ pub struct SearchExplain {
     /// 1-based rank in the entity-match stream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entity_rank: Option<usize>,
-    /// Raw inverse-frequency weight used to order the entity stream.
+    /// Query coverage times inverse-frequency weight used to order entity hits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entity_weight: Option<f64>,
     /// Entity names on this page that matched the query.
@@ -1748,6 +1832,14 @@ pub struct ReaderPool {
     /// after [`Self::set_fts_stopwords`] share the operator's choice.
     /// Cheap to clone (`FtsStopwords` is `Arc`-backed).
     fts_stopwords: FtsStopwords,
+    #[cfg(test)]
+    field_window_pause: Arc<Mutex<Option<FieldWindowPause>>>,
+}
+
+#[cfg(test)]
+struct FieldWindowPause {
+    ready: std::sync::mpsc::SyncSender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
 }
 
 struct Inner {
@@ -1771,7 +1863,26 @@ impl ReaderPool {
             }),
             tuning: RetrievalTuning::default(),
             fts_stopwords: FtsStopwords::default(),
+            #[cfg(test)]
+            field_window_pause: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Pause one scoped FTS search between field windows for a concurrent writer test.
+    #[cfg(test)]
+    pub(crate) fn pause_next_field_window(
+        &self,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (ready, notice) = std::sync::mpsc::sync_channel(1);
+        let (resume, wait) = std::sync::mpsc::sync_channel(1);
+        *self.field_window_pause.lock() = Some(FieldWindowPause {
+            ready,
+            resume: wait,
+        });
+        (notice, resume)
     }
 
     /// Configure the opt-in ranking signals used by [`Self::hybrid_search`].
@@ -1975,71 +2086,99 @@ impl ReaderPool {
             return Ok(Vec::new());
         }
         self.with_conn(move |conn| {
+            // Both field windows must see one version/grant snapshot.
+            let snapshot = conn.unchecked_transaction()?;
+            let conn = &snapshot;
             let kind_expr = page_kind_expr("pages.path", "pages.frontmatter_json");
             let (visible, visible_params) =
                 readable_repository_filter("pages.project_id", viewer, 4);
-            let sql = format!(
-                "SELECT pages.id, pages.path, pages.title, \
-                        snippet(pages_fts, 1, '<mark>', '</mark>', '…', 24) AS snip, \
-                        pages_fts.rank, pages.tier, pages.pinned, \
-                        pages.frontmatter_json, {kind_expr} AS kind \
-                 FROM pages_fts \
-                 JOIN pages ON pages.rowid = pages_fts.rowid \
-                 WHERE pages_fts MATCH ?1 AND pages.is_latest = 1{not_expired}{visible} \
-                 ORDER BY pages_fts.rank \
-                 LIMIT ?2",
-                not_expired = not_expired("pages", "?3"),
-            );
-            let mut stmt = conn.prepare(&sql)?;
             #[allow(clippy::cast_possible_wrap)]
+            let floor_bound = 2.2e-6 * fts_query.split_whitespace().count() as f64;
             let mut bound = vec![
                 Value::Text(fts_query),
                 Value::Integer(authority_candidate_limit(limit) as i64),
                 Value::Integer(now_us()),
             ];
             bound.extend(visible_params);
-            let rows = stmt.query_map(params_from_iter(bound.iter()), |row| {
-                let id_bytes: Vec<u8> = row.get(0)?;
-                let path: String = row.get(1)?;
-                let title: String = row.get(2)?;
-                let snippet: String = row.get(3)?;
-                let rank: f64 = row.get(4)?;
-                let tier: String = row.get(5)?;
-                let pinned = row.get::<_, i64>(6)? != 0;
-                let frontmatter_json: String = row.get(7)?;
-                let kind: String = row.get(8)?;
-                Ok((
-                    id_bytes,
-                    path,
-                    title,
-                    snippet,
-                    rank,
-                    tier,
-                    pinned,
-                    frontmatter_json,
-                    kind,
-                ))
-            })?;
+            let mut streams = Vec::with_capacity(2);
+            for score in ["pages_fts.rank", "bm25(pages_fts, 1, 0, 0)"] {
+                let sql = format!(
+                    "SELECT pages.id, pages.path, pages.title, \
+                            snippet(pages_fts, 1, '<mark>', '</mark>', '…', 24) AS snip, \
+                            {score}, pages.tier, pages.pinned, \
+                            pages.frontmatter_json, {kind_expr} AS kind \
+                     FROM pages_fts \
+                     JOIN pages ON pages.rowid = pages_fts.rowid \
+                     WHERE pages_fts MATCH ?1 AND pages.is_latest = 1{not_expired}{visible} \
+                     ORDER BY {score} \
+                     LIMIT ?2",
+                    not_expired = not_expired("pages", "?3"),
+                );
+                let mut stmt = conn.prepare(&sql)?;
 
-            let mut candidates = Vec::new();
-            for row in rows {
-                let (id_bytes, path, title, snippet, rank, tier, pinned, frontmatter_json, kind) =
-                    row?;
-                let authority =
-                    PageAuthority::from_stored(&path, &kind, &tier, pinned, &frontmatter_json);
-                candidates.push((
-                    PageHit {
-                        id: PageId::from_slice(&id_bytes)?,
-                        path: PagePath::new(path)?,
+                let rows = stmt.query_map(params_from_iter(bound.iter()), |row| {
+                    let id_bytes: Vec<u8> = row.get(0)?;
+                    let path: String = row.get(1)?;
+                    let title: String = row.get(2)?;
+                    let snippet: String = row.get(3)?;
+                    let rank: f64 = row.get(4)?;
+                    let tier: String = row.get(5)?;
+                    let pinned = row.get::<_, i64>(6)? != 0;
+                    let frontmatter_json: String = row.get(7)?;
+                    let kind: String = row.get(8)?;
+                    Ok((
+                        id_bytes,
+                        path,
                         title,
                         snippet,
                         rank,
-                        superseded: false,
-                        pinned: false,
-                    },
-                    authority,
-                ));
+                        tier,
+                        pinned,
+                        frontmatter_json,
+                        kind,
+                    ))
+                })?;
+
+                let mut candidates = Vec::new();
+                for row in rows {
+                    let (
+                        id_bytes,
+                        path,
+                        title,
+                        snippet,
+                        rank,
+                        tier,
+                        pinned,
+                        frontmatter_json,
+                        kind,
+                    ) = row?;
+                    let authority =
+                        PageAuthority::from_stored(&path, &kind, &tier, pinned, &frontmatter_json);
+                    candidates.push((
+                        PageHit {
+                            id: PageId::from_slice(&id_bytes)?,
+                            path: PagePath::new(path)?,
+                            title,
+                            snippet,
+                            rank,
+                            superseded: false,
+                            pinned: false,
+                        },
+                        authority,
+                    ));
+                }
+                streams.push(candidates);
             }
+            let titles = streams.pop().unwrap_or_default();
+            let normal = streams.pop().unwrap_or_default();
+            let candidates = merge_fts_candidates(
+                normal,
+                titles,
+                floor_bound,
+                |hit: &PageHit| hit.id,
+                |hit| hit.rank,
+                |hit, rank| hit.rank = rank,
+            );
             Ok(rerank_page_hits(candidates, limit))
         })
         .await
@@ -2068,84 +2207,109 @@ impl ReaderPool {
         }
         let cutoff = expiry_cutoff_us.unwrap_or_else(now_us);
         self.with_conn(move |conn| {
+            // Both field windows must see one version/grant snapshot.
+            let snapshot = conn.unchecked_transaction()?;
+            let conn = &snapshot;
             let kind_expr = page_kind_expr("pages.path", "pages.frontmatter_json");
             let (visible, visible_params) =
                 readable_repository_filter("pages.project_id", viewer, 4);
-            let sql = format!(
-                "SELECT workspaces.name, projects.name, pages.path, pages.title, \
-                        snippet(pages_fts, 1, '<mark>', '</mark>', '…', 24) AS snip, \
-                        pages_fts.rank, pages.tier, pages.pinned, \
-                        pages.frontmatter_json, {kind_expr} AS kind \
-                 FROM pages_fts \
-                 JOIN pages ON pages.rowid = pages_fts.rowid \
-                 JOIN projects ON projects.id = pages.project_id \
-                 JOIN workspaces ON workspaces.id = pages.workspace_id \
-                 WHERE pages_fts MATCH ?1 AND pages.is_latest = 1{not_expired}{visible} \
-                 ORDER BY pages_fts.rank \
-                 LIMIT ?2",
-                not_expired = not_expired("pages", "?3"),
-            );
-            let mut stmt = conn.prepare(&sql)?;
             #[allow(clippy::cast_possible_wrap)]
+            let floor_bound = 2.2e-6 * fts_query.split_whitespace().count() as f64;
             let mut bound = vec![
                 Value::Text(fts_query),
                 Value::Integer(authority_candidate_limit(limit) as i64),
                 Value::Integer(cutoff),
             ];
             bound.extend(visible_params);
-            let rows = stmt.query_map(params_from_iter(bound.iter()), |row| {
-                let workspace_name: String = row.get(0)?;
-                let project_name: String = row.get(1)?;
-                let path: String = row.get(2)?;
-                let title: String = row.get(3)?;
-                let snippet: String = row.get(4)?;
-                let rank: f64 = row.get(5)?;
-                let tier: String = row.get(6)?;
-                let pinned = row.get::<_, i64>(7)? != 0;
-                let frontmatter_json: String = row.get(8)?;
-                let kind: String = row.get(9)?;
-                Ok((
-                    workspace_name,
-                    project_name,
-                    path,
-                    title,
-                    snippet,
-                    rank,
-                    tier,
-                    pinned,
-                    frontmatter_json,
-                    kind,
-                ))
-            })?;
+            let mut streams = Vec::with_capacity(2);
+            for score in ["pages_fts.rank", "bm25(pages_fts, 1, 0, 0)"] {
+                let sql = format!(
+                    "SELECT workspaces.name, projects.name, pages.path, pages.title, \
+                            snippet(pages_fts, 1, '<mark>', '</mark>', '…', 24) AS snip, \
+                            {score}, pages.tier, pages.pinned, \
+                            pages.frontmatter_json, {kind_expr} AS kind \
+                     FROM pages_fts \
+                     JOIN pages ON pages.rowid = pages_fts.rowid \
+                     JOIN projects ON projects.id = pages.project_id \
+                     JOIN workspaces ON workspaces.id = pages.workspace_id \
+                     WHERE pages_fts MATCH ?1 AND pages.is_latest = 1{not_expired}{visible} \
+                     ORDER BY {score} \
+                     LIMIT ?2",
+                    not_expired = not_expired("pages", "?3"),
+                );
+                let mut stmt = conn.prepare(&sql)?;
 
-            let mut candidates = Vec::new();
-            for row in rows {
-                let (
-                    workspace_name,
-                    project_name,
-                    path,
-                    title,
-                    snippet,
-                    rank,
-                    tier,
-                    pinned,
-                    frontmatter_json,
-                    kind,
-                ) = row?;
-                let authority =
-                    PageAuthority::from_stored(&path, &kind, &tier, pinned, &frontmatter_json);
-                candidates.push((
-                    PageHitWithMeta {
+                let rows = stmt.query_map(params_from_iter(bound.iter()), |row| {
+                    let workspace_name: String = row.get(0)?;
+                    let project_name: String = row.get(1)?;
+                    let path: String = row.get(2)?;
+                    let title: String = row.get(3)?;
+                    let snippet: String = row.get(4)?;
+                    let rank: f64 = row.get(5)?;
+                    let tier: String = row.get(6)?;
+                    let pinned = row.get::<_, i64>(7)? != 0;
+                    let frontmatter_json: String = row.get(8)?;
+                    let kind: String = row.get(9)?;
+                    Ok((
                         workspace_name,
                         project_name,
-                        path: PagePath::new(path)?,
+                        path,
                         title,
                         snippet,
                         rank,
-                    },
-                    authority,
-                ));
+                        tier,
+                        pinned,
+                        frontmatter_json,
+                        kind,
+                    ))
+                })?;
+
+                let mut candidates = Vec::new();
+                for row in rows {
+                    let (
+                        workspace_name,
+                        project_name,
+                        path,
+                        title,
+                        snippet,
+                        rank,
+                        tier,
+                        pinned,
+                        frontmatter_json,
+                        kind,
+                    ) = row?;
+                    let authority =
+                        PageAuthority::from_stored(&path, &kind, &tier, pinned, &frontmatter_json);
+                    candidates.push((
+                        PageHitWithMeta {
+                            workspace_name,
+                            project_name,
+                            path: PagePath::new(path)?,
+                            title,
+                            snippet,
+                            rank,
+                        },
+                        authority,
+                    ));
+                }
+                streams.push(candidates);
             }
+            let titles = streams.pop().unwrap_or_default();
+            let normal = streams.pop().unwrap_or_default();
+            let candidates = merge_fts_candidates(
+                normal,
+                titles,
+                floor_bound,
+                |hit: &PageHitWithMeta| {
+                    (
+                        hit.workspace_name.clone(),
+                        hit.project_name.clone(),
+                        hit.path.clone(),
+                    )
+                },
+                |hit| hit.rank,
+                |hit, rank| hit.rank = rank,
+            );
             Ok(rerank_page_hits_with_meta(candidates, limit))
         })
         .await
@@ -2192,50 +2356,86 @@ impl ReaderPool {
         candidate_limit: usize,
         expiry_cutoff_us: Option<i64>,
         include_superseded: bool,
-    ) -> StoreResult<Vec<(PageHit, PageAuthority)>> {
+    ) -> StoreResult<Vec<(PageHit, PageAuthority, f64)>> {
         let fts_query = normalize_fts_query(&query, &self.fts_stopwords);
         if fts_query.is_empty() || candidate_limit == 0 {
             return Ok(Vec::new());
         }
         let cutoff = expiry_cutoff_us.unwrap_or_else(now_us);
+        #[cfg(test)]
+        let field_window_pause = self.field_window_pause.lock().take();
         self.with_conn(move |conn| {
+            // Both field windows must see one version/grant snapshot.
+            let snapshot = conn.unchecked_transaction()?;
+            let conn = &snapshot;
             let kind_expr = page_kind_expr("pages.path", "pages.frontmatter_json");
-            let sql = format!(
-                "SELECT pages.id, pages.path, pages.title, \
-                        snippet(pages_fts, 1, '<mark>', '</mark>', '…', 24) AS snip, \
-                        pages_fts.rank, pages.tier, pages.pinned, \
-                        pages.frontmatter_json, {kind_expr} AS kind \
-                 FROM pages_fts \
-                 JOIN pages ON pages.rowid = pages_fts.rowid \
-                 WHERE pages_fts MATCH ?1 \
-                   AND pages.workspace_id = ?2 \
-                   AND pages.project_id = ?3{latest}{not_expired} \
-                 ORDER BY pages_fts.rank \
-                 LIMIT ?4",
-                latest = latest_only("pages", include_superseded),
-                not_expired = not_expired("pages", "?5"),
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            #[allow(clippy::cast_possible_wrap)]
-            let rows = stmt.query_map(
-                params![
-                    fts_query,
-                    workspace_id.as_bytes(),
-                    project_id.as_bytes(),
-                    candidate_limit as i64,
-                    cutoff
-                ],
-                |row| {
-                    let id_bytes: Vec<u8> = row.get(0)?;
-                    let path: String = row.get(1)?;
-                    let title: String = row.get(2)?;
-                    let snippet: String = row.get(3)?;
-                    let rank: f64 = row.get(4)?;
-                    let tier: String = row.get(5)?;
-                    let pinned = row.get::<_, i64>(6)? != 0;
-                    let frontmatter_json: String = row.get(7)?;
-                    let kind: String = row.get(8)?;
-                    Ok((
+            let mut streams = Vec::with_capacity(2);
+            for score in ["pages_fts.rank", "bm25(pages_fts, 1, 0, 0)"] {
+                #[cfg(test)]
+                if streams.len() == 1
+                    && let Some(pause) = &field_window_pause
+                {
+                    pause
+                        .ready
+                        .send(())
+                        .expect("writer test must receive the pause");
+                    pause
+                        .resume
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .expect("writer test must resume the read");
+                }
+                let sql = format!(
+                    "SELECT pages.id, pages.path, pages.title, \
+                            snippet(pages_fts, 1, '<mark>', '</mark>', '…', 24) AS snip, \
+                            {score}, pages.tier, pages.pinned, \
+                            pages.frontmatter_json, {kind_expr} AS kind \
+                     FROM pages_fts \
+                     JOIN pages ON pages.rowid = pages_fts.rowid \
+                     WHERE pages_fts MATCH ?1 \
+                       AND pages.workspace_id = ?2 \
+                       AND pages.project_id = ?3{latest}{not_expired} \
+                     ORDER BY {score} \
+                     LIMIT ?4",
+                    latest = latest_only("pages", include_superseded),
+                    not_expired = not_expired("pages", "?5"),
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                #[allow(clippy::cast_possible_wrap)]
+                let rows = stmt.query_map(
+                    params![
+                        fts_query,
+                        workspace_id.as_bytes(),
+                        project_id.as_bytes(),
+                        candidate_limit as i64,
+                        cutoff
+                    ],
+                    |row| {
+                        let id_bytes: Vec<u8> = row.get(0)?;
+                        let path: String = row.get(1)?;
+                        let title: String = row.get(2)?;
+                        let snippet: String = row.get(3)?;
+                        let rank: f64 = row.get(4)?;
+                        let tier: String = row.get(5)?;
+                        let pinned = row.get::<_, i64>(6)? != 0;
+                        let frontmatter_json: String = row.get(7)?;
+                        let kind: String = row.get(8)?;
+                        Ok((
+                            id_bytes,
+                            path,
+                            title,
+                            snippet,
+                            rank,
+                            tier,
+                            pinned,
+                            frontmatter_json,
+                            kind,
+                        ))
+                    },
+                )?;
+
+                let mut candidates = Vec::new();
+                for row in rows {
+                    let (
                         id_bytes,
                         path,
                         title,
@@ -2245,29 +2445,34 @@ impl ReaderPool {
                         pinned,
                         frontmatter_json,
                         kind,
-                    ))
-                },
-            )?;
-
-            let mut candidates = Vec::new();
-            for row in rows {
-                let (id_bytes, path, title, snippet, rank, tier, pinned, frontmatter_json, kind) =
-                    row?;
-                let authority =
-                    PageAuthority::from_stored(&path, &kind, &tier, pinned, &frontmatter_json);
-                candidates.push((
-                    PageHit {
-                        id: PageId::from_slice(&id_bytes)?,
-                        path: PagePath::new(path)?,
-                        title,
-                        snippet,
-                        rank,
-                        superseded: false,
-                        pinned: false,
-                    },
-                    authority,
-                ));
+                    ) = row?;
+                    let authority =
+                        PageAuthority::from_stored(&path, &kind, &tier, pinned, &frontmatter_json);
+                    candidates.push((
+                        PageHit {
+                            id: PageId::from_slice(&id_bytes)?,
+                            path: PagePath::new(path)?,
+                            title,
+                            snippet,
+                            rank,
+                            superseded: false,
+                            pinned: false,
+                        },
+                        authority,
+                    ));
+                }
+                streams.push(candidates);
             }
+            let titles = streams.pop().unwrap_or_default();
+            let normal = streams.pop().unwrap_or_default();
+            let candidates = merge_fts_candidates(
+                normal,
+                titles,
+                2.2e-6 * fts_query.split_whitespace().count() as f64,
+                |hit: &PageHit| hit.id,
+                |hit| hit.rank,
+                |hit, rank| hit.rank = rank,
+            );
             Ok(candidates)
         })
         .await
@@ -2288,52 +2493,73 @@ impl ReaderPool {
         query: String,
         candidate_limit: usize,
         as_of_us: i64,
-    ) -> StoreResult<Vec<(PageHit, PageAuthority)>> {
+    ) -> StoreResult<Vec<(PageHit, PageAuthority, f64)>> {
         let fts_query = normalize_fts_query(&query, &self.fts_stopwords);
         if fts_query.is_empty() || candidate_limit == 0 {
             return Ok(Vec::new());
         }
         self.with_conn(move |conn| {
+            // Both field windows must see one version/grant snapshot.
+            let snapshot = conn.unchecked_transaction()?;
+            let conn = &snapshot;
             let kind_expr = page_kind_expr("pages.path", "pages.frontmatter_json");
-            let sql = format!(
-                "SELECT pages.id, pages.path, pages.title, \
-                        snippet(pages_fts, 1, '<mark>', '</mark>', '…', 24) AS snip, \
-                        pages_fts.rank, pages.tier, pages.pinned, \
-                        pages.frontmatter_json, {kind_expr} AS kind \
-                 FROM pages_fts \
-                 JOIN pages ON pages.rowid = pages_fts.rowid \
-                 WHERE pages_fts MATCH ?1 \
-                   AND pages.workspace_id = ?2 \
-                   AND pages.project_id = ?3 \
-                   AND pages.valid_from <= ?4 \
-                   AND (pages.valid_to IS NULL OR pages.valid_to > ?5){not_expired} \
-                 ORDER BY pages_fts.rank \
-                 LIMIT ?7",
-                not_expired = not_expired("pages", "?6"),
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            #[allow(clippy::cast_possible_wrap)]
-            let rows = stmt.query_map(
-                params![
-                    fts_query,
-                    workspace_id.as_bytes(),
-                    project_id.as_bytes(),
-                    as_of_us,
-                    as_of_us,
-                    as_of_us,
-                    candidate_limit as i64
-                ],
-                |row| {
-                    let id_bytes: Vec<u8> = row.get(0)?;
-                    let path: String = row.get(1)?;
-                    let title: String = row.get(2)?;
-                    let snippet: String = row.get(3)?;
-                    let rank: f64 = row.get(4)?;
-                    let tier: String = row.get(5)?;
-                    let pinned = row.get::<_, i64>(6)? != 0;
-                    let frontmatter_json: String = row.get(7)?;
-                    let kind: String = row.get(8)?;
-                    Ok((
+            let mut streams = Vec::with_capacity(2);
+            for score in ["pages_fts.rank", "bm25(pages_fts, 1, 0, 0)"] {
+                let sql = format!(
+                    "SELECT pages.id, pages.path, pages.title, \
+                            snippet(pages_fts, 1, '<mark>', '</mark>', '…', 24) AS snip, \
+                            {score}, pages.tier, pages.pinned, \
+                            pages.frontmatter_json, {kind_expr} AS kind \
+                     FROM pages_fts \
+                     JOIN pages ON pages.rowid = pages_fts.rowid \
+                     WHERE pages_fts MATCH ?1 \
+                       AND pages.workspace_id = ?2 \
+                       AND pages.project_id = ?3 \
+                       AND pages.valid_from <= ?4 \
+                       AND (pages.valid_to IS NULL OR pages.valid_to > ?5){not_expired} \
+                     ORDER BY {score} \
+                     LIMIT ?7",
+                    not_expired = not_expired("pages", "?6"),
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                #[allow(clippy::cast_possible_wrap)]
+                let rows = stmt.query_map(
+                    params![
+                        fts_query,
+                        workspace_id.as_bytes(),
+                        project_id.as_bytes(),
+                        as_of_us,
+                        as_of_us,
+                        as_of_us,
+                        candidate_limit as i64
+                    ],
+                    |row| {
+                        let id_bytes: Vec<u8> = row.get(0)?;
+                        let path: String = row.get(1)?;
+                        let title: String = row.get(2)?;
+                        let snippet: String = row.get(3)?;
+                        let rank: f64 = row.get(4)?;
+                        let tier: String = row.get(5)?;
+                        let pinned = row.get::<_, i64>(6)? != 0;
+                        let frontmatter_json: String = row.get(7)?;
+                        let kind: String = row.get(8)?;
+                        Ok((
+                            id_bytes,
+                            path,
+                            title,
+                            snippet,
+                            rank,
+                            tier,
+                            pinned,
+                            frontmatter_json,
+                            kind,
+                        ))
+                    },
+                )?;
+
+                let mut candidates = Vec::new();
+                for row in rows {
+                    let (
                         id_bytes,
                         path,
                         title,
@@ -2343,29 +2569,34 @@ impl ReaderPool {
                         pinned,
                         frontmatter_json,
                         kind,
-                    ))
-                },
-            )?;
-
-            let mut candidates = Vec::new();
-            for row in rows {
-                let (id_bytes, path, title, snippet, rank, tier, pinned, frontmatter_json, kind) =
-                    row?;
-                let authority =
-                    PageAuthority::from_stored(&path, &kind, &tier, pinned, &frontmatter_json);
-                candidates.push((
-                    PageHit {
-                        id: PageId::from_slice(&id_bytes)?,
-                        path: PagePath::new(path)?,
-                        title,
-                        snippet,
-                        rank,
-                        superseded: false,
-                        pinned: false,
-                    },
-                    authority,
-                ));
+                    ) = row?;
+                    let authority =
+                        PageAuthority::from_stored(&path, &kind, &tier, pinned, &frontmatter_json);
+                    candidates.push((
+                        PageHit {
+                            id: PageId::from_slice(&id_bytes)?,
+                            path: PagePath::new(path)?,
+                            title,
+                            snippet,
+                            rank,
+                            superseded: false,
+                            pinned: false,
+                        },
+                        authority,
+                    ));
+                }
+                streams.push(candidates);
             }
+            let titles = streams.pop().unwrap_or_default();
+            let normal = streams.pop().unwrap_or_default();
+            let candidates = merge_fts_candidates(
+                normal,
+                titles,
+                2.2e-6 * fts_query.split_whitespace().count() as f64,
+                |hit: &PageHit| hit.id,
+                |hit| hit.rank,
+                |hit, rank| hit.rank = rank,
+            );
             Ok(candidates)
         })
         .await
@@ -2424,7 +2655,7 @@ impl ReaderPool {
             .await?;
         let mut authorities: std::collections::HashMap<PageId, PageAuthority> = fts_candidates
             .iter()
-            .map(|(hit, authority)| (hit.id, *authority))
+            .map(|(hit, authority, _)| (hit.id, *authority))
             .collect();
         // Entity-only hits never passed through an FTS candidate row;
         // read their authority off the version row itself (no latest
@@ -2439,7 +2670,7 @@ impl ReaderPool {
                 .await?,
         );
 
-        // RRF fuse: score(d) = Σ 1/(k + rank_i(d)) over the two streams.
+        // RRF fuse: score(d) = Σ strength_i(d)/(k + rank_i(d)).
         let k = 60.0_f64;
         struct FusedAt {
             path: PagePath,
@@ -2450,8 +2681,8 @@ impl ReaderPool {
         }
         let mut fused: std::collections::HashMap<PageId, FusedAt> =
             std::collections::HashMap::new();
-        for (rank, h) in fts_candidates.iter().map(|(hit, _)| hit).enumerate() {
-            let contrib = 1.0 / (k + (rank + 1) as f64);
+        for (rank, (h, _authority, strength)) in fts_candidates.iter().enumerate() {
+            let contrib = strength / (k + (rank + 1) as f64);
             let entry = fused.entry(h.id).or_insert_with(|| FusedAt {
                 path: h.path.clone(),
                 title: h.title.clone(),
@@ -2462,13 +2693,13 @@ impl ReaderPool {
             entry.score += contrib;
             if let Some(details) = &mut entry.explain {
                 details.fts_rank = Some(rank + 1);
-                details.fts_score = Some(h.rank);
+                details.fts_score = Some(-strength);
                 details.rrf.fts = contrib;
                 details.fused += contrib;
             }
         }
         for (rank, e) in entity_hits.iter().enumerate() {
-            let contrib = 1.0 / (k + (rank + 1) as f64);
+            let contrib = e.weight.clamp(0.0, 1.0) / (k + (rank + 1) as f64);
             let entry = fused.entry(e.hit.id).or_insert_with(|| FusedAt {
                 path: e.hit.path.clone(),
                 title: e.hit.title.clone(),
@@ -4724,29 +4955,15 @@ impl ReaderPool {
                 .as_deref()
                 .and_then(ai_memory_core::normalize_entity)
                 .unwrap_or_default();
-            let mut placeholders = String::with_capacity(tokens.len() * 96);
-            let mut sql_params: Vec<Value> = Vec::with_capacity(tokens.len() * 5 + 10);
+            let mut placeholders = String::with_capacity(tokens.len() * 8);
+            let mut sql_params: Vec<Value> = Vec::with_capacity(tokens.len() * 2 + 10);
             for (idx, token) in tokens.iter().enumerate() {
                 if idx > 0 {
-                    placeholders.push_str(" OR ");
+                    placeholders.push_str(", ");
                 }
-                // Match exact names, name prefixes, and word prefixes after
-                // any accepted entity separator. The latter lets `actor`
-                // find `writer actor`, `writer-actor`, and `writer_actor`.
-                //
-                // `?` is positional-by-order, same as the graph query.
-                placeholders.push_str(
-                    "(e.name = ? \
-                      OR e.name LIKE ? || '%' ESCAPE '\\' \
-                      OR e.name LIKE '% ' || ? || '%' ESCAPE '\\' \
-                      OR e.name LIKE '%-' || ? || '%' ESCAPE '\\' \
-                      OR e.name LIKE '%\\_' || ? || '%' ESCAPE '\\')",
-                );
+                placeholders.push_str("(?, ?)");
                 sql_params.push(Value::Text(token.clone()));
-                let escaped = like_escape(token);
-                for _ in 0..4 {
-                    sql_params.push(Value::Text(escaped.clone()));
-                }
+                sql_params.push(Value::Text(like_escape(token)));
             }
             sql_params.push(Value::Blob(workspace_id.as_bytes().to_vec()));
             sql_params.push(Value::Blob(project_id.as_bytes().to_vec()));
@@ -4773,25 +4990,56 @@ impl ReaderPool {
             let mut sql = String::with_capacity(placeholders.len() + 1_200);
             write!(
                 &mut sql,
-                // `freq` is how many current pages in this project carry
-                // the entity; 1/freq is the inverse-frequency weight.
-                "WITH matched AS ( \
+                // Prefixes still discover compound names, but missing words
+                // cannot inherit the compound's full inverse-frequency vote.
+                // json_quote keeps quotes/backslashes in names literal while
+                // the accepted separators become words. MAX avoids counting
+                // overlapping query prefixes twice; AVG covers the whole name.
+                "WITH query_tokens(token, escaped) AS (VALUES {placeholders}), \
+                 coverage_tokens(token, escaped) AS ( \
+                   SELECT token, escaped FROM query_tokens \
+                   UNION SELECT w.value, w.value FROM query_tokens q, \
+                     json_each('[' || replace(json_quote( \
+                       replace(replace(q.token, '-', ' '), '_', ' ')), ' ', '\",\"') || ']') w \
+                   WHERE w.value <> '' \
+                 ), \
+                 matched AS ( \
                    SELECT e.id AS entity_id, e.name AS name \
                    FROM entities e \
-                   WHERE ({placeholders}) \
-                     AND e.workspace_id = ? AND e.project_id = ? \
+                   WHERE e.workspace_id = ? AND e.project_id = ? \
                      AND e.name <> ? \
+                     AND EXISTS (SELECT 1 FROM query_tokens q \
+                       WHERE e.name = q.token \
+                          OR e.name LIKE q.escaped || '%' ESCAPE '\\' \
+                          OR e.name LIKE '% ' || q.escaped || '%' ESCAPE '\\' \
+                          OR e.name LIKE '%-' || q.escaped || '%' ESCAPE '\\' \
+                          OR e.name LIKE '%\\_' || q.escaped || '%' ESCAPE '\\') \
+                 ), \
+                 covered AS ( \
+                   SELECT m.entity_id, m.name, \
+                     CASE WHEN EXISTS (SELECT 1 FROM query_tokens q WHERE q.token = m.name) \
+                       THEN 1.0 ELSE ( \
+                         SELECT AVG(COALESCE(( \
+                           SELECT MAX(1.0 * length(q.token) / length(w.value)) \
+                           FROM coverage_tokens q \
+                           WHERE w.value LIKE q.escaped || '%' ESCAPE '\\' \
+                         ), 0.0)) \
+                         FROM json_each('[' || replace(json_quote( \
+                           replace(replace(m.name, '-', ' '), '_', ' ')), ' ', '\",\"') || ']') w \
+                         WHERE w.value <> '' \
+                       ) END AS coverage \
+                   FROM matched m \
                  ), \
                  freq AS ( \
-                   SELECT m.entity_id, m.name, COUNT(*) AS pages \
-                   FROM matched m \
+                   SELECT m.entity_id, m.name, m.coverage, COUNT(*) AS pages \
+                   FROM covered m \
                    JOIN entity_page_links l ON l.entity_id = m.entity_id \
                    JOIN pages p ON p.id = l.page_id \
                    WHERE 1 = 1{freq_version_filter} \
-                   GROUP BY m.entity_id, m.name \
+                   GROUP BY m.entity_id, m.name, m.coverage \
                  ) \
                  SELECT pg.id, pg.path, pg.title, {descriptor} AS snippet, \
-                        SUM(1.0 / f.pages) AS weight, \
+                        SUM(f.coverage / f.pages) AS weight, \
                         COUNT(*) AS matches, \
                         json_group_array(f.name) AS names \
                  FROM freq f \
@@ -5445,11 +5693,11 @@ impl ReaderPool {
             .await?;
         let mut authorities: std::collections::HashMap<PageId, PageAuthority> = fts_candidates
             .iter()
-            .map(|(hit, authority)| (hit.id, *authority))
+            .map(|(hit, authority, _)| (hit.id, *authority))
             .collect();
-        let fts_hits: Vec<PageHit> = fts_candidates
+        let fts_hits: Vec<(PageHit, f64)> = fts_candidates
             .into_iter()
-            .map(|(hit, _authority)| hit)
+            .map(|(hit, _authority, strength)| (hit, strength))
             .collect();
         let mut vec_hits: Vec<(PageId, PagePath, f32)> = Vec::new();
         let mut abstract_hits: Vec<(PageId, PagePath, f32)> = Vec::new();
@@ -5485,10 +5733,12 @@ impl ReaderPool {
                 .await?;
         }
 
+        let mut seed_strengths = std::collections::HashMap::<PageId, f64>::new();
         let mut seed_seen = std::collections::HashSet::new();
         let mut seed_ids = Vec::new();
         let mut seed_paths = explain.then(Vec::new);
-        for hit in &fts_hits {
+        for (hit, strength) in &fts_hits {
+            seed_strengths.insert(hit.id, *strength);
             if seed_seen.insert(hit.id) {
                 seed_ids.push(hit.id);
                 if let Some(paths) = &mut seed_paths {
@@ -5496,7 +5746,12 @@ impl ReaderPool {
                 }
             }
         }
-        for (id, path, _) in vec_hits.iter().chain(abstract_hits.iter()) {
+        for (id, path, cosine) in vec_hits.iter().chain(abstract_hits.iter()) {
+            let strength = f64::from(*cosine).clamp(0.0, 1.0);
+            seed_strengths
+                .entry(*id)
+                .and_modify(|value| *value = value.max(strength))
+                .or_insert(strength);
             if seed_seen.insert(*id) {
                 seed_ids.push(*id);
                 if let Some(paths) = &mut seed_paths {
@@ -5505,6 +5760,11 @@ impl ReaderPool {
             }
         }
         for e in &entity_hits {
+            let strength = e.weight.clamp(0.0, 1.0);
+            seed_strengths
+                .entry(e.hit.id)
+                .and_modify(|value| *value = value.max(strength))
+                .or_insert(strength);
             if seed_seen.insert(e.hit.id) {
                 seed_ids.push(e.hit.id);
                 if let Some(paths) = &mut seed_paths {
@@ -5512,6 +5772,11 @@ impl ReaderPool {
                 }
             }
         }
+        // A link is indirect evidence: it cannot be stronger than its seed.
+        let graph_strengths: Vec<f64> = seed_ids
+            .iter()
+            .map(|id| seed_strengths.get(id).copied().unwrap_or(0.0))
+            .collect();
         let graph_hits = self
             .graph_neighbors_for_project_explained(
                 workspace_id,
@@ -5523,7 +5788,8 @@ impl ReaderPool {
             )
             .await?;
 
-        // RRF fuse: score(d) = Σ 1/(k + rank_i(d)) over rankers.
+        // Keep weak partial matches from becoming full votes in multiple streams.
+        // RRF fuse: score(d) = Σ strength_i(d)/(k + rank_i(d)).
         let k = 60.0_f64;
         struct Fused {
             path: PagePath,
@@ -5534,8 +5800,8 @@ impl ReaderPool {
         }
         let mut fused: std::collections::HashMap<PageId, Fused> = std::collections::HashMap::new();
 
-        for (rank, h) in fts_hits.iter().enumerate() {
-            let contrib = 1.0 / (k + (rank + 1) as f64);
+        for (rank, (h, strength)) in fts_hits.iter().enumerate() {
+            let contrib = strength / (k + (rank + 1) as f64);
             let entry = fused.entry(h.id).or_insert_with(|| Fused {
                 path: h.path.clone(),
                 title: h.title.clone(),
@@ -5546,13 +5812,13 @@ impl ReaderPool {
             entry.score += contrib;
             if let Some(details) = &mut entry.explain {
                 details.fts_rank = Some(rank + 1);
-                details.fts_score = Some(h.rank);
+                details.fts_score = Some(-strength);
                 details.rrf.fts = contrib;
                 details.fused += contrib;
             }
         }
         for (rank, (id, path, cosine)) in vec_hits.iter().enumerate() {
-            let contrib = 1.0 / (k + (rank + 1) as f64);
+            let contrib = f64::from(*cosine).clamp(0.0, 1.0) / (k + (rank + 1) as f64);
             let entry = fused.entry(*id).or_insert_with(|| Fused {
                 path: path.clone(),
                 title: String::new(),
@@ -5569,7 +5835,7 @@ impl ReaderPool {
             }
         }
         for (rank, (id, path, cosine)) in abstract_hits.iter().enumerate() {
-            let contrib = 1.0 / (k + (rank + 1) as f64);
+            let contrib = f64::from(*cosine).clamp(0.0, 1.0) / (k + (rank + 1) as f64);
             let entry = fused.entry(*id).or_insert_with(|| Fused {
                 path: path.clone(),
                 title: String::new(),
@@ -5586,7 +5852,7 @@ impl ReaderPool {
             }
         }
         for (rank, e) in entity_hits.iter().enumerate() {
-            let contrib = 1.0 / (k + (rank + 1) as f64);
+            let contrib = e.weight.clamp(0.0, 1.0) / (k + (rank + 1) as f64);
             let entry = fused.entry(e.hit.id).or_insert_with(|| Fused {
                 path: e.hit.path.clone(),
                 title: e.hit.title.clone(),
@@ -5604,7 +5870,8 @@ impl ReaderPool {
             }
         }
         for (rank, n) in graph_hits.iter().enumerate() {
-            let contrib = 1.0 / (k + (rank + 1) as f64);
+            let strength = graph_strengths.get(n.seed_ord).copied().unwrap_or(0.0);
+            let contrib = strength / (k + (rank + 1) as f64);
             let entry = fused.entry(n.hit.id).or_insert_with(|| Fused {
                 path: n.hit.path.clone(),
                 title: n.hit.title.clone(),

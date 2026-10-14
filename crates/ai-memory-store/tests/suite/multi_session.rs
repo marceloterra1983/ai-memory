@@ -365,6 +365,87 @@ async fn concurrent_writes_to_one_path_supersede_rather_than_destroy() {
     );
 }
 
+/// A concurrent supersession cannot split the topic and body candidate windows.
+#[tokio::test]
+async fn field_windows_share_one_snapshot_during_concurrent_supersession() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, proj) = scope(&store).await;
+    let path = "_rules/shared-window.md";
+    let query = "pearledquartz";
+    let mut original = page(ws, proj, path, "Shared guidance", query);
+    original.pinned = true;
+    original.frontmatter_json = serde_json::json!({"tags": ["canonical"]});
+    let old_id = store.writer.upsert_page(original.clone()).await.unwrap();
+
+    let (ready, resume) = store.reader.pause_next_field_window();
+    let reader = store.reader.clone();
+    let pending = tokio::spawn(async move {
+        reader
+            .search_pages_for_project(ws, proj, query.into(), 3, None)
+            .await
+            .unwrap()
+    });
+    tokio::task::spawn_blocking(move || {
+        ready
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the first FTS field window must finish before the writer runs")
+    })
+    .await
+    .unwrap();
+
+    let mut replacement = original.clone();
+    replacement.title = query.into();
+    replacement.body = format!("{query} revised guidance");
+    let new_id = store.writer.upsert_page(replacement.clone()).await.unwrap();
+    assert_ne!(old_id, new_id);
+    resume.send(()).unwrap();
+
+    let snapshot_hits = pending.await.unwrap();
+    assert_eq!(
+        snapshot_hits.len(),
+        1,
+        "one read snapshot must expose one version"
+    );
+    assert_eq!(
+        snapshot_hits[0].id, old_id,
+        "both field windows must use the version visible before supersession"
+    );
+    let fresh_hits = store
+        .reader
+        .search_pages_for_project(ws, proj, query.into(), 3, None)
+        .await
+        .unwrap();
+    assert_eq!(fresh_hits.len(), 1);
+    assert_eq!(
+        fresh_hits[0].id, new_id,
+        "a later search must observe the committed replacement"
+    );
+
+    let (old_body, old_latest, new_body, new_latest, supersedes) = store
+        .reader
+        .with_conn(move |conn| {
+            let (old_body, old_latest): (String, bool) = conn.query_row(
+                "SELECT body, is_latest FROM pages WHERE id = ?1 AND workspace_id = ?2 AND project_id = ?3",
+                rusqlite::params![old_id.as_bytes(), ws.as_bytes(), proj.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let (new_body, new_latest, supersedes): (String, bool, Option<Vec<u8>>) = conn.query_row(
+                "SELECT body, is_latest, supersedes FROM pages WHERE id = ?1 AND workspace_id = ?2 AND project_id = ?3",
+                rusqlite::params![new_id.as_bytes(), ws.as_bytes(), proj.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            Ok((old_body, old_latest, new_body, new_latest, supersedes))
+        })
+        .await
+        .unwrap();
+    assert_eq!(old_body, original.body);
+    assert!(!old_latest, "the superseded row must remain reachable");
+    assert_eq!(new_body, replacement.body);
+    assert!(new_latest);
+    assert_eq!(supersedes.as_deref(), Some(old_id.as_bytes().as_slice()));
+}
+
 /// Re-writing identical content must not churn a new version.
 ///
 /// Two harnesses syncing the same file would otherwise manufacture a version

@@ -570,7 +570,7 @@ fn hex_to_sha256(hex: &str) -> Result<[u8; 32], String> {
         return Err("expected 64 hex chars".into());
     }
     let mut out = [0_u8; 32];
-    for (idx, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (idx, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let s = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
         out[idx] = u8::from_str_radix(s, 16).map_err(|e| e.to_string())?;
     }

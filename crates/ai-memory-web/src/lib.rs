@@ -1,3 +1,4 @@
+#![allow(unknown_lints, clippy::result_large_err)]
 //! `ai-memory-web` — read-only HTTP browser for the wiki.
 //!
 //! Mounted under `/web` on the same axum server that hosts the MCP

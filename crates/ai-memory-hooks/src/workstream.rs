@@ -120,6 +120,7 @@ fn actor_user(
 /// Authorize the caller on the repository `run_id` belongs to — see
 /// [`crate::grants::authorize_resolved`]. The run routes take the id in the
 /// URL, so without this they would act on any repository's run.
+#[allow(unknown_lints, clippy::result_large_err)]
 async fn authorize_run(
     state: &WorkstreamState,
     run_id: ManagedRunId,

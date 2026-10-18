@@ -1,3 +1,4 @@
+#![allow(unknown_lints, clippy::result_large_err)]
 //! MCP server for ai-memory.
 //!
 //! Hosts an [`AiMemoryServer`] that wraps the storage layer and exposes a

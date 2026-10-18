@@ -2069,6 +2069,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_notification_cap_scrubs_credentials_before_spooling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = hook_spool::spool_dir(tmp.path());
+        for message in [
+            format!("{}sk-{}", "x".repeat(1_988), "A".repeat(32)),
+            format!(
+                "{}-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_CONTENT\n-----END PRIVATE KEY-----",
+                "x".repeat(1_944)
+            ),
+            "ordinary context".to_owned(),
+        ] {
+            run_with_payload(
+                Some(tmp.path().to_path_buf()),
+                HookArgs {
+                    event: "notification".into(),
+                    agent: "claude-code".into(),
+                    server_url: "http://fixture.invalid".into(),
+                    auth_token: None,
+                    project_strategy: None,
+                    check_capture: false,
+                    capture_assistant: false,
+                    capture_mode: Some(crate::cli::CaptureModeArg::Denylist),
+                },
+                serde_json::json!({"session_id": "synthetic-1", "message": message}).to_string(),
+                &mut Vec::new(),
+                |_, _| panic!("notification must only spool"),
+            )
+            .await
+            .unwrap();
+        }
+        let entries = read_spooled_entries(&spool);
+        assert_eq!(entries.len(), 3);
+        for entry in &entries {
+            assert!(!entry.body.contains("sk-"));
+            assert!(!entry.body.contains("SYNTHETIC_PRIVATE_CONTENT"));
+        }
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.body.contains("ordinary context"))
+        );
+    }
+
+    #[tokio::test]
     async fn session_end_run_enqueues_outputs_empty_json_and_spawns_after_enqueue() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_path_buf();

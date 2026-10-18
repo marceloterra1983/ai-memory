@@ -638,11 +638,15 @@ async fn handle_hook(
     // `Value` before it becomes a `HookEnvelope`, so the field can never reach
     // `body_excerpt`, tracing, or the store — regardless of client version.
     crate::assistant_capture::strip_assistant_message_raw(&mut body);
-    let mut env = HookEnvelope::from_query_and_body(query, body);
+    let mut env = HookEnvelope::from_query_and_body_with_sanitizer(query, body, &state.sanitizer);
     // Consume the opt-in `_ai_memory_assistant` marker and, when both opt-ins are
     // on for a supported Stop, populate the Stop body with the sanitized excerpt.
     // Any gate failure leaves an empty Stop with the same 202 "queued" response.
-    crate::assistant_capture::apply_assistant_backstop(&mut env, state.capture_assistant_enabled);
+    crate::assistant_capture::apply_assistant_backstop(
+        &mut env,
+        state.capture_assistant_enabled,
+        &state.sanitizer,
+    );
     let Some(env) = inspect_capture_envelope(env) else {
         state.ingest_metrics.record_dropped_by_policy();
         return (StatusCode::ACCEPTED, "capture policy dropped");
@@ -841,10 +845,12 @@ async fn handle_hook_batch(
         // per item before the envelope is built (#196).
         crate::assistant_capture::strip_assistant_message_raw(&mut item.body);
         let query = parse_hook_query(&item.url);
-        let mut env = HookEnvelope::from_query_and_body(query, item.body);
+        let mut env =
+            HookEnvelope::from_query_and_body_with_sanitizer(query, item.body, &state.sanitizer);
         crate::assistant_capture::apply_assistant_backstop(
             &mut env,
             state.capture_assistant_enabled,
+            &state.sanitizer,
         );
         let Some(env) = inspect_capture_envelope(env) else {
             // A protocol-directed drop is committed from the spool's point of
@@ -10327,7 +10333,7 @@ mod tests {
             .await
             .unwrap();
             let mut stop = opencode_turn_event(&session.to_string(), "stop", text);
-            crate::assistant_capture::apply_assistant_backstop(&mut stop, true);
+            crate::assistant_capture::apply_assistant_backstop(&mut stop, true, &state.sanitizer);
             process(&state, stop, None, Vec::new()).await.unwrap();
             let pages = state
                 .reader
@@ -10554,7 +10560,7 @@ mod tests {
                     "_ai_memory_assistant": { "version": 1, "excerpt": "Found two bugs" },
                 }),
             );
-            crate::assistant_capture::apply_assistant_backstop(&mut env, true);
+            crate::assistant_capture::apply_assistant_backstop(&mut env, true, &state.sanitizer);
             process(&state, env, None, Vec::new()).await.unwrap();
         }
         let handoff = state
@@ -10608,7 +10614,7 @@ mod tests {
             let mut stop =
                 opencode_turn_event(&session, "stop", &format!("Assistant-only result {secret}"));
             stop.capture_assistant_requested = client;
-            crate::assistant_capture::apply_assistant_backstop(&mut stop, server);
+            crate::assistant_capture::apply_assistant_backstop(&mut stop, server, &state.sanitizer);
             process(&state, stop, None, Vec::new()).await.unwrap();
             let handoff = state
                 .reader
@@ -10656,7 +10662,11 @@ mod tests {
                         opencode_turn_event(&session, event, &format!("{project}-{turn}"));
                     env.workspace_override = Some("checkpoint-workspace".into());
                     env.project_override = Some(project.into());
-                    crate::assistant_capture::apply_assistant_backstop(&mut env, true);
+                    crate::assistant_capture::apply_assistant_backstop(
+                        &mut env,
+                        true,
+                        &state.sanitizer,
+                    );
                     process(&state, env, None, Vec::new()).await.unwrap();
                 }
             }
@@ -10701,7 +10711,11 @@ mod tests {
         for (session, text) in [(&alpha, "alpha work"), (&beta, "beta work")] {
             for event in ["user-prompt", "stop"] {
                 let mut env = opencode_turn_event(session, event, text);
-                crate::assistant_capture::apply_assistant_backstop(&mut env, true);
+                crate::assistant_capture::apply_assistant_backstop(
+                    &mut env,
+                    true,
+                    &state.sanitizer,
+                );
                 process(&state, env, None, Vec::new()).await.unwrap();
             }
         }
@@ -15206,6 +15220,104 @@ mod tests {
     /// reaches the sanitizer first, gets replaced with the marker, and the
     /// (much shorter) redacted title is what gets capped at 80 chars.
     #[tokio::test]
+    async fn hook_capture_caps_use_configured_sanitizer_before_truncation() {
+        assert_configured_capture_cap(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn hook_batch_capture_caps_use_configured_sanitizer_before_truncation() {
+        assert_configured_capture_cap(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn assistant_backstop_cap_uses_configured_sanitizer_before_truncation() {
+        assert_configured_capture_cap(true, true).await;
+    }
+
+    async fn assert_configured_capture_cap(batch: bool, assistant: bool) {
+        let tmp = TempDir::new().unwrap();
+        let mut state = make_state(&tmp).await;
+        let allowlisted = format!("sk-{}", "L".repeat(32));
+        state.sanitizer = Sanitizer::new(&SanitizeConfig {
+            extra_patterns: vec![r"PRIVATE[A-Z]{20,}".into()],
+            allowlist: vec![allowlisted.clone()],
+        })
+        .unwrap();
+        state.capture_assistant_enabled = assistant;
+        let state = Arc::new(state);
+        for (body, forbidden) in [
+            (
+                format!("{}PRIVATE{}", "x".repeat(1_988), "Z".repeat(32)),
+                Some("PRIVATE"),
+            ),
+            (format!("{}{allowlisted}", "x".repeat(1_988)), None),
+            ("ordinary context".to_owned(), None),
+        ] {
+            let sid = SessionId::new();
+            let raw = if assistant {
+                serde_json::json!({
+                    "session_id": sid.to_string(),
+                    "_ai_memory_assistant": {"version": crate::assistant_capture::ASSISTANT_PROTOCOL_VERSION, "excerpt": body},
+                })
+            } else {
+                serde_json::json!({"session_id": sid.to_string(), "message": body})
+            };
+            let event = if assistant { "stop" } else { "notification" };
+            if batch {
+                let response = handle_hook_batch(
+                    State(state.clone()), None, None, None, HeaderMap::new(),
+                    Json(vec![HookBatchItem {
+                        url: format!("http://fixture/hook?event={event}&agent=claude-code&capture_assistant=1"),
+                        body: raw,
+                    }]),
+                ).await.into_response();
+                assert_eq!(response.status(), StatusCode::OK);
+            } else {
+                let response = handle_hook(
+                    State(state.clone()),
+                    Query(HookQuery {
+                        event: event.into(),
+                        agent: Some("claude-code".into()),
+                        ..Default::default()
+                    }),
+                    None,
+                    None,
+                    None,
+                    HeaderMap::new(),
+                    Json(raw),
+                )
+                .await
+                .into_response();
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+            }
+            let observation = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let observations = state.reader.observations_for_session(sid).await.unwrap();
+                    if let Some(observation) = observations.into_iter().find(|o| !o.body.is_empty())
+                    {
+                        break observation;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ingress persisted the synthetic event");
+            if let Some(forbidden) = forbidden {
+                assert!(
+                    !observation.body.contains(forbidden),
+                    "credential fragment reached observations"
+                );
+            } else {
+                assert_eq!(
+                    observation.body,
+                    ai_memory_core::truncate_utf8_bytes(&body, 2_000),
+                    "configured allowlist/ordinary text changed"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn issue_980_user_prompt_title_is_sanitized_before_truncated() {
         let tmp = TempDir::new().unwrap();
         let mut state = make_state(&tmp).await;
@@ -15756,6 +15868,7 @@ mod tests {
         crate::assistant_capture::apply_assistant_backstop(
             &mut assistant,
             state.capture_assistant_enabled,
+            &state.sanitizer,
         );
         process(&state, assistant, None, Vec::new()).await.unwrap();
 

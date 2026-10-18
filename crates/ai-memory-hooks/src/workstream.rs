@@ -926,15 +926,8 @@ fn sanitize_events(
         if event.event_id.trim().is_empty() || event.event_id.len() > MAX_EVENT_ID_BYTES {
             return Err("invalid workstream event id".to_string());
         }
-        if event.content.len() > MAX_EVENT_CONTENT_BYTES {
-            let mut end = MAX_EVENT_CONTENT_BYTES;
-            while !event.content.is_char_boundary(end) {
-                end -= 1;
-            }
-            event.content.truncate(end);
-            event.content.push_str("\n[truncated by ai-memory]");
-        }
         event.content = sanitizer.scrub(&event.content);
+        truncate_owned(&mut event.content, MAX_EVENT_CONTENT_BYTES);
         if let Some(role) = &event.role
             && (role.len() > 32
                 || !role
@@ -981,6 +974,7 @@ fn append_boundary_events(
     if checkpoint.is_empty() {
         checkpoint.push_str("No Git repository checkpoint was available.");
     }
+    checkpoint = sanitizer.scrub(&checkpoint);
     truncate_owned(&mut checkpoint, MAX_EVENT_CONTENT_BYTES);
     request.events.push(NewWorkstreamEvent {
         event_id: format!("managed-run:{run_id}:checkpoint"),
@@ -989,7 +983,7 @@ fn append_boundary_events(
         source_record_id: None,
         kind: WorkstreamEventKind::Checkpoint,
         role: None,
-        content: sanitizer.scrub(&checkpoint),
+        content: checkpoint,
         occurred_at: None,
         metadata: serde_json::json!({ "exit_code": request.exit_code }),
     });
@@ -998,6 +992,7 @@ fn append_boundary_events(
         for loss in &request.losses {
             let _ = writeln!(content, "- {loss}");
         }
+        content = sanitizer.scrub(&content);
         truncate_owned(&mut content, MAX_EVENT_CONTENT_BYTES);
         request.events.push(NewWorkstreamEvent {
             event_id: format!("managed-run:{run_id}:losses"),
@@ -1006,7 +1001,7 @@ fn append_boundary_events(
             source_record_id: None,
             kind: WorkstreamEventKind::Annotation,
             role: None,
-            content: sanitizer.scrub(&content),
+            content,
             occurred_at: None,
             metadata: serde_json::json!({ "loss_count": request.losses.len() }),
         });
@@ -1086,6 +1081,93 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn workstream_cap_scrubs_tokens_before_truncation() {
+        assert_workstream_cap_scrubs(&format!("sk-{}", "A".repeat(32)), "sk-", 9);
+    }
+
+    #[test]
+    fn workstream_cap_scrubs_pem_before_truncation() {
+        let pem =
+            "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_CONTENT\n-----END PRIVATE KEY-----";
+        assert_workstream_cap_scrubs(
+            pem,
+            "SYNTHETIC_PRIVATE_CONTENT",
+            pem.find("-----END").unwrap() + 1,
+        );
+    }
+
+    fn assert_workstream_cap_scrubs(secret: &str, forbidden: &str, visible: usize) {
+        let mut events = vec![NewWorkstreamEvent {
+            event_id: "synthetic-1".into(),
+            agent: AgentKind::Codex,
+            native_session_id: "native-1".into(),
+            source_record_id: None,
+            kind: WorkstreamEventKind::Message,
+            role: Some("user".into()),
+            content: format!("{}{secret}", "x".repeat(MAX_EVENT_CONTENT_BYTES - visible)),
+            occurred_at: None,
+            metadata: serde_json::json!({}),
+        }];
+        sanitize_events(
+            &Sanitizer::builtin(),
+            AgentKind::Codex,
+            "native-1",
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !events[0].content.contains(forbidden),
+            "credential material survived the cap"
+        );
+        assert!(
+            events[0].content.starts_with('x'),
+            "ordinary context was lost"
+        );
+        events[0].content = "ordinary context".into();
+        sanitize_events(
+            &Sanitizer::builtin(),
+            AgentKind::Codex,
+            "native-1",
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(events[0].content, "ordinary context");
+    }
+
+    #[test]
+    fn workstream_boundary_caps_scrub_before_truncation() {
+        let sanitizer = Sanitizer::builtin();
+        for secret in [
+            format!("sk-{}", "A".repeat(32)),
+            "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_CONTENT\n-----END PRIVATE KEY-----"
+                .to_owned(),
+        ] {
+            let visible = secret.find("-----END").map_or(9, |index| index + 1);
+            let prefix = "HEAD: ";
+            let mut request: FinishManagedRunRequest = serde_json::from_value(serde_json::json!({
+                "checkpoint": {"head": format!("{}{secret}", "x".repeat(MAX_EVENT_CONTENT_BYTES - prefix.len() - visible))},
+                "losses": [format!("{}{secret}", "x".repeat(MAX_EVENT_CONTENT_BYTES - "Transcript extraction losses:\n- ".len() - visible))],
+            })).unwrap();
+            append_boundary_events(
+                &sanitizer,
+                ManagedRunId::new(),
+                AgentKind::Codex,
+                "native-1",
+                &mut request,
+            );
+            assert_eq!(request.events.len(), 2);
+            for event in &request.events {
+                assert!(!event.content.contains("sk-"));
+                assert!(!event.content.contains("SYNTHETIC_PRIVATE_CONTENT"));
+                assert!(
+                    event.content.contains('x'),
+                    "ordinary checkpoint/loss context was lost"
+                );
+            }
+        }
+    }
 
     fn test_state(store: &Store, data_dir: &Path) -> WorkstreamState {
         WorkstreamState {

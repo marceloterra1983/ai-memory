@@ -1,6 +1,8 @@
 //! Wire envelope received on `POST /hook`.
 
-use ai_memory_core::{AgentKind, OBSERVATION_BODY_MAX_BYTES, ObservationKind, truncate_utf8_bytes};
+use ai_memory_core::{
+    AgentKind, OBSERVATION_BODY_MAX_BYTES, ObservationKind, Sanitizer, truncate_utf8_bytes,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::capture_policy::{
@@ -457,7 +459,16 @@ impl HookEnvelope {
     /// from common shapes used by Claude Code, Codex, and OpenCode hook
     /// payloads.
     #[must_use]
-    pub fn from_query_and_body(query: HookQuery, mut raw: serde_json::Value) -> Self {
+    pub fn from_query_and_body(query: HookQuery, raw: serde_json::Value) -> Self {
+        Self::from_query_and_body_with_sanitizer(query, raw, &Sanitizer::builtin())
+    }
+
+    /// Use the server's configured redaction before applying excerpt limits.
+    pub(crate) fn from_query_and_body_with_sanitizer(
+        query: HookQuery,
+        mut raw: serde_json::Value,
+        sanitizer: &Sanitizer,
+    ) -> Self {
         let event = HookEvent::parse(&query.event);
         let agent = agent_from_payload(&raw)
             .unwrap_or_else(|| query.agent.as_deref().map_or(AgentKind::Other, parse_agent));
@@ -578,18 +589,18 @@ impl HookEnvelope {
             })
         };
         let body_excerpt = if closed_tool_event {
-            safe_tool_body(event, tool_metadata.as_ref(), agent, &raw).or_else(|| {
+            safe_tool_body(event, tool_metadata.as_ref(), agent, &raw, sanitizer).or_else(|| {
                 (event == HookEvent::PostToolUse && agent == AgentKind::OpenCode)
-                    .then(|| legacy_tool_body(event, agent, &raw))
+                    .then(|| legacy_tool_body(event, agent, &raw, sanitizer))
                     .flatten()
             })
         } else if matches!(event, HookEvent::PreToolUse | HookEvent::PostToolUse) {
-            legacy_tool_body(event, agent, &raw)
+            legacy_tool_body(event, agent, &raw, sanitizer)
         } else {
-            best_body_excerpt(event, &raw).or_else(|| {
+            best_body_excerpt(event, &raw, sanitizer).or_else(|| {
                 source_event
                     .as_deref()
-                    .and_then(|_| extension_body_excerpt(&raw))
+                    .and_then(|_| extension_body_excerpt(&raw, sanitizer))
             })
         };
         let ingest_key = query.ingest_key.filter(|k| valid_ingest_key(k));
@@ -698,7 +709,12 @@ fn legacy_tool_title(
     })
 }
 
-fn legacy_tool_body(event: HookEvent, agent: AgentKind, raw: &serde_json::Value) -> Option<String> {
+fn legacy_tool_body(
+    event: HookEvent,
+    agent: AgentKind,
+    raw: &serde_json::Value,
+    sanitizer: &Sanitizer,
+) -> Option<String> {
     let payload = (event == HookEvent::PostToolUse && agent == AgentKind::OpenCode)
         .then(|| raw.get("payload"))
         .flatten()?;
@@ -708,7 +724,10 @@ fn legacy_tool_body(event: HookEvent, agent: AgentKind, raw: &serde_json::Value)
         &["tool_response", "tool_output", "output", "result"],
     )
     .or_else(|| extract_content(payload, &["error"]))?;
-    Some(truncate_excerpt(&format!("tool: {tool}\n---\n{result}")))
+    Some(truncate_excerpt(
+        &format!("tool: {tool}\n---\n{result}"),
+        sanitizer,
+    ))
 }
 
 const fn closed_tool_agent(agent: AgentKind) -> bool {
@@ -775,6 +794,7 @@ fn safe_tool_body(
     metadata: Option<&ToolObservationMetadata>,
     agent: AgentKind,
     raw: &serde_json::Value,
+    sanitizer: &Sanitizer,
 ) -> Option<String> {
     let metadata = metadata?;
     let mut summary = format!(
@@ -807,7 +827,7 @@ fn safe_tool_body(
             .unwrap_or_else(|| "(no output captured)".into());
             summary.push_str("\n---\n");
             summary.push_str(&result);
-            Some(truncate_excerpt(&summary))
+            Some(truncate_excerpt(&summary, sanitizer))
         }
         _ => None,
     }
@@ -960,7 +980,7 @@ fn extension_title_hint(raw: &serde_json::Value, source_event: &str) -> String {
         .unwrap_or_else(|| source_event.to_string())
 }
 
-fn extension_body_excerpt(raw: &serde_json::Value) -> Option<String> {
+fn extension_body_excerpt(raw: &serde_json::Value, sanitizer: &Sanitizer) -> Option<String> {
     extract_string(
         raw,
         &[
@@ -972,7 +992,7 @@ fn extension_body_excerpt(raw: &serde_json::Value) -> Option<String> {
             "details",
         ],
     )
-    .map(|s| truncate_excerpt(&s))
+    .map(|s| truncate_excerpt(&s, sanitizer))
 }
 
 /// Extract human-readable text content for an observation body, accepting the
@@ -1025,10 +1045,15 @@ fn value_to_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn best_body_excerpt(event: HookEvent, raw: &serde_json::Value) -> Option<String> {
+fn best_body_excerpt(
+    event: HookEvent,
+    raw: &serde_json::Value,
+    sanitizer: &Sanitizer,
+) -> Option<String> {
     match event {
-        HookEvent::UserPrompt => extract_content(raw, &["prompt", "message", "text"])
-            .map(|body| truncate_utf8_bytes(&body, USER_PROMPT_EXCERPT_MAX_BYTES)),
+        HookEvent::UserPrompt => extract_content(raw, &["prompt", "message", "text"]).map(|body| {
+            truncate_utf8_bytes(&sanitizer.scrub(&body), USER_PROMPT_EXCERPT_MAX_BYTES)
+        }),
         HookEvent::PostToolUse => {
             let tool = extract_string(raw, &["tool", "tool_name", "name"])
                 .or_else(|| extract_string_path(raw, &[&["toolCall", "name"]]))
@@ -1039,12 +1064,17 @@ fn best_body_excerpt(event: HookEvent, raw: &serde_json::Value) -> Option<String
                 extract_content(raw, &["tool_response", "tool_output", "output", "result"])
                     .or_else(|| extract_content(raw, &["error"]))
                     .unwrap_or_else(|| "(no output captured)".into());
-            Some(format!("tool: {tool}\n---\n{}", truncate_excerpt(&result)))
+            Some(format!(
+                "tool: {tool}\n---\n{}",
+                truncate_excerpt(&result, sanitizer)
+            ))
         }
-        HookEvent::Notification => extract_content(raw, &["message", "text"])
-            .map(|body| truncate_utf8_bytes(&body, NOTIFICATION_EXCERPT_MAX_BYTES)),
-        HookEvent::PostCompaction => extract_content(raw, &["summary"])
-            .map(|body| truncate_utf8_bytes(&body, POST_COMPACTION_EXCERPT_MAX_BYTES)),
+        HookEvent::Notification => extract_content(raw, &["message", "text"]).map(|body| {
+            truncate_utf8_bytes(&sanitizer.scrub(&body), NOTIFICATION_EXCERPT_MAX_BYTES)
+        }),
+        HookEvent::PostCompaction => extract_content(raw, &["summary"]).map(|body| {
+            truncate_utf8_bytes(&sanitizer.scrub(&body), POST_COMPACTION_EXCERPT_MAX_BYTES)
+        }),
         _ => None,
     }
 }
@@ -1063,22 +1093,23 @@ fn first_line(s: &str) -> String {
     s.chars().take_while(|c| *c != '\n').collect()
 }
 
-fn truncate_excerpt(s: &str) -> String {
-    truncate_utf8_bytes(s, TOOL_EXCERPT_MAX_BYTES)
+fn truncate_excerpt(s: &str, sanitizer: &Sanitizer) -> String {
+    truncate_utf8_bytes(&sanitizer.scrub(s), TOOL_EXCERPT_MAX_BYTES)
 }
 
-/// Cap core lifecycle body fields before the native hook writes its local
-/// spool entry. The server independently reapplies the same per-event limits
-/// while constructing [`HookEnvelope`], and the typed persistence boundary has
-/// a universal backstop.
+/// Scrub and cap oversized core lifecycle body fields before the native hook
+/// writes its local spool entry. The server independently reapplies the same
+/// per-event limits while constructing [`HookEnvelope`], and the typed
+/// persistence boundary has a universal backstop.
 pub fn cap_lifecycle_body_for_client(raw: &mut serde_json::Value, event: HookEvent) -> bool {
     let Some((keys, max_bytes)) = core_body_cap(event) else {
         return false;
     };
-    let mut changed = cap_candidate_group(raw, keys, max_bytes);
+    let sanitizer = Sanitizer::builtin();
+    let mut changed = cap_candidate_group(raw, keys, max_bytes, &sanitizer);
     for container in ["payload", "event"] {
         if let Some(nested) = raw.get_mut(container) {
-            changed |= cap_candidate_group(nested, keys, max_bytes);
+            changed |= cap_candidate_group(nested, keys, max_bytes, &sanitizer);
         }
     }
     changed
@@ -1096,23 +1127,33 @@ fn core_body_cap(event: HookEvent) -> Option<(&'static [&'static str], usize)> {
     }
 }
 
-fn cap_candidate_group(value: &mut serde_json::Value, keys: &[&str], max_bytes: usize) -> bool {
-    let mut changed = cap_object_fields(value, keys, max_bytes);
+fn cap_candidate_group(
+    value: &mut serde_json::Value,
+    keys: &[&str],
+    max_bytes: usize,
+    sanitizer: &Sanitizer,
+) -> bool {
+    let mut changed = cap_object_fields(value, keys, max_bytes, sanitizer);
     if let Some(properties) = value.get_mut("properties") {
-        changed |= cap_object_fields(properties, keys, max_bytes);
+        changed |= cap_object_fields(properties, keys, max_bytes, sanitizer);
         if let Some(info) = properties.get_mut("info") {
-            changed |= cap_object_fields(info, keys, max_bytes);
+            changed |= cap_object_fields(info, keys, max_bytes, sanitizer);
         }
     }
     for container in ["info", "path"] {
         if let Some(nested) = value.get_mut(container) {
-            changed |= cap_object_fields(nested, keys, max_bytes);
+            changed |= cap_object_fields(nested, keys, max_bytes, sanitizer);
         }
     }
     changed
 }
 
-fn cap_object_fields(value: &mut serde_json::Value, keys: &[&str], max_bytes: usize) -> bool {
+fn cap_object_fields(
+    value: &mut serde_json::Value,
+    keys: &[&str],
+    max_bytes: usize,
+    sanitizer: &Sanitizer,
+) -> bool {
     let Some(object) = value.as_object_mut() else {
         return false;
     };
@@ -1125,7 +1166,8 @@ fn cap_object_fields(value: &mut serde_json::Value, keys: &[&str], max_bytes: us
             continue;
         };
         if text.len() > max_bytes {
-            *field = serde_json::Value::String(truncate_utf8_bytes(&text, max_bytes));
+            *field =
+                serde_json::Value::String(truncate_utf8_bytes(&sanitizer.scrub(&text), max_bytes));
             changed = true;
         }
     }
@@ -2176,6 +2218,174 @@ mod tests {
         let title = env.title_hint.unwrap();
         assert_eq!(title.chars().count(), 200);
         assert!(!title.contains('…'));
+    }
+
+    #[test]
+    fn capture_caps_scrub_tokens_before_truncation() {
+        assert_capture_caps_scrub(&format!("sk-{}", "A".repeat(32)), "sk-", 12);
+    }
+
+    #[test]
+    fn capture_caps_scrub_pem_before_truncation() {
+        let pem =
+            "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_CONTENT\n-----END PRIVATE KEY-----";
+        assert_capture_caps_scrub(
+            pem,
+            "SYNTHETIC_PRIVATE_CONTENT",
+            pem.find("-----END").unwrap() + 4,
+        );
+    }
+
+    fn assert_capture_caps_scrub(secret: &str, forbidden: &str, visible: usize) {
+        let mut leaked = Vec::new();
+        for (event, agent, field, cap, prefix, extension) in [
+            (
+                "user-prompt",
+                "claude-code",
+                "prompt",
+                USER_PROMPT_EXCERPT_MAX_BYTES,
+                "",
+                false,
+            ),
+            (
+                "notification",
+                "claude-code",
+                "message",
+                NOTIFICATION_EXCERPT_MAX_BYTES,
+                "",
+                false,
+            ),
+            (
+                "post-compaction",
+                "claude-code",
+                "summary",
+                POST_COMPACTION_EXCERPT_MAX_BYTES,
+                "",
+                false,
+            ),
+            (
+                "post-tool-use",
+                "claude-code",
+                "tool_response",
+                TOOL_EXCERPT_MAX_BYTES,
+                "tool_family: non-file\noutcome: unknown\n---\n",
+                false,
+            ),
+            (
+                "post-tool-use",
+                "open-code",
+                "output",
+                TOOL_EXCERPT_MAX_BYTES,
+                "tool: Bash\n---\n",
+                false,
+            ),
+            (
+                "custom.event",
+                "claude-code",
+                "body",
+                TOOL_EXCERPT_MAX_BYTES,
+                "",
+                true,
+            ),
+        ] {
+            let body = format!("{}{secret}", "x".repeat(cap - prefix.len() - visible));
+            let raw = |body: &str| {
+                if agent == "open-code" {
+                    serde_json::json!({"payload": {"tool": "Bash", (field): body}})
+                } else {
+                    serde_json::json!({(field): body, "tool_name": "Bash", "tool_input": {}})
+                }
+            };
+            let env = HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some(agent.into()),
+                    extension: extension.then(|| "synthetic".into()),
+                    ..Default::default()
+                },
+                raw(&body),
+            );
+            let excerpt = env.body_excerpt.expect("captured body");
+            if excerpt.contains(forbidden) {
+                leaked.push(format!("{event}/{agent}"));
+            }
+            assert!(excerpt.starts_with(prefix));
+            assert!(
+                excerpt.contains('x'),
+                "{event}/{agent} lost ordinary context"
+            );
+            let normal = HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some(agent.into()),
+                    extension: extension.then(|| "synthetic".into()),
+                    ..Default::default()
+                },
+                raw("ordinary context"),
+            );
+            assert!(normal.body_excerpt.unwrap().contains("ordinary context"));
+        }
+        assert!(
+            leaked.is_empty(),
+            "credential material survived: {leaked:?}"
+        );
+    }
+
+    #[test]
+    fn client_caps_scrub_tokens_before_truncation() {
+        assert_client_caps_scrub(&format!("sk-{}", "A".repeat(32)), "sk-", 12);
+    }
+
+    #[test]
+    fn client_caps_scrub_pem_before_truncation() {
+        let pem =
+            "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_CONTENT\n-----END PRIVATE KEY-----";
+        assert_client_caps_scrub(
+            pem,
+            "SYNTHETIC_PRIVATE_CONTENT",
+            pem.find("-----END").unwrap() + 4,
+        );
+    }
+
+    fn assert_client_caps_scrub(secret: &str, forbidden: &str, visible: usize) {
+        let mut leaked = Vec::new();
+        for (event, field, cap) in [
+            (
+                HookEvent::UserPrompt,
+                "prompt",
+                USER_PROMPT_EXCERPT_MAX_BYTES,
+            ),
+            (
+                HookEvent::Notification,
+                "message",
+                NOTIFICATION_EXCERPT_MAX_BYTES,
+            ),
+            (
+                HookEvent::PostCompaction,
+                "summary",
+                POST_COMPACTION_EXCERPT_MAX_BYTES,
+            ),
+        ] {
+            let body = format!("{}{secret}", "x".repeat(cap - visible));
+            let mut raw = serde_json::json!({"payload": {"properties": {"info": {(field): [{"type": "text", "text": body}]}}}});
+            assert!(cap_lifecycle_body_for_client(&mut raw, event));
+            let text = raw["payload"]["properties"]["info"][field]
+                .as_str()
+                .unwrap();
+            if text.contains(forbidden) {
+                leaked.push(event);
+            }
+            assert!(text.len() <= cap);
+            assert!(text.starts_with('x'), "ordinary context was lost");
+            assert!(!cap_lifecycle_body_for_client(&mut raw, event));
+            let mut normal = serde_json::json!({(field): "ordinary context"});
+            assert!(!cap_lifecycle_body_for_client(&mut normal, event));
+            assert_eq!(normal[field], "ordinary context");
+        }
+        assert!(
+            leaked.is_empty(),
+            "credential material survived: {leaked:?}"
+        );
     }
 
     #[test]

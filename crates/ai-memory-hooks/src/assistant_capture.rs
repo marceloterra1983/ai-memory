@@ -167,7 +167,11 @@ pub fn transform_for_client(
 /// `body_excerpt` as `None` — an empty Stop — so a forged or stale marker cannot
 /// inject content. Infallible: never returns an error, so a capture decision can
 /// never turn into a batch fail-fast.
-pub fn apply_assistant_backstop(env: &mut HookEnvelope, server_enabled: bool) {
+pub fn apply_assistant_backstop(
+    env: &mut HookEnvelope,
+    server_enabled: bool,
+    sanitizer: &Sanitizer,
+) {
     // Consume the marker unconditionally: it must never survive into the stored
     // raw, whether or not the gates below accept it.
     let marker = env
@@ -185,13 +189,14 @@ pub fn apply_assistant_backstop(env: &mut HookEnvelope, server_enabled: bool) {
         && let Some(protocol) = AssistantCaptureProtocol::parse(&marker)
         && !protocol.excerpt.is_empty()
     {
-        // Re-enforce the excerpt cap at the persistence boundary — never trust
-        // the client's length. Symmetric to the server re-scrub in `process()`:
+        // Scrub the complete excerpt before a cap can split a credential, then
+        // re-enforce the limit at the persistence boundary. Never trust the
+        // client's length. Symmetric to the server re-scrub in `process()`:
         // a forged or buggy client that satisfies the gates cannot inject an
         // oversized Stop body (the request body limit alone is 10 MiB). Almost
         // always a no-op, since a well-behaved client already truncated.
         env.body_excerpt = Some(truncate_utf8_bytes(
-            &protocol.excerpt,
+            &sanitizer.scrub(&protocol.excerpt),
             ASSISTANT_EXCERPT_MAX_BYTES,
         ));
     }
@@ -430,7 +435,7 @@ mod tests {
         let mut raw = serde_json::json!({ "last_assistant_message": "done" });
         transform_for_client(&mut raw, AgentKind::ClaudeCode, HookEvent::Stop);
         let mut env = stop_env(raw, true);
-        apply_assistant_backstop(&mut env, true);
+        apply_assistant_backstop(&mut env, true, &Sanitizer::builtin());
         assert_eq!(env.body_excerpt.as_deref(), Some("done"));
         assert!(
             env.raw.get(ASSISTANT_MARKER_KEY).is_none(),
@@ -447,7 +452,7 @@ mod tests {
         };
         // Server disabled.
         let mut env = stop_env(make(), true);
-        apply_assistant_backstop(&mut env, false);
+        apply_assistant_backstop(&mut env, false, &Sanitizer::builtin());
         assert!(env.body_excerpt.is_none());
         assert!(
             env.raw.get(ASSISTANT_MARKER_KEY).is_none(),
@@ -455,7 +460,7 @@ mod tests {
         );
         // Query flag absent (client did not request).
         let mut env = stop_env(make(), false);
-        apply_assistant_backstop(&mut env, true);
+        apply_assistant_backstop(&mut env, true, &Sanitizer::builtin());
         assert!(env.body_excerpt.is_none());
     }
 
@@ -469,7 +474,7 @@ mod tests {
             ASSISTANT_MARKER_KEY: { "version": 1, "excerpt": huge }
         });
         let mut env = stop_env(raw, true);
-        apply_assistant_backstop(&mut env, true);
+        apply_assistant_backstop(&mut env, true, &Sanitizer::builtin());
         let body = env.body_excerpt.expect("gates pass, body set");
         assert!(
             body.len() <= ASSISTANT_EXCERPT_MAX_BYTES,
@@ -488,7 +493,7 @@ mod tests {
         ] {
             let raw = serde_json::json!({ ASSISTANT_MARKER_KEY: marker });
             let mut env = stop_env(raw, true);
-            apply_assistant_backstop(&mut env, true);
+            apply_assistant_backstop(&mut env, true, &Sanitizer::builtin());
             assert!(
                 env.body_excerpt.is_none(),
                 "forged marker accepted: {:?}",
@@ -511,7 +516,7 @@ mod tests {
             },
             raw,
         );
-        apply_assistant_backstop(&mut env, true);
+        apply_assistant_backstop(&mut env, true, &Sanitizer::builtin());
         assert!(env.body_excerpt.is_none());
     }
 }

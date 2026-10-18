@@ -2223,7 +2223,9 @@ mod tests {
             .expect("invalid base64 PowerShell program");
         assert_eq!(bytes.len() % 2, 0, "UTF-16LE payload has an odd length");
         let utf16 = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
         String::from_utf16(&utf16).expect("invalid UTF-16 PowerShell program")

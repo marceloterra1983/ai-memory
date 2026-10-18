@@ -57,6 +57,7 @@ use crate::error::WikiResult;
 /// transformation. The runner calls [`up`](WikiMigration::up) exactly once
 /// per data directory, tracking completion in the `wiki_migrations` table.
 #[async_trait::async_trait]
+#[allow(unknown_lints, clippy::double_must_use)]
 pub trait WikiMigration: Send + Sync {
     /// Unique, sortable name. Convention: `YYYY_MM_DDTHH_MM_<descriptive_snake>`.
     ///

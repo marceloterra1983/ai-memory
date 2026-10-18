@@ -36,6 +36,7 @@ pub(crate) const OPENAI_EMBED_MAX_TOKENS: usize = 5000;
 /// router stash an `Arc<dyn Embedder>` and use it from any tokio
 /// task).
 #[async_trait]
+#[allow(unknown_lints, clippy::double_must_use)]
 pub trait Embedder: Send + Sync {
     /// Short identifier (e.g. `openai`, `voyage`, `synthetic`).
     fn provider(&self) -> &'static str;

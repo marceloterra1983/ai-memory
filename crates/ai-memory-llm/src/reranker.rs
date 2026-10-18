@@ -50,6 +50,7 @@ pub struct RerankScore {
 /// Implementations must be `Send + Sync` — the MCP server stashes an
 /// `Arc<dyn Reranker>` and calls it from any tokio task.
 #[async_trait]
+#[allow(unknown_lints, clippy::double_must_use)]
 pub trait Reranker: Send + Sync {
     /// Short identifier (e.g. `llm`).
     fn name(&self) -> &'static str;

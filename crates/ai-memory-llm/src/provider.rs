@@ -18,6 +18,7 @@ use crate::types::{ChatRequest, ChatResponse, LlmOperationId};
 /// a raw `serde_json::Value` schema in and yields a raw value out.
 /// Use the [`complete_structured`] free function for typed payloads.
 #[async_trait]
+#[allow(unknown_lints, clippy::double_must_use)]
 pub trait LlmProvider: Send + Sync {
     /// Friendly provider name (e.g. `"anthropic"`).
     fn name(&self) -> &'static str;

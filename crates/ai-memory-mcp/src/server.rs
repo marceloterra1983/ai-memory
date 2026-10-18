@@ -1659,11 +1659,9 @@ impl AiMemoryServer {
     ///
     /// Deliberately reads [`ai_memory_core::AuthorizedViewer`] rather than the
     /// bare `UserId` alongside it. The bare id is always present for a
-    /// database user because attribution must not depend on a policy setting;
-    /// this one is stamped only when an operator has switched per-repository
-    /// authorization on, and never for root. `None` therefore means "no
-    /// per-repository check applies" — an open install, an install that has
-    /// not enabled authorization, or the operator.
+    /// database user for attribution; `AuthorizedViewer` is also stamped for
+    /// every database user so per-project access checks apply. Root is never
+    /// stamped. `None` means no database-user access check applies.
     fn viewer_from_parts(
         parts: Option<&axum::http::request::Parts>,
     ) -> Option<ai_memory_core::UserId> {

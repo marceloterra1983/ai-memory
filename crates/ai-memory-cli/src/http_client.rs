@@ -12,9 +12,7 @@
 
 use std::fmt;
 use std::io::{BufWriter, Write as _};
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -446,9 +444,9 @@ pub async fn post_to_file(endpoint: &ServerEndpoint, path: &str, dest: &Path) ->
         .await
         .map_err(|e| augment_connect_error(e, endpoint, &url))?;
     let mut resp = require_success(reqwest::Method::POST, resp).await?;
-    let file = private_output_file(dest)
-        .with_context(|| format!("creating output file {}", dest.display()))?;
-    let mut writer = BufWriter::new(file);
+    let (mut staged, output, permissions) = staged_output_file(dest)
+        .with_context(|| format!("preparing output file {}", dest.display()))?;
+    let mut writer = BufWriter::new(staged.as_file_mut());
     let mut written = 0_u64;
     while let Some(chunk) = resp
         .chunk()
@@ -463,37 +461,67 @@ pub async fn post_to_file(endpoint: &ServerEndpoint, path: &str, dest: &Path) ->
     writer
         .flush()
         .with_context(|| format!("flushing {}", dest.display()))?;
+    drop(writer);
+    if let Some(permissions) = permissions {
+        staged
+            .as_file()
+            .set_permissions(permissions)
+            .with_context(|| format!("setting permissions for {}", dest.display()))?;
+    }
+    staged
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("syncing {}", dest.display()))?;
+    staged
+        .persist(&output)
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("replacing output file {}", dest.display()))?;
     Ok(written)
 }
 
-/// Open a downloaded backup output file with private permissions before the
-/// first response bytes are written. Existing user-selected output files keep
-/// their existing permissions when overwritten.
-fn private_output_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    options.open(path)
+fn staged_output_file(
+    path: &Path,
+) -> std::io::Result<(
+    tempfile::NamedTempFile,
+    PathBuf,
+    Option<std::fs::Permissions>,
+)> {
+    let (output, permissions) = match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            // Follow an existing symlink without replacing the link itself.
+            let output = std::fs::canonicalize(path)?;
+            if !std::fs::metadata(&output)?.is_file() {
+                return Err(std::io::Error::other("output must be a regular file"));
+            }
+            // A writable directory does not imply permission to overwrite its file.
+            let existing = std::fs::OpenOptions::new().write(true).open(&output)?;
+            let metadata = existing.metadata()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt as _;
+                // Atomic replacement cannot update every alias of the old inode.
+                if metadata.nlink() > 1 {
+                    return Err(std::io::Error::other("output has multiple hardlinks"));
+                }
+            }
+            (output, Some(metadata.permissions()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (path.to_path_buf(), None),
+        Err(error) => return Err(error),
+    };
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staged = tempfile::Builder::new()
+        .prefix(".ai-memory-download-")
+        .tempfile_in(parent)?;
+    Ok((staged, output, permissions))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn downloaded_backup_output_is_private_when_created() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temp = tempfile::tempdir().unwrap();
-        let output = temp.path().join("backup.tar.gz");
-        private_output_file(&output).unwrap();
-        assert_eq!(
-            std::fs::metadata(output).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
 
     #[test]
     fn response_errors_include_method_and_credential_free_path() {

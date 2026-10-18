@@ -1,5 +1,6 @@
 //! Incremental, read-only extraction from native harness session stores.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
@@ -7,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ai_memory_core::{
-    AgentKind, MANAGED_WORKSTREAM_PACKET_MARKER, NewWorkstreamEvent, WorkstreamEventKind,
+    AgentKind, MANAGED_WORKSTREAM_PACKET_MARKER, NewWorkstreamEvent, Sanitizer, WorkstreamEventKind,
 };
 use anyhow::{Context as _, Result, anyhow};
 use rusqlite::{Connection, OpenFlags, params};
@@ -2246,7 +2247,14 @@ fn push_event(
     if content.trim().is_empty() {
         return;
     }
-    let content = truncate_utf8(content, MAX_EVENT_BYTES);
+    // The server needs complete secret delimiters; scrub before a local cap
+    // can remove them, leaving uncapped events for its configured sanitizer.
+    let content = if content.len() > MAX_EVENT_BYTES {
+        Cow::Owned(Sanitizer::builtin().scrub(content))
+    } else {
+        Cow::Borrowed(content)
+    };
+    let content = truncate_utf8(&content, MAX_EVENT_BYTES);
     let seed = format!(
         "{}\0{session}\0{record_id}\0{block}\0{}\0{content}",
         agent.as_str(),
@@ -3570,6 +3578,46 @@ fn deduplicate_losses(losses: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_event_cap_scrubs_pem_before_truncation() {
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_CONTENT{}\n-----END PRIVATE KEY-----",
+            "A".repeat(MAX_EVENT_BYTES)
+        );
+        let mut events = Vec::new();
+        push_event(
+            &mut events,
+            AgentKind::Codex,
+            "native-1",
+            "record-1",
+            0,
+            WorkstreamEventKind::Message,
+            Some("user"),
+            &pem,
+            None,
+            json!({}),
+        );
+        assert_eq!(events.len(), 1);
+        assert!(
+            !events[0].content.contains("SYNTHETIC_PRIVATE_CONTENT"),
+            "truncated PEM reached the server without its closing delimiter"
+        );
+        assert!(events[0].content.len() <= MAX_EVENT_BYTES);
+        push_event(
+            &mut events,
+            AgentKind::Codex,
+            "native-1",
+            "record-2",
+            0,
+            WorkstreamEventKind::Message,
+            Some("user"),
+            "ordinary context",
+            None,
+            json!({}),
+        );
+        assert_eq!(events[1].content, "ordinary context");
+    }
 
     #[test]
     fn checkout_path_comparison_fails_closed_when_canonicalization_fails() {

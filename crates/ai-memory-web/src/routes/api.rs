@@ -1039,11 +1039,9 @@ fn cap_body(body: &str, max_chars: usize) -> String {
 
 /// The user whose grants apply to this request, if any do.
 ///
-/// [`ai_memory_core::AuthorizedViewer`] is stamped only when an operator has
-/// switched per-repository authorization on, and never for root. `None`
-/// therefore covers every posture that authorizes identically — no auth, auth
-/// without authorization, and the operator — which is what keeps existing
-/// installs behaving exactly as they did before the guard existed.
+/// [`ai_memory_core::AuthorizedViewer`] is stamped for every database user,
+/// so per-project access checks apply, and never for root. `None` means
+/// no database-user access check applies.
 fn viewer_of(
     viewer: Option<axum::Extension<ai_memory_core::AuthorizedViewer>>,
 ) -> Option<ai_memory_core::UserId> {
@@ -1052,7 +1050,7 @@ fn viewer_of(
 
 /// Resolve a workspace/project pair the viewer is allowed to read.
 ///
-/// Every `/api/v1` route is a GET, so the whole surface needs exactly
+/// Every `/api/v1` route is read-only, including POST search, so it needs exactly
 /// [`ai_memory_store::ProjectAccess::Read`] and no caller has to choose a level.
 async fn lookup_project(
     state: &WebState,

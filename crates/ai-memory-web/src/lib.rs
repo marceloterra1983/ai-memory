@@ -2,9 +2,9 @@
 //!
 //! Mounted under `/web` on the same axum server that hosts the MCP
 //! endpoint, so a single port + single auth posture covers both. The
-//! crate is deliberately read-only in v1: no editing, no POST routes,
-//! no agent-write APIs. The wiki is already markdown-on-disk; this
-//! surface just makes it browsable from a phone, a tablet, or a
+//! crate is deliberately read-only: no editing or agent-write APIs.
+//! The JSON search API supports GET and POST. The wiki is already
+//! markdown-on-disk; this surface makes it browsable from a phone, a tablet, or a
 //! teammate's machine without `docker exec cat …`.
 //!
 //! Routes (all under whatever prefix the host nests this router at):

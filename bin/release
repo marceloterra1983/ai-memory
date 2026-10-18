@@ -8,8 +8,8 @@
 # What this script does:
 #   1. Validates the version string.
 #   2. Runs fmt / clippy / test gates.
-#   3. Runs cargo-deny and cargo-audit (warn-only — a known advisory should
-#      not block a release; the operator reviews the output).
+#   3. Runs cargo-deny as a gate when installed and cargo-audit as a warning
+#      for operator review.
 #   4. Updates [workspace.package] version in Cargo.toml.
 #   5. Moves CHANGELOG.md [Unreleased] entries to a new [X.Y.Z] section
 #      dated today.
@@ -65,9 +65,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "==> cargo test --workspace --all-targets"
 cargo test --workspace --all-targets
 
-echo "==> cargo deny check (warn-only)"
+echo "==> cargo deny check"
 if command -v cargo-deny &>/dev/null; then
-    cargo deny check || echo "  [warn] cargo deny reported issues — review before pushing"
+    cargo deny check
 else
     echo "  [warn] cargo-deny not installed; skipping (install with: cargo install cargo-deny)"
 fi

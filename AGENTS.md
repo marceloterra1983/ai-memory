@@ -197,6 +197,8 @@ evals/                     live A/B harness; workspace member, not shipped.
 companions/ai-memory-importer/  standalone OMC + external-conversation importer; NOT a root
                            workspace member — build/test it with
                            `--manifest-path companions/ai-memory-importer/Cargo.toml`.
+companions/ai-memory-relay/     external lifecycle relay; separate workspace — build/test
+                           with `--manifest-path companions/ai-memory-relay/Cargo.toml`.
 companions/ai-memory-macos/     Swift menu bar wrapper; NOT a root workspace member —
                            `swift test --package-path companions/ai-memory-macos`
                            and `./companions/ai-memory-macos/build.sh`.
@@ -245,6 +247,10 @@ build (`--workspace`). Without nextest,
 `cargo test --workspace --all-targets` is what CI runs: everything, slower,
 no tiers.
 
+`bin/release` treats `cargo deny check` as blocking when installed; a missing
+`cargo-deny` is reported as a skip. Its `cargo audit` step remains an explicit
+warning for operator review.
+
 - **Slow tier.** A test whose module path has a segment starting with `slow`
   or `stress` (`packaging::slow::*`, `stress_autoscope::*`) runs only under
   `cargo tf`, the pre-push hook, and CI. Budget for everything else: about 1s
@@ -275,6 +281,12 @@ no tiers.
   `cargo test --manifest-path companions/ai-memory-importer/Cargo.toml`
   (plus fmt/clippy on the same manifest). Root `--workspace` commands do
   not cover it.
+- Run the companion relay separately:
+  `cargo fmt --check --manifest-path companions/ai-memory-relay/Cargo.toml`,
+  `cargo clippy --locked --manifest-path companions/ai-memory-relay/Cargo.toml
+  --all-targets -- -D warnings`, and
+  `cargo test --locked --manifest-path companions/ai-memory-relay/Cargo.toml`.
+  Root `--workspace` commands do not cover it.
 - Run the macOS menu bar companion separately:
   `swift test --package-path companions/ai-memory-macos`
   (plus `./companions/ai-memory-macos/build.sh` to stage `AI Memory.app`).
@@ -311,6 +323,8 @@ no tiers.
 
 - Shell-level checks: `tests/hooks/test_lib.sh`,
   `tests/e2e/handoff_smoke.sh`, `scripts/check-native-packaging.sh`.
+- Isolated release-gate regression checks:
+  `python3 -B -m unittest discover -s tests/release -v`.
 - Offline Jev adapter contract: `python3 -B -m unittest discover -s tests/examples -v`.
 - CI additionally runs `cargo build --release --bin ai-memory` on
   Linux/macOS, a Docker image smoke test, `cargo audit` (with the ignores

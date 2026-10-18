@@ -731,6 +731,9 @@ documented or observed local session formats. Provider credentials, encrypted
 content, system/developer prompt records, and hidden reasoning are not copied. The
 server sanitizer runs before both the SQLite FTS ledger and immutable files under
 `<data_dir>/raw/workstreams/<workstream-id>/segments/` are written.
+It also runs before event, checkpoint and loss-text caps. A native adapter
+scrubs built-in credential patterns before an oversized event is truncated;
+complete events remain available to the server's configured sanitizer.
 
 The ledger is an operational continuity substrate, not a replacement for the
 markdown wiki. Durable decisions, rules, procedures, and project facts still

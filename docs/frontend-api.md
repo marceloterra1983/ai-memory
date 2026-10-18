@@ -12,7 +12,7 @@
 | | What you can do | What you can't do |
 |---|---|---|
 | `/api/v1/*` | Browse workspaces, projects, pages; read full page markdown + frontmatter + back-links; FTS5 search (global or scoped, single or multi-project); aggregate "overview" snapshots; drill into stale / duplicate / orphan pages; list a project's sessions and read one session's raw observations. | Write, delete, rename, lint, consolidate, run sweeps, manage handoffs. The `/api/v1` surface is **read-only by construction** — the handlers contain zero writer calls. Writes still go through `/admin/*` (used by the CLI) or MCP tools. |
-| `--web-ui-dir` | Host any SPA at `/web` (or `--web-slug`), same-origin with the API, behind the same auth. The default built-in `/web` browser stays the fallback when the flag is absent. | Host the SPA on a *different* origin without a reverse proxy — use same-origin hosting or configure CORS deliberately (see §9). |
+| `--web-ui-dir` | Host any SPA at `/web` (or `--web-slug`), same-origin with the API. The SPA shell and static assets are public; data APIs require authentication when authority is configured. The default built-in `/web` browser stays the fallback when the flag is absent. | Host the SPA on a *different* origin without a reverse proxy — use same-origin hosting or configure CORS deliberately (see §9). |
 
 ## 2. Auth model
 

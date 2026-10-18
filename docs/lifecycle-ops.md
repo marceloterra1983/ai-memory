@@ -939,7 +939,17 @@ What happens on the server:
 3. Response body IS the gzipped tarball
    (`Content-Type: application/gzip`).
 
-CLI writes the response body to `--to`. For a homelab user
+CLI stages the response in a private file beside the output and replaces
+`--to` only after the whole body has been written, flushed and synced.
+HTTP, body, write or flush failures preserve the previous output and remove
+the staging file. A new Unix output has mode `0600`; an existing regular
+file keeps its permissions and must permit a writable open. Existing
+symlinks to regular files are followed without replacing the symlink.
+On Unix, an output with multiple hardlinks is refused so none of its
+aliases is silently detached or overwritten. `export-okf` uses the same
+download writer and follows these rules.
+
+For a homelab user
 this is the standard "snapshot before doing something dangerous"
 move - `ai-memory backup` first, then proceed.
 
@@ -972,8 +982,10 @@ Order of operations:
 1. Check the data dir is empty (or the user passed `--force`).
 2. Extract the tarball into a staging directory beside the live data
    (`<data_dir>/.restore-staging-<stamp>/`), validating every entry.
-3. Open the staged store so pending migrations run and the SQLite
-   snapshot is verified — still without touching the live data.
+3. Require a non-empty regular file at `db/memory.sqlite` in staging,
+   then open the staged store so pending migrations run and the SQLite
+   snapshot is verified — still without touching the live data. Opening
+   alone would create a new database from a missing or empty snapshot.
 4. Swap: rename the live `wiki/` and `db/` (and `config.toml`, when the
    archive carries one) aside, rename the staged copies into place, then
    delete the previous data. Each move is a same-filesystem rename; if
@@ -991,10 +1003,11 @@ Failure modes:
   alive (pid X); stop it before restoring" - same wording as `reset`.
 - **Data dir not empty + no `--force`** → exits with "data dir not
   empty; pass `--force` to overwrite".
-- **Truncated or corrupt tarball, an entry outside the allowed layout, or
-  a snapshot the current binary cannot open** (for example a backup taken
-  by a newer release) → exits with the error; the existing `wiki/` and
-  `db/` are left as they were.
+- **Truncated or corrupt tarball, an entry outside the allowed layout,
+  a missing, empty or non-regular `db/memory.sqlite` snapshot, or a snapshot
+  the current binary cannot open** (for example a backup taken by a newer
+  release) → exits with the error; the existing `wiki/`, `db/` and
+  `config.toml` are left as they were.
 - **A rename in the swap fails and cannot be reversed** → exits with an
   `INCONSISTENT STATE` message naming the
   `<data_dir>/.restore-previous-<stamp>/` directory that still holds the

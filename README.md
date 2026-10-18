@@ -408,7 +408,9 @@ The quick-start default is loopback-only with no auth — nothing outside
 your machine can reach it. From there, hardening is incremental: a bearer
 token for the LAN, per-user accounts, OIDC device auth for hooks, TLS via
 a reverse proxy. Capture is sanitized at a typed privacy boundary before
-anything is stored, and per-repository `[capture]` rules can exclude
+anything is stored. Excerpt caps scrub complete text before truncating it,
+so a cap cannot turn a credential into an unrecognizable prefix.
+Per-repository `[capture]` rules can exclude
 paths or invert to allowlist mode. A repository can also route its capture
 to a different server than the one the hooks were installed against.
 

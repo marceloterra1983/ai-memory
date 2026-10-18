@@ -125,6 +125,15 @@ fn stage_then_swap(data_dir: &Path, from: &Path, staging: &Path, previous: &Path
         .with_context(|| format!("extracting {} into {}", from.display(), staging.display()))?;
     info!(from = %from.display(), into = %staging.display(), "tarball extracted into staging");
 
+    // Store::open creates a database from a missing or empty file, so its
+    // success alone cannot distinguish an incomplete archive from a backup.
+    let snapshot = staging.join("db").join("memory.sqlite");
+    let metadata = std::fs::symlink_metadata(&snapshot)
+        .with_context(|| format!("checking restored snapshot {}", snapshot.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        bail!("backup must contain a non-empty regular database snapshot at db/memory.sqlite");
+    }
+
     // 2. Open + drop the staged store so refinery applies any pending
     //    migrations and the SQLite file is validated — still before anything
     //    live is touched. Dropping the store joins the writer thread and
@@ -602,6 +611,70 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    fn assert_incomplete_archive_preserves_live_data(entries: &[(&str, &[u8])]) {
+        let data = tempfile::TempDir::new().unwrap();
+        seed_live_data(data.path());
+        let scratch = tempfile::TempDir::new().unwrap();
+        let from = write_tarball(scratch.path(), "incomplete.tar.gz", &gz_tarball(entries));
+
+        let err = restore_data_dir(data.path(), &from, true).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("snapshot"),
+            "unexpected error: {err:#}"
+        );
+        assert_live_data_untouched(data.path());
+    }
+
+    #[test]
+    fn restore_force_keeps_live_data_when_the_archive_has_no_snapshot() {
+        assert_incomplete_archive_preserves_live_data(&[]);
+    }
+
+    #[test]
+    fn restore_force_keeps_live_data_when_the_archive_only_has_config() {
+        assert_incomplete_archive_preserves_live_data(&[(
+            "config.toml",
+            b"# replacement config\n",
+        )]);
+    }
+
+    #[test]
+    fn restore_force_keeps_live_data_when_the_snapshot_is_empty() {
+        assert_incomplete_archive_preserves_live_data(&[
+            ("wiki/default/project/notes/new.md", b"new page"),
+            ("db/memory.sqlite", b""),
+        ]);
+    }
+
+    #[test]
+    fn restore_force_keeps_live_data_when_the_snapshot_is_not_a_regular_file() {
+        use std::io::Write as _;
+
+        for entry_type in [
+            tar::EntryType::symlink(),
+            tar::EntryType::hard_link(),
+            tar::EntryType::dir(),
+        ] {
+            let data = tempfile::TempDir::new().unwrap();
+            seed_live_data(data.path());
+            let scratch = tempfile::TempDir::new().unwrap();
+            let bytes = archive_with_entry("db/memory.sqlite", entry_type);
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(&bytes).unwrap();
+            let from = write_tarball(scratch.path(), "nonregular.tar.gz", &gz.finish().unwrap());
+
+            let err = restore_data_dir(data.path(), &from, true).unwrap_err();
+
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("unsupported link entry") || message.contains("unexpected path"),
+                "unexpected error: {message}"
+            );
+            assert_live_data_untouched(data.path());
+        }
     }
 
     #[test]

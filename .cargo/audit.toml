@@ -1,0 +1,15 @@
+# cargo-audit configuration. Mirrors the reachability-based ignores in
+# deny.toml (cargo-audit scans the whole Cargo.lock and does not read
+# deny.toml, so the two files must be kept in sync).
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0367/0368/0369: the `zip` extract() advisories.
+    # `ZipArchive::extract()` / `ZipStreamReader::extract()` are never
+    # called in this workspace or in candle-core (the only other zip
+    # consumer, in-memory reads only). The one release extractor is
+    # hand-rolled with `enclosed_name()` and rejects symlink entries.
+    # candle-core 0.11 pins zip 8.6, so zip >= 9 cannot unify yet.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+]

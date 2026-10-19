@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.3-local.1] - 2026-10-18
+
 ### Added
 - Added a private loopback MCP ingress with fsynced write intents outside the core data directory, independent recovery worker, guarded replay and complete body/metadata readback before delivery acknowledgement. Added live MCP readiness for the explicitly configured scope instead of an HTTP-only installation check. (local-20261010; private integration, no upstream issue opened)
 - Added typed `page_not_found` and `scope_not_found` error data for MCP clients to distinguish absence from authorization or I/O failures, preserving error codes and messages. (local-20261009; private integration, no upstream issue opened)
@@ -24,6 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambiguous values privately. (local-20261009; private integration, no upstream issue opened)
 
 ### Fixed
+- Scrub secrets before every truncation cap in hook lifecycle bodies, the
+  client spool and the assistant backstop, so a token cut below the
+  sanitizer minimum (or a PEM envelope missing its END marker) can no
+  longer slip past redaction. The configured sanitizer (allowlist and
+  extra patterns preserved) runs first on the server; the client uses
+  the built-in sanitizer only for originally oversized fields.
+  (local-20261018; private integration, no upstream issue opened)
+- Refuse restore snapshots whose database file is missing or empty
+  instead of letting `Store::open` create a fresh database and reach
+  the destructive swap; prior data stays untouched on refusal.
+  (local-20261018; private integration, no upstream issue opened)
+- Keep the previous backup when a backup download fails or is
+  incomplete: downloads are staged and only replace the destination
+  after a complete successful transfer.
+  (local-20261018; private integration, no upstream issue opened)
 - Reduced repeated OpenAI-compatible query inference with a bounded, ephemeral
   vector cache isolated to each embedder configuration. Kept documents uncached
   and page retrieval, scope/access checks, version and TTL filtering live on
@@ -7771,7 +7788,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v2.5.2...HEAD
+[Unreleased]: https://github.com/marceloterra1983/ai-memory/compare/v2.5.3-local.1...HEAD
+[2.5.3-local.1]: https://github.com/marceloterra1983/ai-memory/releases/tag/v2.5.3-local.1
 [2.5.2]: https://github.com/akitaonrails/ai-memory/compare/v2.5.1...v2.5.2
 [2.5.1]: https://github.com/akitaonrails/ai-memory/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/akitaonrails/ai-memory/compare/v2.4.2...v2.5.0

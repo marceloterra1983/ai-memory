@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.3-local.2] - 2026-10-19
+
+### Security
+- Updated `rustls` 0.23.45 -> 0.23.46, fixing RUSTSEC-2026-0346
+  through RUSTSEC-2026-0349 (TLS secret exposure via `Debug` impls,
+  ECH buffered-data leak, Brotli certificate decompression memory
+  bound, unauthenticated ServerHello downgrade). Documented
+  reachability-based cargo-deny ignores for the `zip` `extract()`
+  advisories (those APIs are never called; the release extractor is
+  hand-rolled with `enclosed_name()` and symlink rejection, and
+  candle-core still pins zip 8.6) and for dev-only `unsafe-libyaml`.
+  With cargo-deny installed, `cargo deny check` now passes as a real
+  release gate instead of being skipped.
+  (local-20261019; private integration, no upstream issue opened)
+
 ## [2.5.3-local.1] - 2026-10-18
 
 ### Added
@@ -7788,7 +7803,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/marceloterra1983/ai-memory/compare/v2.5.3-local.1...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v2.5.3-local.2...HEAD
+[2.5.3-local.2]: https://github.com/akitaonrails/ai-memory/releases/tag/v2.5.3-local.2
 [2.5.3-local.1]: https://github.com/marceloterra1983/ai-memory/releases/tag/v2.5.3-local.1
 [2.5.2]: https://github.com/akitaonrails/ai-memory/compare/v2.5.1...v2.5.2
 [2.5.1]: https://github.com/akitaonrails/ai-memory/compare/v2.5.0...v2.5.1

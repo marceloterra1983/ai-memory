@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added local fork release manifest recording with tag and installed-binary
+  validation, source archives, preserved manifest backups, atomic updates,
+  installer verification and a dry-run preview. Printed fork installation and
+  manifest commit steps for `-local.N` releases.
+  (local-20261019; private integration, no upstream issue opened)
+
 ## [2.5.3-local.2] - 2026-10-19
 
 ### Security

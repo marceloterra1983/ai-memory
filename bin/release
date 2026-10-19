@@ -197,6 +197,20 @@ git tag -a "${TAG}" -m "$(printf '%s\n\n%s' "Release ${TAG}" "${CHANGELOG_ENTRY}
 
 # ── next steps ─────────────────────────────────────────────────────────────
 
+if [[ "$VERSION" =~ -local\.[0-9]+$ ]]; then
+cat <<EOF
+
+Local fork release ${TAG} is ready. Next steps:
+
+  cargo build --locked --offline --release -p ai-memory-cli
+  install -m 755 target/release/ai-memory ~/.local/bin/ai-memory
+  systemctl --user restart ai-memory.service
+  local-runtime-resource/record-manifest.sh ${TAG}
+  git -C ~/.agents add tools/ai-memory/manifest.json
+  git -C ~/.agents commit -m "chore(ai-memory): record ${TAG}"
+
+EOF
+else
 cat <<EOF
 
 Release ${TAG} is ready locally. To publish:
@@ -208,3 +222,4 @@ Then deploy the Docker image:
   ./bin/deploy
 
 EOF
+fi

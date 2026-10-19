@@ -21,6 +21,24 @@ ignore = [
     # embeddings); no runtime code ships from it. Revisit when candle
     # replaces it upstream.
     "RUSTSEC-2024-0436",
+    # RUSTSEC-2024-0449: `unsafe-libyaml` is unmaintained. Pulled only
+    # by serde_yaml, which is a dev-dependency of ai-memory-core and
+    # ai-memory-wiki; nothing from it ships in the released binary.
+    "RUSTSEC-2024-0449",
+    # RUSTSEC-2026-0367/0368/0369: the three `zip` advisories all
+    # concern `ZipArchive::extract()` / `ZipStreamReader::extract()`
+    # (SUID/SGID preservation and symlink escapes during extraction).
+    # Neither API is called anywhere in this workspace or in
+    # candle-core, the only other consumer of `zip` in the graph
+    # (in-memory archive reads for pickle/npy only). The one release
+    # extractor, `extract_release_zip` in ai-memory-cli, is hand-rolled
+    # on `by_index` + `enclosed_name()`, rejects symlink entries, and
+    # never applies archive permissions. candle-core 0.11 also pins
+    # zip 8.6, so unifying on zip 9 is not yet possible. Revisit when
+    # candle moves to zip >= 9.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
 ]
 
 [licenses]

@@ -1078,6 +1078,17 @@ Copilot chat endpoint.
 AI_MEMORY_EMBEDDING_PROVIDER   openai | voyage | google | gemini | openai-compat | copilot
 AI_MEMORY_EMBEDDING_MODEL      e.g. text-embedding-3-small, gemini-embedding-001
 AI_MEMORY_EMBEDDING_BASE_URL   optional override; required for openai-compat
+AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS
+                               120 by default; integer 1..=1800. Per document
+                               HTTP request (including response body), for
+                               ordinary and DREAM openai-compat `embed` and
+                               `embed_document`; each existing local chunk
+                               receives the budget. Queries retain 120s, even
+                               without a query override or on cache misses.
+                               Non-default values on other/disabled providers
+                               fail explicitly. Chat/judgments and LLM timeout
+                               are independent. Read only at process startup;
+                               no hot reload
 AI_MEMORY_EMBEDDING_QUERY_BASE_URL
                                optional; openai-compat only. `embed_query`
                                uses this endpoint and `embed_document` stays

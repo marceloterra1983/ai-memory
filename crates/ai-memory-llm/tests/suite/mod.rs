@@ -5,6 +5,7 @@
 mod copilot_embedder;
 mod copilot_provider;
 mod dream_local;
+mod embedding_document_timeout;
 mod extra_headers_on_the_wire;
 mod fallback_provider;
 mod local_embedding_chunks;

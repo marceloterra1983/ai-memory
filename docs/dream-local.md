@@ -35,6 +35,8 @@ embedding_base_url = "http://127.0.0.1:8002/v1"
 # embedding_query_base_url = "http://127.0.0.1:18003/v1"
 embedding_model = "REPLACE_WITH_VERIFIED_LOCAL_EMBEDDING_MODEL"
 embedding_dim = 1024
+# Optional for long CPU/GPU documents; default 120, valid range 1..=1800.
+# embedding_document_timeout_secs = 1800
 
 [dream]
 enabled = false
@@ -80,6 +82,16 @@ page; any chunk failure refuses the entire vector. Small-document vectors,
 stored identity and wiki/FTS text are unchanged. Queries, drafting and
 semantic requests retain their single-request limits. These byte counts and
 vector calculations require no new semantic judgment or Jev call.
+`AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS` (or
+`embedding_document_timeout_secs`) changes only the per-request document budget
+in `embed`/`embed_document`, including response bodies and each existing chunk.
+It defaults to 120 seconds and rejects values outside 1..=1800; 1800 supports
+slow CPU/GPU documents. Queries keep 120 seconds even without a query URL
+override and on cache misses. Drafting and semantic judgments keep their
+120-second ceiling, and consolidation's LLM timeout is separate. The local
+transport retains literal loopback, no credentials/proxies/redirects/retries,
+8192 wire bytes and a 128 KiB response cap, with redacted errors. Configuration
+is read only at process startup; there is no hot reload.
 Admission remains required; dream refuses
 remote admission destinations and any admission/sanitizer mutation of a gated
 draft. Local service operators must verify the actual backend behind each alias.

@@ -108,6 +108,13 @@ log_level = "info"
 #   embedding_dim      = 384              # must match the model
 #   embedding_query_base_url = "http://127.0.0.1:18003/v1"
 #                                # openai-compat only; queries only. Unset = embedding_base_url
+#   embedding_document_timeout_secs = 120
+#                                # openai-compat only; 1..=1800 seconds per document HTTP request
+# For long CPU/GPU documents, AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS=1800
+# extends embed/embed_document, including response bodies. Queries keep 120s,
+# including without a query URL override and on cache misses. Also applies to
+# the restricted DREAM transport; chat/judgments and llm_timeout_secs are separate.
+# Read once at process startup; no hot reload.
 
 [decay]
 lambda = 0.02

@@ -458,6 +458,12 @@ pub struct Config {
     pub embedding_dim: Option<u32>,
     /// Optional embedding base URL override.
     pub embedding_base_url: Option<String>,
+    /// Per-request document embedding timeout, including the response body.
+    /// Default 120 seconds; valid range 1..=1800. A non-default value requires
+    /// `openai-compat`, including its restricted DREAM path. Queries retain
+    /// 120 seconds. Read once at startup through
+    /// `AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS`; independent of the LLM timeout.
+    pub embedding_document_timeout_secs: u64,
     /// Optional `openai-compat` base URL used only for query embeddings
     /// (`Embedder::embed_query`). Unset, queries use `embedding_base_url`.
     /// The operator sets the URL explicitly; it is not derived from memory
@@ -975,6 +981,8 @@ impl Default for Config {
             embedding_model: None,
             embedding_dim: None,
             embedding_base_url: None,
+            embedding_document_timeout_secs:
+                ai_memory_llm::embedding::DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS,
             embedding_query_base_url: None,
             embedding_query_prefix: None,
             embedding_document_prefix: None,
@@ -1674,6 +1682,22 @@ fn apply_fts_stopwords_env(config: &mut Config, raw: Option<&str>) {
 }
 
 impl Config {
+    fn validate_embedding_document_timeout(&self) -> LlmResult<()> {
+        ai_memory_llm::embedding::embedding_document_timeout(self.embedding_document_timeout_secs)?;
+        if self.embedding_document_timeout_secs
+            != ai_memory_llm::embedding::DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS
+            && !matches!(
+                non_empty(self.embedding_provider.as_deref()),
+                Some("openai-compat" | "openai_compat")
+            )
+        {
+            return Err(LlmError::NotConfigured(
+                "AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS / embedding_document_timeout_secs is only supported for openai-compat when non-default".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_dream_providers(&self) -> anyhow::Result<()> {
         self.dream.validate()?;
         if self.dream.enabled || !self.dream.scopes.is_empty() {
@@ -1917,6 +1941,7 @@ impl Config {
                 config.llm_timeout_secs
             );
         }
+        config.validate_embedding_document_timeout()?;
         // Parsed (and discarded) here so a malformed header list is rejected
         // at startup rather than on the first consolidation pass. The typed
         // value is rebuilt by `llm_provider_config`: `ExtraHeaders` is not
@@ -2254,6 +2279,7 @@ impl Config {
     /// Returns [`LlmError::NotConfigured`] for unknown providers, missing API
     /// keys, or invalid dimensions.
     pub fn embedder_config(&self) -> LlmResult<Option<EmbedderConfig>> {
+        self.validate_embedding_document_timeout()?;
         // 2.0 default: hybrid retrieval out of the box. An unset provider
         // selects in-process `local` embeddings BEST-EFFORT (the serve
         // layer degrades to no-embedder if the model cannot be fetched or
@@ -2377,6 +2403,7 @@ impl Config {
             query_prefix,
             document_prefix,
             query_base_url,
+            document_timeout_secs: self.embedding_document_timeout_secs,
             local_only: false,
         }))
     }
@@ -3684,6 +3711,127 @@ mod tests {
             error.to_string().contains("llm_timeout_secs"),
             "unexpected error: {error:#}"
         );
+    }
+
+    #[test]
+    fn embedding_document_timeout_defaults_to_120() {
+        let value = serde_json::to_value(Config::default()).unwrap();
+        assert_eq!(value["embedding_document_timeout_secs"], 120);
+    }
+
+    // Each child has an empty environment and temporary config/home roots:
+    // real Env precedence without racing another test or reading user auth.
+    #[test]
+    fn loader_embedding_document_timeout_toml_env_and_validation() {
+        const CHILD: &str = "AI_MEMORY_TEST_EMBEDDING_TIMEOUT_CASE";
+        let cases = [
+            (None, None, Some(120_u64)),
+            (Some("1"), None, Some(1)),
+            (Some("1800"), None, Some(1800)),
+            (Some("30"), Some("1800"), Some(1800)),
+            (Some("0"), None, None),
+            (Some("1801"), None, None),
+            (Some("18446744073709551616"), None, None),
+            (None, Some("0"), None),
+            (None, Some("1801"), None),
+            (None, Some("18446744073709551616"), None),
+            (None, Some("-1"), None),
+        ];
+        if let Some(case) = std::env::var_os(CHILD) {
+            let (toml, _, expected) = cases[case.to_str().unwrap().parse::<usize>().unwrap()];
+            let tmp = TempDir::new().unwrap();
+            let config_path = tmp.path().join("config.toml");
+            let mut input = "llm_timeout_secs = 900\nembedding_provider = \"openai-compat\"\nembedding_model = \"synthetic\"\nembedding_dim = 2\nembedding_base_url = \"http://127.0.0.1:9/v1\"\n".to_string();
+            if let Some(raw) = toml {
+                input.push_str(&format!("embedding_document_timeout_secs = {raw}\n"));
+            }
+            std::fs::write(&config_path, input).unwrap();
+            let loaded = Config::load(Some(&config_path), Some(tmp.path().to_path_buf()));
+            match expected {
+                Some(seconds) => {
+                    let config = loaded.unwrap();
+                    let value = serde_json::to_value(&config).unwrap();
+                    assert_eq!(value["embedding_document_timeout_secs"], seconds);
+                    assert_eq!(
+                        config
+                            .embedder_config()
+                            .unwrap()
+                            .unwrap()
+                            .document_timeout_secs,
+                        seconds
+                    );
+                    assert_eq!(config.llm_timeout_secs, 900);
+                }
+                None => {
+                    let error = loaded.expect_err("invalid document timeout must fail closed");
+                    assert!(
+                        format!("{error:#}")
+                            .to_ascii_lowercase()
+                            .contains("embedding_document_timeout_secs"),
+                        "{error:#}"
+                    );
+                }
+            }
+            return;
+        }
+        for (index, (_, env, _)) in cases.iter().enumerate() {
+            let tmp = TempDir::new().unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "config::tests::loader_embedding_document_timeout_toml_env_and_validation",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("HOME", tmp.path())
+                .env("XDG_CONFIG_HOME", tmp.path())
+                .env("TMPDIR", tmp.path())
+                .env("TMP", tmp.path())
+                .env("TEMP", tmp.path())
+                .env(CHILD, index.to_string());
+            if let Some(raw) = env {
+                command.env("AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS", raw);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "case {index}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn loader_rejects_document_timeout_for_incompatible_providers() {
+        for provider in [
+            None,
+            Some("local"),
+            Some("none"),
+            Some("openai"),
+            Some("voyage"),
+            Some("google"),
+            Some("copilot"),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let config_path = tmp.path().join("config.toml");
+            let mut input = "embedding_document_timeout_secs = 1800\n".to_string();
+            if let Some(provider) = provider {
+                input.push_str(&format!("embedding_provider = {provider:?}\n"));
+            }
+            std::fs::write(&config_path, input).unwrap();
+            let error = Config::load(Some(&config_path), Some(tmp.path().to_path_buf()))
+                .expect_err("a non-default timeout must not be silently ignored");
+            assert!(
+                error
+                    .to_string()
+                    .contains("AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS"),
+                "{error:#}"
+            );
+            assert!(error.to_string().contains("openai-compat"), "{error:#}");
+        }
     }
 
     #[test]

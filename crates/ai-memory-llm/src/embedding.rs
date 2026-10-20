@@ -30,6 +30,24 @@ use crate::text::{truncate_for_embedding, truncate_with_ellipsis};
 /// (8192 token server limit; we stay well below with head truncation).
 pub(crate) const OPENAI_EMBED_MAX_TOKENS: usize = 5000;
 
+/// Default per-request document embedding budget; queries have a separate 120s ceiling.
+pub const DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS: u64 = 120;
+/// Finite ceiling for a document embedding HTTP request.
+pub(crate) const MAX_EMBEDDING_DOCUMENT_TIMEOUT_SECS: u64 = 1800;
+
+/// Validate and convert the document-only HTTP budget from configuration.
+///
+/// # Errors
+/// Refuses zero or a value above the finite 1800-second ceiling.
+pub fn embedding_document_timeout(seconds: u64) -> LlmResult<Duration> {
+    if !(1..=MAX_EMBEDDING_DOCUMENT_TIMEOUT_SECS).contains(&seconds) {
+        return Err(LlmError::NotConfigured(
+            "AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS / embedding_document_timeout_secs must be between 1 and 1800 seconds".into(),
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
 /// Provider-agnostic embedding API.
 ///
 /// Implementations must be `Send + Sync` (the MCP server / hook
@@ -242,6 +260,7 @@ async fn openai_style_embed(
     model: &str,
     dim: u32,
     text: &str,
+    timeout: Option<Duration>,
 ) -> LlmResult<Vec<f32>> {
     let input = truncate_for_embedding(text, OPENAI_EMBED_MAX_TOKENS);
     let url = normalize_openai_base(base_url, "embeddings");
@@ -258,6 +277,9 @@ async fn openai_style_embed(
     let mut attempt = 0u32;
     loop {
         let mut builder = client.post(&url);
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout);
+        }
         if let Some(key) = api_key {
             builder = builder.bearer_auth(key.expose_secret());
         }
@@ -324,6 +346,7 @@ impl Embedder for OpenAiEmbedder {
             &self.model,
             self.dim,
             text,
+            None,
         )
         .await
     }
@@ -337,6 +360,7 @@ impl Embedder for OpenAiEmbedder {
             &self.model,
             self.dim,
             &prefixed,
+            None,
         )
         .await
     }
@@ -350,6 +374,7 @@ impl Embedder for OpenAiEmbedder {
             &self.model,
             self.dim,
             &prefixed,
+            None,
         )
         .await
     }
@@ -366,6 +391,7 @@ impl Embedder for OpenAiEmbedder {
 pub struct OpenAiCompatEmbedder {
     client: reqwest::Client,
     local_client: Option<crate::DreamLocalClient>,
+    document_timeout: Duration,
     api_key: Option<SecretString>,
     base_url: String,
     model: String,
@@ -412,6 +438,7 @@ impl OpenAiCompatEmbedder {
         Ok(Self {
             client,
             local_client: None,
+            document_timeout: Duration::from_secs(DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS),
             api_key,
             base_url: base_url.into(),
             model: model.into(),
@@ -461,6 +488,7 @@ impl OpenAiCompatEmbedder {
                 .timeout(Duration::from_secs(120))
                 .build()?,
             local_client: Some(local_client),
+            document_timeout: Duration::from_secs(DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS),
             api_key: None,
             base_url,
             model,
@@ -472,6 +500,17 @@ impl OpenAiCompatEmbedder {
         })
     }
 
+    /// Set the document-only per-request budget, including the response body.
+    ///
+    /// Queries keep their separate 120-second budget and existing cache.
+    ///
+    /// # Errors
+    /// Refuses seconds outside 1..=1800.
+    pub fn with_document_timeout_secs(mut self, seconds: u64) -> LlmResult<Self> {
+        self.document_timeout = embedding_document_timeout(seconds)?;
+        Ok(self)
+    }
+
     async fn embed_text(&self, text: &str) -> LlmResult<Vec<f32>> {
         let Some(client) = &self.local_client else {
             return openai_style_embed(
@@ -481,10 +520,19 @@ impl OpenAiCompatEmbedder {
                 &self.model,
                 self.dim,
                 text,
+                Some(self.document_timeout),
             )
             .await;
         };
-        dream_local_embed_document(client, &self.model, self.dim, "", text).await
+        dream_local_embed_document(
+            client,
+            &self.model,
+            self.dim,
+            "",
+            text,
+            self.document_timeout,
+        )
+        .await
     }
 
     /// Set the strings prepended to query / document text before embedding,
@@ -563,6 +611,7 @@ impl Embedder for OpenAiCompatEmbedder {
                 self.dim,
                 &self.document_prefix,
                 text,
+                self.document_timeout,
             )
             .await;
         }
@@ -592,7 +641,7 @@ impl OpenAiCompatEmbedder {
             if self.local_client.is_some() {
                 let endpoint = normalize_openai_base(url, "embeddings");
                 let client = crate::DreamLocalClient::new(&endpoint)?;
-                return dream_local_embed(&client, &self.model, self.dim, prefixed).await;
+                return dream_local_embed(&client, &self.model, self.dim, prefixed, None).await;
             }
             return openai_style_embed(
                 &self.client,
@@ -601,13 +650,25 @@ impl OpenAiCompatEmbedder {
                 &self.model,
                 self.dim,
                 prefixed,
+                None,
             )
             .await;
         }
         if let Some(client) = &self.local_client {
-            return dream_local_embed(client, &self.model, self.dim, prefixed).await;
+            return dream_local_embed(client, &self.model, self.dim, prefixed, None).await;
         }
-        self.embed_text(prefixed).await
+        // The shared endpoint still needs the query client's 120s budget,
+        // independent of the document override and of cache misses.
+        openai_style_embed(
+            &self.client,
+            &self.base_url,
+            self.api_key.as_ref(),
+            &self.model,
+            self.dim,
+            prefixed,
+            None,
+        )
+        .await
     }
 }
 
@@ -620,6 +681,7 @@ async fn dream_local_embed_document(
     dim: u32,
     prefix: &str,
     text: &str,
+    timeout: Duration,
 ) -> LlmResult<Vec<f32>> {
     let overhead = serde_json::to_vec(&serde_json::json!({"model":model,"input":prefix}))
         .map_err(|_| LlmError::Schema("dream embedding serialization failed".into()))?
@@ -628,14 +690,14 @@ async fn dream_local_embed_document(
         .checked_sub(overhead)
         .ok_or_else(|| LlmError::Schema("dream embedding prefix exceeds wire budget".into()))?;
     if text.is_empty() {
-        return dream_local_embed(client, model, dim, prefix).await;
+        return dream_local_embed(client, model, dim, prefix, Some(timeout)).await;
     }
     let mut remaining = text;
     let mut pool = vec![0.0_f64; dim as usize];
     while !remaining.is_empty() {
         let end = dream_embedding_chunk_end(remaining, budget)?;
         let input = prepend_prefix(prefix, &remaining[..end]);
-        let vector = dream_local_embed(client, model, dim, &input).await?;
+        let vector = dream_local_embed(client, model, dim, &input, Some(timeout)).await?;
         if end == text.len() {
             return Ok(vector);
         }
@@ -691,10 +753,13 @@ async fn dream_local_embed(
     model: &str,
     dim: u32,
     text: &str,
+    document_timeout: Option<Duration>,
 ) -> LlmResult<Vec<f32>> {
-    let response = client
-        .post_json(&serde_json::json!({"model":model,"input":text}))
-        .await?;
+    let body = serde_json::json!({"model":model,"input":text});
+    let response = match document_timeout {
+        Some(timeout) => client.post_embedding_document_json(&body, timeout).await?,
+        None => client.post_json(&body).await?,
+    };
     let data = response
         .get("data")
         .and_then(serde_json::Value::as_array)
@@ -1214,5 +1279,153 @@ mod tests {
         .with_prefixes("query: ", "passage: ");
         assert_eq!(e.query_prefix, "query: ");
         assert_eq!(e.document_prefix, "passage: ");
+    }
+
+    fn short_query_budget(mut embedder: OpenAiCompatEmbedder) -> OpenAiCompatEmbedder {
+        embedder.client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        embedder.local_client = embedder.local_client.map(|client| {
+            crate::dream_local::tests::with_timeout(client, Duration::from_millis(100))
+        });
+        embedder
+    }
+
+    fn timed_embedder(endpoint: &str, local: bool) -> OpenAiCompatEmbedder {
+        let embedder = if local {
+            OpenAiCompatEmbedder::new_local(endpoint, "synthetic", 2).unwrap()
+        } else {
+            OpenAiCompatEmbedder::new(endpoint, None, "synthetic", 2).unwrap()
+        };
+        let mut embedder = short_query_budget(embedder.with_document_timeout_secs(1800).unwrap());
+        // Scale only the two budgets; exercise real sockets and elapsed time.
+        embedder.document_timeout = Duration::from_secs(2);
+        embedder
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn document_timeout_does_not_extend_same_endpoint_queries_or_cache_failures(
+        #[case] local: bool,
+    ) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let response = ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data":[{"embedding":[1.0,0.0]}]}));
+                if body["input"] == "cached" {
+                    response
+                } else {
+                    response.set_delay(Duration::from_millis(300))
+                }
+            })
+            .mount(&server)
+            .await;
+        let embedder = timed_embedder(&server.uri(), local);
+        assert_eq!(
+            embedder.embed_query("cached").await.unwrap(),
+            vec![1.0, 0.0]
+        );
+        assert_eq!(
+            embedder.embed_query("cached").await.unwrap(),
+            vec![1.0, 0.0]
+        );
+        for _ in 0..2 {
+            assert!(
+                embedder.embed_query("uncached").await.is_err(),
+                "query inherited the document budget"
+            );
+        }
+        assert_eq!(embedder.embed("document").await.unwrap(), vec![1.0, 0.0]);
+        assert_eq!(
+            embedder.embed_document("document").await.unwrap(),
+            vec![1.0, 0.0]
+        );
+        assert_eq!(
+            embedder.embed_document("document").await.unwrap(),
+            vec![1.0, 0.0]
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 6);
+    }
+
+    #[rstest::rstest]
+    #[case(false, false)]
+    #[case(true, false)]
+    #[case(false, true)]
+    #[case(true, true)]
+    #[tokio::test]
+    async fn short_document_timeout_does_not_shorten_queries_with_or_without_override(
+        #[case] local: bool,
+        #[case] query_override: bool,
+    ) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(300))
+                    .set_body_json(serde_json::json!({"data":[{"embedding":[1.0,0.0]}]})),
+            )
+            .mount(&server)
+            .await;
+        let mut embedder = timed_embedder(&server.uri(), local);
+        // Leave the real 120-second query budget in place here.
+        let fresh = if local {
+            OpenAiCompatEmbedder::new_local(server.uri(), "synthetic", 2).unwrap()
+        } else {
+            OpenAiCompatEmbedder::new(server.uri(), None, "synthetic", 2).unwrap()
+        };
+        embedder.client = fresh.client;
+        embedder.local_client = fresh.local_client;
+        embedder.document_timeout = Duration::from_millis(100);
+        if query_override {
+            embedder = embedder.with_query_base_url(server.uri());
+        }
+        assert!(embedder.embed_document("document").await.is_err());
+        assert_eq!(embedder.embed_query("query").await.unwrap(), vec![1.0, 0.0]);
+        assert_eq!(embedder.embed_query("query").await.unwrap(), vec![1.0, 0.0]);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn document_deadline_covers_headers_and_response_body(#[case] local: bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let backend = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = b"{\"data\":[{\"embedding\":[1.0,0.0]}]}";
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+            socket.write_all(&body[..1]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let _ = socket.write_all(&body[1..]).await;
+        });
+        let mut embedder = if local {
+            OpenAiCompatEmbedder::new_local(&endpoint, "synthetic", 2).unwrap()
+        } else {
+            OpenAiCompatEmbedder::new(&endpoint, None, "synthetic", 2).unwrap()
+        };
+        embedder.document_timeout = Duration::from_millis(150);
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), embedder.embed_document("synthetic"))
+                .await
+                .unwrap();
+        assert!(
+            result.is_err(),
+            "the document deadline stopped at the response headers"
+        );
+        backend.await.unwrap();
     }
 }

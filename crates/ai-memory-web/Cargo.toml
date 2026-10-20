@@ -25,7 +25,8 @@ tower.workspace = true
 tower-http.workspace = true
 
 # Templating + markdown.
-askama = "0.12"
+# No askama.toml is used; omit its unmaintained basic-toml build dependency.
+askama = { version = "0.12", default-features = false, features = ["humansize", "num-traits", "urlencode"] }
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
 [build-dependencies]

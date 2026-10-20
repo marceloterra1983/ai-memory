@@ -18,7 +18,8 @@ use crate::{ChatRequest, ChatResponse, LlmError, LlmProvider, LlmResult, Usage};
 pub const DREAM_LOCAL_MAX_INPUT_BYTES: usize = 8192;
 /// Maximum generated tokens on a dream completion.
 pub const DREAM_LOCAL_MAX_OUTPUT_TOKENS: u32 = 4000;
-/// Upper bound for a single admitted local request, including its response.
+/// Default bound for a local request, including its response. Chat, semantic
+/// judgments and queries keep it; document embeddings have a separate budget.
 pub const DREAM_LOCAL_REQUEST_TIMEOUT_SECS: u64 = 120;
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
@@ -106,6 +107,25 @@ impl DreamLocalClient {
     /// Refuses oversized input, transport/status errors, oversized responses,
     /// malformed JSON and a response that is not an object.
     pub async fn post_json(&self, body: &Value) -> LlmResult<Value> {
+        self.post_json_with_timeout(body, self.timeout).await
+    }
+
+    pub(crate) async fn post_embedding_document_json(
+        &self,
+        body: &Value,
+        timeout: Duration,
+    ) -> LlmResult<Value> {
+        if timeout.is_zero()
+            || timeout > Duration::from_secs(crate::embedding::MAX_EMBEDDING_DOCUMENT_TIMEOUT_SECS)
+        {
+            return Err(LlmError::NotConfigured(
+                "dream document timeout must be positive and at most 1800 seconds".into(),
+            ));
+        }
+        self.post_json_with_timeout(body, timeout).await
+    }
+
+    async fn post_json_with_timeout(&self, body: &Value, timeout: Duration) -> LlmResult<Value> {
         let wire = serde_json::to_vec(body)
             .map_err(|_| LlmError::Schema("dream request serialization failed".into()))?;
         if wire.len() > DREAM_LOCAL_MAX_INPUT_BYTES {
@@ -115,7 +135,7 @@ impl DreamLocalClient {
         let response = self
             .client
             .post(self.endpoint.clone())
-            .timeout(self.timeout)
+            .timeout(timeout)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(wire)
             .send()
@@ -282,10 +302,18 @@ impl LlmProvider for DreamLocalProvider {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    pub(crate) fn with_timeout(
+        mut client: DreamLocalClient,
+        timeout: Duration,
+    ) -> DreamLocalClient {
+        client.timeout = timeout;
+        client
+    }
 
     #[tokio::test]
     async fn local_timeout_is_bounded_and_redacted_without_retry() {

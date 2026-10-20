@@ -365,6 +365,21 @@ hybrid paths apply the same bounded page-authority adjustment after candidate
 generation; embeddings improve relevance recall but do not decide which source
 is canonical.
 
+Long CPU/GPU document embeddings on `openai-compat` can use
+`AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS=1800`, or
+`embedding_document_timeout_secs = 1800` in `config.toml`. The default remains
+120 seconds; accepted values are integers from 1 through 1800. Zero, overflow,
+values above 1800, and non-default values for other or disabled embedding
+providers fail configuration explicitly. The budget covers each HTTP request,
+including its response body, in both `embed` and `embed_document`; on the
+restricted DREAM path it applies to each existing document chunk. Queries keep
+their 120-second budget, with or without a query endpoint override, including
+cache misses. This does not change vectors, model identity, prefixes, truncation,
+chunking, pooling, retries or cache policy. DREAM chat and semantic judgments,
+and consolidation's `llm_timeout_secs`, keep their separate budgets. Configuration
+is read once at process startup; changing the file or ENV does not hot reload
+an already running server.
+
 Asymmetric embedding models — ones trained with a different instruction for
 queries than for the text being indexed — need that instruction added to the
 text itself; the OpenAI-compatible `/v1/embeddings` wire format has no field

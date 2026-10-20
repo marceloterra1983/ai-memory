@@ -231,6 +231,10 @@ pub struct EmbedderConfig {
     /// constructing, and queries go through the same bounded local client
     /// as documents.
     pub query_base_url: Option<String>,
+    /// Per-request document budget (1..=1800 seconds, default 120), including
+    /// the response body. Only `openai-compat` supports a non-default value;
+    /// queries and DREAM chat/semantic judgments keep their own 120s ceiling.
+    pub document_timeout_secs: u64,
     /// Build the `openai-compat` embedder with the dream local client.
     /// `serve` sets this when dream scopes are non-empty. Not an operator key.
     pub local_only: bool,
@@ -242,6 +246,14 @@ pub struct EmbedderConfig {
 /// Returns [`LlmError::NotConfigured`] for a zero dimension or missing required
 /// base URL; propagates HTTP-client construction errors.
 pub fn build_embedder(config: EmbedderConfig) -> LlmResult<Arc<dyn Embedder>> {
+    crate::embedding::embedding_document_timeout(config.document_timeout_secs)?;
+    if config.document_timeout_secs != crate::embedding::DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS
+        && config.provider != EmbedderChoice::OpenAiCompat
+    {
+        return Err(LlmError::NotConfigured(
+            "AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS is only supported for openai-compat when non-default".into(),
+        ));
+    }
     if config.dim == 0 {
         return Err(LlmError::NotConfigured(
             "AI_MEMORY_EMBEDDING_DIM must be greater than zero".into(),
@@ -302,7 +314,9 @@ pub fn build_embedder(config: EmbedderConfig) -> LlmResult<Arc<dyn Embedder>> {
             } else {
                 OpenAiCompatEmbedder::new(base, api_key, config.model, config.dim)?
             };
-            let embedder = embedder.with_prefixes(config.query_prefix, config.document_prefix);
+            let embedder = embedder
+                .with_prefixes(config.query_prefix, config.document_prefix)
+                .with_document_timeout_secs(config.document_timeout_secs)?;
             let embedder = match config.query_base_url {
                 Some(url) if !url.trim().is_empty() => embedder.with_query_base_url(url),
                 _ => embedder,

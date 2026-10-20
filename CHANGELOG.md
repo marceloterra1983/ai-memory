@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Fixed long CPU/GPU document embedding timeouts with a bounded
+  `AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS` override for ordinary and DREAM
+  OpenAI-compatible embeddings. Kept the 120-second default and query budget,
+  local transport guards, model identity and existing input/vector behavior.
+  (local-20261020; operational local fix, no upstream issue opened)
+
 ### Added
 - Added local fork release manifest recording with tag and installed-binary
   validation, source archives, preserved manifest backups, atomic updates,

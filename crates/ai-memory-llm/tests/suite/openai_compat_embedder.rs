@@ -127,6 +127,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         query_prefix: String::new(),
         document_prefix: String::new(),
         query_base_url: None,
+        document_timeout_secs: 120,
         local_only: false,
     })
     .expect("factory builds compat embedder");
@@ -145,6 +146,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         query_prefix: String::new(),
         document_prefix: String::new(),
         query_base_url: None,
+        document_timeout_secs: 120,
         local_only: false,
     }) {
         Ok(_) => panic!("compat embedder must not build without a base URL"),
@@ -167,6 +169,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         query_prefix: String::new(),
         document_prefix: String::new(),
         query_base_url: None,
+        document_timeout_secs: 120,
         local_only: false,
     });
     assert!(
@@ -317,6 +320,7 @@ async fn factory_wires_configured_prefixes_into_the_compat_embedder() {
         query_prefix: "query: ".into(),
         document_prefix: "passage: ".into(),
         query_base_url: None,
+        document_timeout_secs: 120,
         local_only: false,
     })
     .expect("factory builds compat embedder with prefixes");
@@ -356,6 +360,7 @@ fn compat_config(
         query_prefix: "query: ".into(),
         document_prefix: "passage: ".into(),
         query_base_url,
+        document_timeout_secs: 120,
         local_only,
     }
 }
@@ -615,6 +620,7 @@ fn query_base_url_is_rejected_for_other_providers() {
         query_prefix: String::new(),
         document_prefix: String::new(),
         query_base_url: Some("http://127.0.0.1:18003/v1".into()),
+        document_timeout_secs: 120,
         local_only: false,
     });
     let err = match refused {
@@ -638,6 +644,7 @@ fn query_base_url_is_rejected_for_other_providers() {
         query_prefix: String::new(),
         document_prefix: String::new(),
         query_base_url: None,
+        document_timeout_secs: 120,
         local_only: false,
     });
     assert!(

@@ -2755,7 +2755,9 @@ fn auto_improve_report_target_path() -> String {
 /// `memory_handoff_cancel` requires an exact id and nothing exposed one, so a
 /// backlog showed up as a count in `status` and could not be addressed.
 /// Read-only, oldest first, and content-free: identity, provenance and age,
-/// never the handoff body.
+/// never the handoff body. Each entry carries `from_session_id` — the origin
+/// session for automatic handoffs, `null` for manual ones — so an external
+/// runner can match a handoff to the run that left it.
 async fn handle_open_handoffs_list(
     State(state): State<Arc<AdminState>>,
     Query(query): Query<OpenHandoffsQuery>,
@@ -9030,6 +9032,94 @@ mod tests {
     }
 
     struct FakeAutoImproveLlm;
+
+    /// `GET /admin/handoffs` exposes the origin session so an external runner
+    /// can match a handoff to the run that left it: automatic handoffs carry
+    /// their `from_session_id`, manual ones an explicit `null`.
+    #[tokio::test]
+    async fn open_handoffs_list_exposes_origin_session_or_null() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "ai-memory", None)
+            .await
+            .unwrap();
+        let session = ai_memory_core::SessionId::new();
+        store
+            .writer
+            .begin_session(ai_memory_core::NewSession {
+                occurred_at: None,
+                id: session,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            })
+            .await
+            .unwrap();
+        for (from_session, agent, summary) in [
+            (Some(session), AgentKind::ClaudeCode, "auto baton"),
+            (None, AgentKind::Codex, "manual baton"),
+        ] {
+            store
+                .writer
+                .insert_handoff(ai_memory_core::NewHandoff {
+                    workspace_id: ws,
+                    project_id: proj,
+                    from_session_id: from_session,
+                    from_agent: agent,
+                    to_agent: None,
+                    cwd: None,
+                    summary: summary.into(),
+                    open_questions: Vec::new(),
+                    next_steps: Vec::new(),
+                    files_touched: Vec::new(),
+                    owner_user: None,
+                })
+                .await
+                .unwrap();
+        }
+        let router = admin_router(admin_state_for_store(&tmp, &store, wiki));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/handoffs?workspace=default&project=ai-memory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let listed = |agent: &str| {
+            json["handoffs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|h| h["from_agent"] == agent)
+                .cloned()
+                .expect("each agent left one handoff")
+        };
+        assert_eq!(
+            listed("claude-code")["from_session_id"],
+            serde_json::Value::String(session.to_string()),
+            "the automatic handoff carries its origin session: {json}"
+        );
+        let manual = listed("codex");
+        assert!(
+            manual.get("from_session_id").is_some_and(|v| v.is_null()),
+            "the manual handoff carries an explicit null: {manual}"
+        );
+    }
 
     #[async_trait::async_trait]
     impl LlmProvider for FakeAutoImproveLlm {

@@ -2712,6 +2712,92 @@ mod tests {
         assert_eq!(open[0].id, second.to_string());
     }
 
+    /// `GET /admin/handoffs` must expose the origin session so an external
+    /// runner can match a handoff to the run that left it: an automatic
+    /// handoff carries its `from_session_id`, a manual one an explicit null.
+    #[tokio::test]
+    async fn open_handoffs_carry_their_origin_session_or_null() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "ai-memory", None)
+            .await
+            .unwrap();
+        let session = SessionId::new();
+        store
+            .writer
+            .begin_session(NewSession {
+                occurred_at: None,
+                id: session,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            })
+            .await
+            .unwrap();
+        let new_handoff =
+            |from_session_id: Option<SessionId>, agent: AgentKind, summary: &str| NewHandoff {
+                workspace_id: ws,
+                project_id: proj,
+                from_session_id,
+                from_agent: agent,
+                to_agent: None,
+                cwd: None,
+                summary: summary.into(),
+                open_questions: Vec::new(),
+                next_steps: Vec::new(),
+                files_touched: Vec::new(),
+                owner_user: None,
+            };
+        store
+            .writer
+            .insert_handoff(new_handoff(
+                Some(session),
+                AgentKind::ClaudeCode,
+                "auto baton",
+            ))
+            .await
+            .unwrap();
+        store
+            .writer
+            .insert_handoff(new_handoff(None, AgentKind::Codex, "manual baton"))
+            .await
+            .unwrap();
+
+        let open = store
+            .reader
+            .open_handoffs_for_project(ws, proj, 50)
+            .await
+            .unwrap();
+        assert_eq!(open.len(), 2, "both handoffs stay open");
+        let listed = |agent: &str| {
+            serde_json::to_value(
+                open.iter()
+                    .find(|h| h.from_agent == agent)
+                    .expect("each agent left one handoff"),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            listed("claude-code")["from_session_id"],
+            serde_json::Value::String(session.to_string()),
+            "the automatic handoff carries its origin session"
+        );
+        let manual = listed("codex");
+        assert!(
+            manual.get("from_session_id").is_some_and(|v| v.is_null()),
+            "the manual handoff carries an explicit null, never a missing key: {manual}"
+        );
+    }
+
     #[tokio::test]
     async fn a_written_summary_changes_what_the_descriptor_tells_the_reader() {
         let tmp = TempDir::new().unwrap();

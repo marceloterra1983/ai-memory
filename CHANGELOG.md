@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (local-20261020; operational local fix, no upstream issue opened)
 
 ### Added
+- Added `from_session_id` to each entry of `GET /admin/handoffs` (and the
+  backing `OpenHandoff` listing): the canonical UUID of the origin session
+  for automatic handoffs, `null` for manual ones. External runners can now
+  match an open handoff to the run that left it without opening the body.
+  (local-20261022; no upstream issue opened)
 - Added local fork release manifest recording with tag and installed-binary
   validation, source archives, preserved manifest backups, atomic updates,
   installer verification and a dry-run preview. Printed fork installation and

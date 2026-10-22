@@ -5433,7 +5433,7 @@ impl ReaderPool {
     ) -> StoreResult<Vec<OpenHandoff>> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, from_agent, to_agent, cwd, created_at \
+                "SELECT id, from_agent, to_agent, cwd, created_at, from_session_id \
                  FROM handoffs \
                  WHERE workspace_id = ?1 AND project_id = ?2 AND state = 'open' \
                  ORDER BY created_at ASC, id ASC \
@@ -5453,21 +5453,32 @@ impl ReaderPool {
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, i64>(4)?,
+                        row.get::<_, Option<Vec<u8>>>(5)?,
                     ))
                 },
             )?;
             let mut out = Vec::new();
             for row in rows {
-                let (id, from_agent, to_agent, cwd, created_at) = row?;
+                let (id, from_agent, to_agent, cwd, created_at, from_session) = row?;
                 let Ok(id) = HandoffId::from_slice(&id) else {
                     continue;
                 };
+                // Same BLOB decoding as `row_to_handoff`, but a malformed
+                // origin session id degrades to `null` instead of dropping
+                // the row: the entry stays listed so it can be inspected
+                // and cancelled, and the conservative consumer treats a
+                // missing origin as "no match".
+                let from_session_id = from_session
+                    .as_deref()
+                    .and_then(|bytes| SessionId::from_slice(bytes).ok())
+                    .map(|session| session.to_string());
                 out.push(OpenHandoff {
                     id: id.to_string(),
                     from_agent,
                     to_agent,
                     cwd,
                     created_at_ms: created_at / 1_000,
+                    from_session_id,
                 });
             }
             Ok(out)
@@ -10737,6 +10748,10 @@ fn slot_exclusion_sql(
 /// Content-free by construction: identity, provenance and age only. The
 /// summary body is deliberately absent — this exists so
 /// `memory_handoff_cancel` has an id to be given, not to render the handoff.
+/// `from_session_id` is the SessionId of the run that left the handoff
+/// (`Some` for automatic SessionEnd handoffs, `None` for manual
+/// `memory_handoff_begin` ones), so an external runner can match a handoff
+/// to its origin without opening it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OpenHandoff {
     pub id: String,
@@ -10744,6 +10759,7 @@ pub struct OpenHandoff {
     pub to_agent: Option<String>,
     pub cwd: Option<String>,
     pub created_at_ms: i64,
+    pub from_session_id: Option<String>,
 }
 
 fn handoff_owner_sql(filter: &OwnerFilter, param_index: usize) -> (String, Option<String>) {

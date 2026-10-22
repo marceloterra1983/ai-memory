@@ -529,7 +529,11 @@ invariants below.
 
 `memory_handoff_list` is the inspect-without-claim path for clients that cannot inject SessionStart stdout. `memory_handoff_cancel` needs an exact id. `ai-memory handoffs` lists the open
 handoffs for a project, oldest first, with their ids — read-only, and
-content-free (identity, provenance and age, never the summary body). Automatic
+content-free (identity, provenance and age, never the summary body). Each entry
+carries `from_session_id` (the origin session for automatic handoffs, `null`
+for manual ones) so an external runner can match a handoff to the run that
+left it. This is an API-surface addition: `ai-memory handoffs` keeps its
+existing id/provenance/age rendering and ignores the extra field. Automatic
 expiry deliberately spares manual and sibling-directory handoffs, so a
 long-lived entry appearing there is that policy working rather than a fault.
 

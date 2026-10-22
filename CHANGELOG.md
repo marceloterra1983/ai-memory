@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backing `OpenHandoff` listing): the canonical UUID of the origin session
   for automatic handoffs, `null` for manual ones. External runners can now
   match an open handoff to the run that left it without opening the body.
-  (local-20261021; worktree reaper integration, no upstream issue opened)
+  (#513)
 - Added local fork release manifest recording with tag and installed-binary
   validation, source archives, preserved manifest backups, atomic updates,
   installer verification and a dry-run preview. Printed fork installation and

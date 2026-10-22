@@ -532,7 +532,8 @@ handoffs for a project, oldest first, with their ids — read-only, and
 content-free (identity, provenance and age, never the summary body). Each entry
 carries `from_session_id` (the origin session for automatic handoffs, `null`
 for manual ones) so an external runner can match a handoff to the run that
-left it. Automatic
+left it. This is an API-surface addition: `ai-memory handoffs` keeps its
+existing id/provenance/age rendering and ignores the extra field. Automatic
 expiry deliberately spares manual and sibling-directory handoffs, so a
 long-lived entry appearing there is that policy working rather than a fault.
 

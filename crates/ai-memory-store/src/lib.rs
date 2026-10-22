@@ -2798,6 +2798,160 @@ mod tests {
         );
     }
 
+    /// A malformed `from_session_id` BLOB must degrade to `null`, never drop
+    /// the handoff — and handoffs from another project or workspace must stay
+    /// out of the listing even when they share a project name.
+    #[tokio::test]
+    async fn open_handoffs_keep_malformed_origin_as_null_and_stay_scoped() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "ai-memory", None)
+            .await
+            .unwrap();
+        // Same project name in another workspace, and another project in the
+        // same workspace: both must be refused by the listing below.
+        let other_ws = store
+            .writer
+            .get_or_create_workspace("other-ws")
+            .await
+            .unwrap();
+        let same_name_elsewhere = store
+            .writer
+            .get_or_create_project(other_ws, "ai-memory", None)
+            .await
+            .unwrap();
+        let sibling_proj = store
+            .writer
+            .get_or_create_project(ws, "sibling", None)
+            .await
+            .unwrap();
+
+        let session = SessionId::new();
+        store
+            .writer
+            .begin_session(NewSession {
+                occurred_at: None,
+                id: session,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            })
+            .await
+            .unwrap();
+        // Automatic inserts expire earlier open batons from the same session
+        // and cwd, so each automatic handoff gets its own cwd to keep them
+        // all open.
+        let new_handoff = |workspace_id,
+                           project_id,
+                           from_session_id: Option<SessionId>,
+                           cwd: Option<std::path::PathBuf>| NewHandoff {
+            workspace_id,
+            project_id,
+            from_session_id,
+            from_agent: AgentKind::ClaudeCode,
+            to_agent: None,
+            cwd,
+            summary: "baton".into(),
+            open_questions: Vec::new(),
+            next_steps: Vec::new(),
+            files_touched: Vec::new(),
+            owner_user: None,
+        };
+        // Oldest row first: with `limit=1` the pre-fix `continue` left the
+        // listing empty even though an open handoff existed.
+        let malformed_short = store
+            .writer
+            .insert_handoff(new_handoff(ws, proj, Some(session), Some("/a".into())))
+            .await
+            .unwrap();
+        let malformed_long = store
+            .writer
+            .insert_handoff(new_handoff(ws, proj, Some(session), Some("/b".into())))
+            .await
+            .unwrap();
+        store
+            .writer
+            .insert_handoff(new_handoff(ws, proj, Some(session), Some("/c".into())))
+            .await
+            .unwrap();
+        for (foreign_ws, foreign_proj) in [(other_ws, same_name_elsewhere), (ws, sibling_proj)] {
+            store
+                .writer
+                .insert_handoff(new_handoff(
+                    foreign_ws,
+                    foreign_proj,
+                    Some(session),
+                    Some("/foreign".into()),
+                ))
+                .await
+                .unwrap();
+        }
+        // Corrupt the two oldest rows past the writer: a 1-byte BLOB and a
+        // 17-byte BLOB, both rejected by `SessionId::from_slice`. Pinning
+        // `created_at` keeps them deterministically oldest regardless of
+        // timestamp ties between the sequential inserts.
+        let conn = Connection::open(store.db_path()).unwrap();
+        // The column carries a foreign key to `sessions`, so the corrupt
+        // fixture needs the pragma off on this handle — production rows reach
+        // this state only through legacy or off-pragma writes.
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        for (id, bytes, created_at) in [
+            (malformed_short, vec![0x00u8], 1_i64),
+            (malformed_long, vec![0x00u8; 17], 2_i64),
+        ] {
+            let changed = conn
+                .execute(
+                    "UPDATE handoffs SET from_session_id = ?1, created_at = ?2 WHERE id = ?3",
+                    params![bytes, created_at, id.as_bytes()],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "the corrupted fixture row must exist");
+        }
+        drop(conn);
+
+        let open = store
+            .reader
+            .open_handoffs_for_project(ws, proj, 50)
+            .await
+            .unwrap();
+        assert_eq!(
+            open.len(),
+            3,
+            "foreign handoffs stay out, malformed stay in"
+        );
+        let nulls = open.iter().filter(|h| h.from_session_id.is_none()).count();
+        assert_eq!(nulls, 2, "both malformed origins degrade to null: {open:?}");
+        assert!(
+            open.iter()
+                .any(|h| h.from_session_id.as_deref() == Some(&session.to_string())),
+            "the valid origin still round-trips: {open:?}"
+        );
+
+        let oldest = store
+            .reader
+            .open_handoffs_for_project(ws, proj, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            oldest.len(),
+            1,
+            "limit=1 still surfaces the oldest open handoff when its origin is malformed"
+        );
+        assert!(
+            oldest[0].from_session_id.is_none(),
+            "the malformed oldest entry carries null: {oldest:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_written_summary_changes_what_the_descriptor_tells_the_reader() {
         let tmp = TempDir::new().unwrap();

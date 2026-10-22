@@ -9121,6 +9121,234 @@ mod tests {
         );
     }
 
+    /// Malformed `from_session_id` BLOBs stay listed as `null` (never dropped,
+    /// even as the oldest row under `limit=1`), and handoffs from another
+    /// project or workspace stay out — including a same-named project in a
+    /// different workspace.
+    #[tokio::test]
+    async fn open_handoffs_list_keeps_malformed_origin_and_foreign_scope_out() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "ai-memory", None)
+            .await
+            .unwrap();
+        let other_ws = store
+            .writer
+            .get_or_create_workspace("other-ws")
+            .await
+            .unwrap();
+        let same_name_elsewhere = store
+            .writer
+            .get_or_create_project(other_ws, "ai-memory", None)
+            .await
+            .unwrap();
+        let sibling_proj = store
+            .writer
+            .get_or_create_project(ws, "sibling", None)
+            .await
+            .unwrap();
+        let session = ai_memory_core::SessionId::new();
+        store
+            .writer
+            .begin_session(ai_memory_core::NewSession {
+                occurred_at: None,
+                id: session,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            })
+            .await
+            .unwrap();
+        // Oldest row first: pre-fix it vanished under `limit=1`, leaving the
+        // response empty despite an open backlog. Automatic inserts expire
+        // earlier open batons from the same session and cwd, so each one gets
+        // its own cwd to keep them all open.
+        let malformed = store
+            .writer
+            .insert_handoff(ai_memory_core::NewHandoff {
+                workspace_id: ws,
+                project_id: proj,
+                from_session_id: Some(session),
+                from_agent: AgentKind::ClaudeCode,
+                to_agent: None,
+                cwd: Some("/a".into()),
+                summary: "corrupted origin".into(),
+                open_questions: Vec::new(),
+                next_steps: Vec::new(),
+                files_touched: Vec::new(),
+                owner_user: None,
+            })
+            .await
+            .unwrap();
+        for (from_session, agent, summary, cwd) in [
+            (
+                Some(session),
+                AgentKind::ClaudeCode,
+                "auto baton",
+                Some("/b".into()),
+            ),
+            (None, AgentKind::Codex, "manual baton", None),
+        ] {
+            store
+                .writer
+                .insert_handoff(ai_memory_core::NewHandoff {
+                    workspace_id: ws,
+                    project_id: proj,
+                    from_session_id: from_session,
+                    from_agent: agent,
+                    to_agent: None,
+                    cwd,
+                    summary: summary.into(),
+                    open_questions: Vec::new(),
+                    next_steps: Vec::new(),
+                    files_touched: Vec::new(),
+                    owner_user: None,
+                })
+                .await
+                .unwrap();
+        }
+        for (foreign_ws, foreign_proj) in [(other_ws, same_name_elsewhere), (ws, sibling_proj)] {
+            store
+                .writer
+                .insert_handoff(ai_memory_core::NewHandoff {
+                    workspace_id: foreign_ws,
+                    project_id: foreign_proj,
+                    from_session_id: Some(session),
+                    from_agent: AgentKind::ClaudeCode,
+                    to_agent: None,
+                    cwd: Some("/foreign".into()),
+                    summary: "foreign baton".into(),
+                    open_questions: Vec::new(),
+                    next_steps: Vec::new(),
+                    files_touched: Vec::new(),
+                    owner_user: None,
+                })
+                .await
+                .unwrap();
+        }
+        // Past the writer: a 1-byte BLOB `SessionId::from_slice` rejects.
+        // Pinning `created_at` keeps this row deterministically oldest
+        // regardless of timestamp ties between the sequential inserts.
+        let conn = rusqlite::Connection::open(store.db_path()).unwrap();
+        // The column carries a foreign key to `sessions`, so the corrupt
+        // fixture needs the pragma off on this handle.
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE handoffs SET from_session_id = ?1, created_at = ?2 WHERE id = ?3",
+                rusqlite::params![vec![0x00u8], 1_i64, malformed.as_bytes()],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "the corrupted fixture row must exist");
+        drop(conn);
+
+        let router = admin_router(admin_state_for_store(&tmp, &store, wiki));
+        let get = |uri: &str| {
+            router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        };
+        let resp = get("/admin/handoffs?workspace=default&project=ai-memory")
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let handoffs = json["handoffs"].as_array().unwrap();
+        assert_eq!(
+            handoffs.len(),
+            3,
+            "malformed origins stay listed, foreign scopes stay out: {json}"
+        );
+        assert!(
+            handoffs.iter().all(|h| h.get("summary").is_none()),
+            "the listing stays content-free: {json}"
+        );
+        let corrupted = handoffs
+            .iter()
+            .find(|h| h["from_agent"] == "claude-code" && h["from_session_id"].is_null())
+            .expect("the corrupted row is listed with null");
+        assert!(
+            corrupted.get("from_session_id").is_some(),
+            "null is an explicit key, never a missing one: {corrupted}"
+        );
+
+        let resp = get("/admin/handoffs?workspace=default&project=ai-memory&limit=1")
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["handoffs"].as_array().unwrap().len(),
+            1,
+            "limit=1 still surfaces the oldest open handoff: {json}"
+        );
+    }
+
+    /// `GET /admin/handoffs` sits behind the same multi-user root gate as the
+    /// other operational routes: a DB-user token gets 403, an anonymous caller
+    /// 401, while root reaches the handler (404 here, since this router's
+    /// store holds no `default/scratch` scope).
+    #[tokio::test]
+    async fn open_handoffs_list_is_root_only_in_multiuser_mode() {
+        let (_tmp, router) = user_admin_test_router("root-token");
+        post_create_user(
+            &router,
+            "root-token",
+            serde_json::json!({"username": "alice"}),
+        )
+        .await;
+        let uri = "/admin/handoffs?workspace=default&project=scratch";
+        let root_status = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("authorization", "Bearer root-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(
+            root_status,
+            StatusCode::NOT_FOUND,
+            "root passes the gate into the handler's own 404 for the unknown scope"
+        );
+        let user_status = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("authorization", "Bearer db-user-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(user_status, StatusCode::FORBIDDEN);
+        let anon_status = router
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(anon_status, StatusCode::UNAUTHORIZED);
+    }
+
     #[async_trait::async_trait]
     impl LlmProvider for FakeAutoImproveLlm {
         fn name(&self) -> &'static str {
@@ -13300,6 +13528,11 @@ mod tests {
             ),
             ("GET", "/admin/audit-contamination", serde_json::Value::Null),
             ("GET", "/admin/audit-log", serde_json::Value::Null),
+            (
+                "GET",
+                "/admin/handoffs?workspace=default&project=scratch",
+                serde_json::Value::Null,
+            ),
             ("GET", "/admin/search?q=test", serde_json::Value::Null),
             (
                 "GET",

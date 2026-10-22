@@ -5463,17 +5463,15 @@ impl ReaderPool {
                 let Ok(id) = HandoffId::from_slice(&id) else {
                     continue;
                 };
-                // Same BLOB decoding as `row_to_handoff`: a malformed origin
-                // session id drops the row rather than surfacing a half-read
-                // entry.
-                let from_session_id = match from_session
+                // Same BLOB decoding as `row_to_handoff`, but a malformed
+                // origin session id degrades to `null` instead of dropping
+                // the row: the entry stays listed so it can be inspected
+                // and cancelled, and the conservative consumer treats a
+                // missing origin as "no match".
+                let from_session_id = from_session
                     .as_deref()
-                    .map(SessionId::from_slice)
-                    .transpose()
-                {
-                    Ok(session) => session.map(|s| s.to_string()),
-                    Err(_) => continue,
-                };
+                    .and_then(|bytes| SessionId::from_slice(bytes).ok())
+                    .map(|session| session.to_string());
                 out.push(OpenHandoff {
                     id: id.to_string(),
                     from_agent,

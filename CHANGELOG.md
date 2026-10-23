@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Fixed model page-path cleanup so `.` / `..`, empty segments, trailing dots
+  or spaces, DOS device names, and Git-reserved directories are rewritten
+  before `Wiki::apply_batch`. One such path used to abort the whole
+  consolidation batch. An empty path and a trailing slash are still left for
+  the caller to reject.
+  (local-20261023; no upstream issue opened)
 - Fixed `GET /workspaces/{workspace}/projects/{project}/recent` so expired
   pages stay hidden and the limit is applied in SQL, matching search and
   briefing. The response is still a list of page summaries. The full page

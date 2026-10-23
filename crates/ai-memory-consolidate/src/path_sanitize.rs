@@ -30,6 +30,14 @@ pub(crate) const PATH_ILLEGAL_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '
 /// `/`-separated component with `-`, keeping the `dir/subdir/name.md` shape
 /// intact so the model's intended layout survives.
 ///
+/// Dot segments (`.` / `..`), empty segments from `//` or a leading `/`,
+/// trailing dots or spaces, DOS device stems (`CON.md`, `aux.md`), and
+/// Git-reserved directory names (`.git`, `git~1`) abort the same batch.
+/// Those are rewritten in place rather than dropped, so two different model
+/// paths cannot collapse onto one page. An empty path and a trailing slash
+/// (`decisions/`) stay unchanged: there is no filename to invent, and the
+/// caller still reports `invalid_path`.
+///
 /// The model also omits the `.md` extension on multi-page paths (`decisions/
 /// smart-model-luna` instead of `.../smart-model-luna.md`, #885). The rule
 /// branch in `build_update` always appends `.md` itself, but the non-rule
@@ -37,39 +45,70 @@ pub(crate) const PATH_ILLEGAL_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '
 /// helper, so a bare path would be stored extensionless and read back as a
 /// non-portable wiki page. Append `.md` to the final component when it lacks
 /// it (case-insensitive), which is idempotent: a path already ending in `.md`
-/// is left untouched.
+/// is left untouched. Reserved-name checks run after that append, because
+/// `CON` stays a device as `CON.md`, while `git~1` stops being reserved once
+/// it is `git~1.md`.
 pub(crate) fn slugify_page_path(raw: &str) -> String {
-    let mut segments: Vec<String> = raw
-        .split('/')
-        .map(|segment| {
-            segment
-                .chars()
-                .map(|c| {
-                    if PATH_ILLEGAL_CHARS.contains(&c) || (c as u32) < 0x20 {
-                        '-'
-                    } else {
-                        c
-                    }
-                })
-                .collect::<String>()
-        })
-        .collect();
-    // Append the `.md` extension when the model omitted it on the filename
-    // component (#885). The check is case-insensitive so `NAME.MD` is not
-    // double-extended, keeping the whole operation idempotent. Skip an empty
-    // final component: an empty or trailing-slash path has no filename to
-    // extend, and fabricating `.md` there would turn a missing/invalid path
-    // into a plausible-looking one that slips past the callers' own
-    // empty-path rejection (auto-improve reported `unsupported_path_prefix`
-    // instead of `invalid_path`). An empty path stays empty and is rejected
-    // upstream as before.
-    if let Some(last) = segments.last_mut()
-        && !last.is_empty()
-        && !last.to_ascii_lowercase().ends_with(".md")
-    {
-        last.push_str(".md");
+    let parts: Vec<&str> = raw.split('/').collect();
+    let last_index = parts.len() - 1;
+    let mut segments = Vec::with_capacity(parts.len());
+    for (index, segment) in parts.iter().enumerate() {
+        let mut cleaned: String = segment
+            .chars()
+            .map(|c| {
+                if PATH_ILLEGAL_CHARS.contains(&c) || (c as u32) < 0x20 {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let is_last = index == last_index;
+        if cleaned.is_empty() {
+            // Keep only a trailing empty component (`decisions/`) so upstream
+            // still rejects a missing filename. Drop leading and middle
+            // empties (`/abs.md`, `a//b.md`), which `PagePath::new` rejects.
+            if is_last {
+                segments.push(String::new());
+            }
+            continue;
+        }
+        if cleaned == "." || cleaned == ".." {
+            cleaned = if cleaned.len() == 1 {
+                "dot".to_owned()
+            } else {
+                "dotdot".to_owned()
+            };
+        } else {
+            let trimmed = cleaned.trim_end_matches(['.', ' ']);
+            cleaned = if trimmed.is_empty() {
+                "blank".to_owned()
+            } else {
+                trimmed.to_owned()
+            };
+        }
+        // Append `.md` before the reserved-name check (#885). `NAME.MD` is
+        // recognized case-insensitively, so the append stays idempotent.
+        if is_last && !cleaned.to_ascii_lowercase().ends_with(".md") {
+            cleaned.push_str(".md");
+        }
+        segments.push(neutralize_reserved_component(&cleaned));
     }
     segments.join("/")
+}
+
+/// Prefix a component Windows or Git will refuse. `PagePath::ensure_portable`
+/// matches DOS names on the stem (`CON.md`) and Git names on the whole
+/// component (`.git`, exactly `git~1`..=`git~4`).
+fn neutralize_reserved_component(component: &str) -> String {
+    let stem = component.split('.').next().unwrap_or(component);
+    if ai_memory_core::is_dos_device_name(stem)
+        || ai_memory_core::is_git_reserved_component(component)
+    {
+        format!("file-{component}")
+    } else {
+        component.to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +166,40 @@ mod tests {
         // past a caller's own empty-path rejection. An empty path stays empty,
         // and a trailing slash keeps its empty final component, so the missing
         // filename is still rejected upstream (auto-improve `invalid_path`).
+        assert_eq!(slugify_page_path(""), "");
+        assert_eq!(slugify_page_path("decisions/"), "decisions/");
+    }
+
+    /// These shapes pass `PagePath::new`'s tolerant constructor and then fail
+    /// `ensure_portable` (or fail `new` on `.` / `..` / empty segments). One
+    /// of them aborts `Wiki::apply_batch` for every other page.
+    #[test]
+    fn slugify_page_path_neutralizes_segments_that_abort_the_batch() {
+        use ai_memory_core::PagePath;
+
+        let cases = [
+            ("../secrets.md", "dotdot/secrets.md"),
+            ("a//b.md", "a/b.md"),
+            ("/leading.md", "leading.md"),
+            ("notes/trailing./x.md", "notes/trailing/x.md"),
+            ("notes/trailing /x.md", "notes/trailing/x.md"),
+            ("notes/end.md.", "notes/end.md"),
+            ("CON.md", "file-CON.md"),
+            ("notes/aux.md", "notes/file-aux.md"),
+            ("notes/LPT9.txt", "notes/file-LPT9.txt.md"),
+            ("notes/.git/sub.md", "notes/file-.git/sub.md"),
+            ("notes/.GIT/sub.md", "notes/file-.GIT/sub.md"),
+            ("notes/git~1/foo.md", "notes/file-git~1/foo.md"),
+            ("notes/git~1", "notes/git~1.md"),
+        ];
+        for (raw, expect) in cases {
+            let slug = slugify_page_path(raw);
+            assert_eq!(slug, expect, "{raw:?}");
+            let path =
+                PagePath::new(&slug).unwrap_or_else(|err| panic!("{raw:?} -> {slug:?}: {err}"));
+            path.ensure_portable()
+                .unwrap_or_else(|err| panic!("{raw:?} -> {slug:?}: {err}"));
+        }
         assert_eq!(slugify_page_path(""), "");
         assert_eq!(slugify_page_path("decisions/"), "decisions/");
     }

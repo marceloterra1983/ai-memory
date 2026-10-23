@@ -1458,6 +1458,72 @@ async fn api_recent_and_briefing_return_project_data() {
     assert_eq!(json["recent_pages"][0]["path"], "foo.md");
 }
 
+/// Expired pages are hidden from search, recent, and briefing. The recent
+/// route used to list every latest page and only then truncate, so a newer
+/// expired page occupied the window and hid a live one.
+#[tokio::test]
+async fn api_recent_hides_expired_pages() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(new_page(ws, proj, "live.md", "Live", "still current"))
+        .await
+        .unwrap();
+    let mut expired = new_page(ws, proj, "expired.md", "Expired", "past its ttl");
+    expired.expires_at = Some(
+        jiff::Timestamp::from_microsecond(1).expect("one microsecond after the epoch is valid"),
+    );
+    store.writer.upsert_page(expired).await.unwrap();
+
+    let app = api_router(store.reader.clone(), wiki.clone());
+    let recent_req = Request::builder()
+        .uri("/workspaces/default/projects/scratch/recent?limit=10")
+        .body(Body::empty())
+        .unwrap();
+    let recent_resp = app.clone().oneshot(recent_req).await.unwrap();
+    assert_eq!(recent_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(recent_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let paths: Vec<&str> = json
+        .as_array()
+        .expect("recent returns a JSON array of page summaries")
+        .iter()
+        .map(|page| page["path"].as_str().expect("path string"))
+        .collect();
+    assert_eq!(paths, vec!["live.md"]);
+    assert!(
+        json[0].get("updated_at").is_some(),
+        "PageSummary shape: {json}"
+    );
+
+    let one_req = Request::builder()
+        .uri("/workspaces/default/projects/scratch/recent?limit=1")
+        .body(Body::empty())
+        .unwrap();
+    let one_resp = app.oneshot(one_req).await.unwrap();
+    assert_eq!(one_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(one_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json[0]["path"], "live.md",
+        "a newer expired page must not take the only slot: {json}"
+    );
+}
+
 /// Seed one session in `(ws, proj)` with `(kind, title, body)` rows, ended
 /// when `completed`. Returns the session id.
 async fn seed_session(

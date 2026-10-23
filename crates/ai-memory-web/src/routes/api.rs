@@ -437,13 +437,11 @@ async fn recent_handler(
     Query(query): Query<LimitQuery>,
 ) -> Result<Response, Response> {
     let _ = lookup_project(&state, &workspace, &project, viewer_of(viewer)).await?;
-    let mut pages = state
+    let pages = state
         .reader
-        .list_pages(&workspace, &project)
+        .recent_page_summaries(&workspace, &project, query.limit)
         .await
         .map_err(internal_error)?;
-    pages.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    pages.truncate(query.limit.clamp(1, 100));
     Ok(with_cache(Json(pages).into_response(), LIST_CACHE_MAX_AGE))
 }
 

@@ -8493,6 +8493,67 @@ impl ReaderPool {
         .await
     }
 
+    /// The N most recently updated live pages for the web recent route.
+    ///
+    /// Same [`PageSummary`] shape as [`Self::list_pages`], but this is a
+    /// retrieval surface: expired pages stay hidden and the limit is applied
+    /// in SQL. `list_pages` remains the on-disk inventory and still returns
+    /// expired rows.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn recent_page_summaries(
+        &self,
+        workspace: &str,
+        project: &str,
+        limit: usize,
+    ) -> StoreResult<Vec<PageSummary>> {
+        let workspace = workspace.to_owned();
+        let project = project.to_owned();
+        let limit = limit.clamp(1, 100);
+        self.with_conn(move |conn| {
+            let kind_expr = page_kind_expr("pg.path", "pg.frontmatter_json");
+            let sql = format!(
+                "SELECT pg.path, pg.title, {kind_expr} AS kind, \
+                        pg.tier, pg.updated_at \
+                 FROM pages pg \
+                 JOIN projects p ON p.id = pg.project_id \
+                 JOIN workspaces w ON w.id = pg.workspace_id \
+                 WHERE w.name = ?1 AND p.name = ?2 AND pg.is_latest = 1{not_expired} \
+                 ORDER BY pg.updated_at DESC \
+                 LIMIT ?3",
+                not_expired = not_expired("pg", "?4"),
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            #[allow(clippy::cast_possible_wrap)]
+            let rows =
+                stmt.query_map(params![workspace, project, limit as i64, now_us()], |row| {
+                    let path: String = row.get(0)?;
+                    let title: String = row.get(1)?;
+                    let kind: String = row.get(2)?;
+                    let tier: String = row.get(3)?;
+                    let updated_us: i64 = row.get(4)?;
+                    Ok((path, title, kind, tier, updated_us))
+                })?;
+            let mut out = Vec::new();
+            for r in rows {
+                let (path, title, kind, tier, updated_us) = r?;
+                let updated_at = jiff::Timestamp::from_microsecond(updated_us)
+                    .map(|ts| ts.to_string())
+                    .unwrap_or_default();
+                out.push(PageSummary {
+                    path,
+                    title,
+                    kind,
+                    tier,
+                    updated_at,
+                });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     /// Full page metadata for the page-view template (body comes from
     /// `Wiki::read_page`). Returns `None` when no `is_latest = 1` row
     /// matches the given path.

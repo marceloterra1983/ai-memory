@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Fixed `GET /workspaces/{workspace}/projects/{project}/recent` so expired
+  pages stay hidden and the limit is applied in SQL, matching search and
+  briefing. The response is still a list of page summaries. The full page
+  tree continues to list files that are still on disk.
+  (local-20261023; no upstream issue opened)
 - Fixed handoff delivery and listing so one unreadable open row is skipped
   instead of failing SessionStart, the project list, and the workspace's
   newest-baton read. A bad `from_session_id` is not treated as a manual

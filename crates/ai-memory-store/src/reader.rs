@@ -6224,7 +6224,9 @@ impl ReaderPool {
     /// path can never act as a wildcard.
     ///
     /// # Errors
-    /// Propagates any SQL or pool error.
+    /// Propagates any SQL or pool error. A stored row that cannot be decoded
+    /// is skipped: one corrupt baton must not hide the others, and a bad
+    /// `from_session_id` is not turned into a manual handoff.
     pub async fn latest_open_handoff(
         &self,
         workspace_id: WorkspaceId,
@@ -6313,7 +6315,9 @@ impl ReaderPool {
             let rows = stmt.query_map(binds.as_slice(), row_to_handoff)?;
             let mut selected: Option<Handoff> = None;
             for r in rows {
-                let handoff = r??;
+                let Some(handoff) = readable_handoff(r)? else {
+                    continue;
+                };
                 if is_handoff_candidate(&handoff, cwd_filter.as_deref(), &owner_filter)
                     && selected
                         .as_ref()
@@ -6399,7 +6403,8 @@ impl ReaderPool {
     /// operator can find an already-accepted handoff and read it back.
     ///
     /// # Errors
-    /// Propagates any SQL or pool error.
+    /// Propagates any SQL or pool error. A stored row that cannot be decoded
+    /// is omitted from the page instead of failing the whole list.
     pub async fn list_handoffs(
         &self,
         workspace_id: WorkspaceId,
@@ -6428,7 +6433,9 @@ impl ReaderPool {
             let rows = stmt.query_map(binds.as_slice(), row_to_handoff)?;
             let mut out = Vec::new();
             for row in rows {
-                out.push(row??);
+                if let Some(handoff) = readable_handoff(row)? {
+                    out.push(handoff);
+                }
             }
             Ok(out)
         })
@@ -7123,8 +7130,10 @@ impl ReaderPool {
     /// handoff with no owner is visible to everyone who can see its
     /// repository, which is exactly why it must not be visible to someone who
     /// cannot: its summary, next steps and project name are the repository's
-    /// content. Filtered in SQL for the same reason as the owner predicate —
-    /// the query keeps its `LIMIT 1`.
+    /// content. The owner and viewer predicates stay in SQL. The scan walks
+    /// newest-first and stops at the first row that decodes, so a malformed
+    /// newest row cannot hide the next open handoff or fail the read. Only
+    /// open rows are visited.
     ///
     /// # Errors
     /// Propagates any SQL or pool error.
@@ -7136,11 +7145,12 @@ impl ReaderPool {
     ) -> StoreResult<Option<Handoff>> {
         let visible = readable_repository_predicate("project_id", viewer);
         self.with_conn(move |conn| {
-            // The owner predicate is pushed into SQL (rather than filtered after
-            // the fact like the project-scoped lookup) because this query keeps
-            // its `LIMIT 1`: filtering afterwards would return nothing whenever
-            // the newest open handoff in the workspace happened to belong to
-            // somebody else.
+            // The owner predicate stays in SQL: filtering after a newest-first
+            // read would skip a newer baton that belongs to somebody else and
+            // then return an older one this caller should not see. A malformed
+            // newest row is skipped in Rust so it cannot mask the next open
+            // handoff. The visited set is `state = 'open'`, not the project's
+            // history.
             let owner_clause = match &owner_filter {
                 OwnerFilter::Any => "",
                 OwnerFilter::User(_) => " AND (owner_user IS NULL OR owner_user = ?2)",
@@ -7153,17 +7163,15 @@ impl ReaderPool {
                         owner_user, accepted_by_user \
                  FROM handoffs \
                  WHERE workspace_id = ?1 AND state = 'open'{owner_clause}{visible} \
-                 ORDER BY created_at DESC LIMIT 1"
+                 ORDER BY created_at DESC"
             );
-            let row_opt = match &owner_filter {
-                OwnerFilter::User(user) => conn
-                    .query_row(&sql, params![workspace_id.as_bytes(), user], row_to_handoff)
-                    .optional()?,
-                _ => conn
-                    .query_row(&sql, params![workspace_id.as_bytes()], row_to_handoff)
-                    .optional()?,
-            };
-            row_opt.transpose()
+            let mut stmt = conn.prepare(&sql)?;
+            match &owner_filter {
+                OwnerFilter::User(user) => {
+                    first_readable_handoff(stmt.query(params![workspace_id.as_bytes(), user])?)
+                }
+                _ => first_readable_handoff(stmt.query(params![workspace_id.as_bytes()])?),
+            }
         })
         .await
     }
@@ -10862,6 +10870,37 @@ fn select_open_handoff(candidates: Vec<Handoff>, cwd_filter: Option<&str>) -> Op
         .into_iter()
         .filter(|h| is_handoff_candidate(h, cwd_filter, &OwnerFilter::Any))
         .max_by(prefer_handoff)
+}
+
+/// Decode one selected handoff row.
+///
+/// A SQLite error stops the scan. A row that is stored but unreadable (bad
+/// session id, JSON, timestamp, or identity key) is skipped: failing the scan
+/// would drop every other baton, and coercing a bad `from_session_id` to
+/// `None` would promote an automatic handoff into a project-wide manual one.
+fn readable_handoff(row: rusqlite::Result<StoreResult<Handoff>>) -> StoreResult<Option<Handoff>> {
+    match row {
+        Err(err) => Err(err.into()),
+        Ok(Ok(handoff)) => Ok(Some(handoff)),
+        Ok(Err(err)) => {
+            tracing::warn!(%err, "skipping unreadable handoff row");
+            Ok(None)
+        }
+    }
+}
+
+/// Newest-first open-handoff scan that stops at the first row which decodes.
+fn first_readable_handoff(mut rows: rusqlite::Rows<'_>) -> StoreResult<Option<Handoff>> {
+    while let Some(row) = rows.next()? {
+        match row_to_handoff(row) {
+            Ok(Ok(handoff)) => return Ok(Some(handoff)),
+            Ok(Err(err)) => {
+                tracing::warn!(%err, "skipping unreadable handoff row");
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(None)
 }
 
 /// Build a [`Handoff`] from a row selected with the 18-column handoff SELECT

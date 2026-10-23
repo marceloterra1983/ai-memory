@@ -2952,6 +2952,173 @@ mod tests {
         );
     }
 
+    /// A row that cannot be decoded must not fail SessionStart or the
+    /// listing, and must not be delivered as a manual handoff. Nulling a
+    /// bad `from_session_id` would do that: manual batons are project-wide
+    /// and outrank automatic ones. Lookup by id stays strict.
+    #[tokio::test]
+    async fn unreadable_open_handoff_does_not_hide_a_deliverable_baton() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "ai-memory", None)
+            .await
+            .unwrap();
+        let session = SessionId::new();
+        store
+            .writer
+            .begin_session(NewSession {
+                occurred_at: None,
+                id: session,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            })
+            .await
+            .unwrap();
+        let good = store
+            .writer
+            .insert_handoff(NewHandoff {
+                workspace_id: ws,
+                project_id: proj,
+                from_session_id: None,
+                from_agent: AgentKind::Codex,
+                to_agent: None,
+                cwd: None,
+                summary: "good baton".into(),
+                open_questions: Vec::new(),
+                next_steps: Vec::new(),
+                files_touched: Vec::new(),
+                owner_user: None,
+            })
+            .await
+            .unwrap();
+        let poison = store
+            .writer
+            .insert_handoff(NewHandoff {
+                workspace_id: ws,
+                project_id: proj,
+                from_session_id: Some(session),
+                from_agent: AgentKind::ClaudeCode,
+                to_agent: None,
+                cwd: Some("/poison".into()),
+                summary: "poison baton".into(),
+                open_questions: Vec::new(),
+                next_steps: Vec::new(),
+                files_touched: Vec::new(),
+                owner_user: None,
+            })
+            .await
+            .unwrap();
+        // Newest row is the corrupt one, so a `LIMIT 1` scan hits it first
+        // and a full scan still has to walk past it to reach the manual baton.
+        let conn = Connection::open(store.db_path()).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE handoffs SET from_session_id = ?1, created_at = ?2 WHERE id = ?3",
+                params![vec![0x00u8], 2_i64, poison.as_bytes()],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        let changed = conn
+            .execute(
+                "UPDATE handoffs SET created_at = ?1 WHERE id = ?2",
+                params![1_i64, good.as_bytes()],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        drop(conn);
+
+        let summary = |handoff: Option<ai_memory_core::Handoff>| {
+            handoff.map(|handoff| handoff.content.summary)
+        };
+        let delivered = store
+            .reader
+            .latest_open_handoff(ws, proj, None, ai_memory_core::OwnerFilter::Any)
+            .await
+            .expect("one bad row must not fail delivery");
+        assert_eq!(summary(delivered).as_deref(), Some("good baton"));
+        let startup = store
+            .reader
+            .startup_handoff(
+                ws,
+                proj,
+                None,
+                ai_memory_core::OwnerFilter::Any,
+                jiff::Timestamp::now(),
+            )
+            .await
+            .expect("SessionStart must still receive the readable baton");
+        assert_eq!(summary(startup).as_deref(), Some("good baton"));
+        let workspace = store
+            .reader
+            .latest_open_handoff_for_workspace(ws, ai_memory_core::OwnerFilter::Any, None)
+            .await
+            .expect("the workspace scan must skip the newest unreadable row");
+        assert_eq!(summary(workspace).as_deref(), Some("good baton"));
+        let listed = store
+            .reader
+            .list_handoffs(
+                ws,
+                proj,
+                Some(HandoffState::Open),
+                ai_memory_core::OwnerFilter::Any,
+                10,
+            )
+            .await
+            .expect("listing must skip the unreadable row");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|handoff| handoff.content.summary.as_str())
+                .collect::<Vec<_>>(),
+            vec!["good baton".to_owned()]
+        );
+        assert!(
+            store.reader.handoff_by_id(poison).await.is_err(),
+            "lookup by id stays strict and must not turn the bad origin into a manual handoff"
+        );
+
+        let conn = Connection::open(store.db_path()).unwrap();
+        conn.execute(
+            "UPDATE handoffs SET open_questions = ?1 WHERE id = ?2",
+            params!["not-json", good.as_bytes()],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(
+            store
+                .reader
+                .latest_open_handoff(ws, proj, None, ai_memory_core::OwnerFilter::Any)
+                .await
+                .expect("every unreadable row skips; the call still succeeds")
+                .is_none()
+        );
+        assert!(
+            store
+                .reader
+                .list_handoffs(
+                    ws,
+                    proj,
+                    Some(HandoffState::Open),
+                    ai_memory_core::OwnerFilter::Any,
+                    10
+                )
+                .await
+                .expect("an unreadable history still lists")
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn a_written_summary_changes_what_the_descriptor_tells_the_reader() {
         let tmp = TempDir::new().unwrap();

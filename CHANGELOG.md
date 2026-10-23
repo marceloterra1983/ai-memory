@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Fixed handoff delivery and listing so one unreadable open row is skipped
+  instead of failing SessionStart, the project list, and the workspace's
+  newest-baton read. A bad `from_session_id` is not treated as a manual
+  handoff. Lookup by id still returns the decode error.
+  (local-20261023; no upstream issue opened)
 - Fixed long CPU/GPU document embedding timeouts with a bounded
   `AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS` override for ordinary and DREAM
   OpenAI-compatible embeddings. Kept the 120-second default and query budget,

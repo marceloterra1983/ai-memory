@@ -19,6 +19,7 @@ pub const MAX_MATCH_WORK: usize = 1_000_000;
 /// Longest argv element kept whole as a path; longer ones are scripts.
 const MAX_ARGV_PATH_CHARS: usize = 256;
 const MAX_CALL_ID_CHARS: usize = 128;
+const MAX_TOOL_LABEL_CHARS: usize = 80;
 const CAPTURE_PROTOCOL_VERSION: u8 = 1;
 
 /// Minimal decoded `[capture]` marker configuration.
@@ -133,6 +134,9 @@ pub enum ToolFamily {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ToolObservationMetadata {
     pub(crate) tool_family: ToolFamily,
+    /// Sanitized real tool name, present only when it fits
+    /// [`valid_tool_label`]; never the arguments, input, or response.
+    pub(crate) tool_label: Option<String>,
     pub(crate) tool_call_id: Option<String>,
 }
 
@@ -235,6 +239,7 @@ pub(crate) fn tool_observation_metadata(
         };
     has_args.then(|| ToolObservationMetadata {
         tool_family: family(name),
+        tool_label: valid_tool_label(name).then(|| name.to_owned()),
         tool_call_id: id.filter(|id| valid_call_id(id)).map(str::to_owned),
     })
 }
@@ -411,12 +416,14 @@ enum Flavor {
     Windows,
 }
 
-/// Safe inspection result; it never retains raw arguments, paths, or arbitrary tool names.
+/// Safe inspection result; it never retains raw arguments, paths, or tool
+/// output. The real tool name survives only as a bounded, sanitized label.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureDecision {
     protocol: CaptureProtocol,
     identity: CanonicalTool,
     call_id: Option<String>,
+    label: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -549,6 +556,7 @@ impl CapturePolicy {
             ),
             identity: canonical(extracted.family),
             call_id: extracted.call_id,
+            label: extracted.label,
         }
     }
     fn match_paths(&self, paths: &[String], cwd: &str) -> Result<bool, ()> {
@@ -651,6 +659,9 @@ pub fn metadata_only_body(
         body.insert("cwd".into(), Value::String(value.into()));
     }
     body.insert("tool_family".into(), json!(decision.protocol.tool_family()));
+    if let Some(label) = &decision.label {
+        body.insert("tool_label".into(), Value::String(label.clone()));
+    }
     body.insert("tool_name".into(), json!(decision.identity));
     if let Some(value) = &decision.call_id {
         body.insert("tool_call_id".into(), Value::String(value.clone()));
@@ -670,6 +681,8 @@ struct Extracted<'a> {
     shell: bool,
     workdir: Option<String>,
     call_id: Option<String>,
+    /// Sanitized real tool name, when it fits `valid_tool_label`.
+    label: Option<String>,
     state: ExtractionState,
 }
 
@@ -764,6 +777,7 @@ fn extract(agent: AgentKind, raw: &Value) -> Extracted<'_> {
         shell,
         workdir,
         call_id,
+        label: valid_tool_label(name).then(|| name.to_owned()),
         state,
     }
 }
@@ -814,6 +828,17 @@ pub(crate) fn valid_call_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+}
+
+/// A recordable `tool_label` for the real tool name behind a family: 1–80
+/// ASCII alphanumerics plus `_`, `-`, `.`, `:`. Anything else is omitted
+/// rather than truncated, so a clipped name cannot pose as the tool that ran.
+pub(crate) fn valid_tool_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.chars().count() <= MAX_TOOL_LABEL_CHARS
+        && label
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b':'))
 }
 
 fn extract_paths(name: &str, args: &Value) -> Option<Vec<String>> {

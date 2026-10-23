@@ -41,6 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (local-20261020; operational local fix, no upstream issue opened)
 
 ### Added
+- Added a sanitized `tool_label` line to closed-tool observation bodies:
+  the real tool name (`tool_name` / `tool` / `toolCall.name`, per agent),
+  recorded only when it is 1–80 ASCII alphanumerics plus `_`, `-`, `.`, `:`
+  — anything else is omitted, never truncated. Bodies without a recordable
+  name are byte-identical to before, and the protocol `tool_name`, the
+  family, and titles stay as they were; no arguments, input, or response
+  join the label. The metadata-only rebuild accepts the label as one
+  optional scalar under the same rule and drops a stripped body carrying
+  an invalid one.
+  (local-20261023; no upstream issue opened)
 - Added `from_session_id` to each entry of `GET /admin/handoffs` (and the
   backing `OpenHandoff` listing): the canonical UUID of the origin session
   for automatic handoffs, `null` for manual ones. External runners can now

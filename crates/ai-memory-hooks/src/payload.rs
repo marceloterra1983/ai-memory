@@ -803,6 +803,10 @@ fn safe_tool_body(
             .ok()?
             .trim_matches('"')
     );
+    if let Some(label) = &metadata.tool_label {
+        summary.push_str("\ntool_label: ");
+        summary.push_str(label);
+    }
     if let Some(id) = &metadata.tool_call_id {
         summary.push_str("\ntool_call_id: ");
         summary.push_str(id);
@@ -1230,6 +1234,7 @@ mod tests {
         for family in every_variant {
             let written = safe_tool_title(&ToolObservationMetadata {
                 tool_family: family,
+                tool_label: None,
                 tool_call_id: None,
             });
             assert!(
@@ -2268,7 +2273,7 @@ mod tests {
                 "claude-code",
                 "tool_response",
                 TOOL_EXCERPT_MAX_BYTES,
-                "tool_family: non-file\noutcome: unknown\n---\n",
+                "tool_family: non-file\ntool_label: Bash\noutcome: unknown\n---\n",
                 false,
             ),
             (
@@ -2498,7 +2503,9 @@ mod tests {
         );
         let excerpt = env.body_excerpt.unwrap();
         assert!(excerpt.ends_with('…'));
-        assert!(excerpt.starts_with("tool_family: non-file\noutcome: unknown\n---\n"));
+        assert!(
+            excerpt.starts_with("tool_family: non-file\ntool_label: Bash\noutcome: unknown\n---\n")
+        );
     }
 
     /// Regression: the native-binary hook command sends the script stem
@@ -2671,7 +2678,7 @@ mod tests {
                 assert_eq!(env.title_hint, Some(format!("tool {family}")));
                 let body = env.body_excerpt.unwrap();
                 assert!(body.starts_with(&format!(
-                    "tool_family: {family}\ntool_call_id: call-native-1"
+                    "tool_family: {family}\ntool_label: {tool}\ntool_call_id: call-native-1"
                 )));
                 assert!(!body.contains("private-input"));
                 if event == "PostToolUse" {
@@ -2730,7 +2737,12 @@ mod tests {
             );
             assert_eq!(
                 env.body_excerpt.as_deref(),
-                Some("tool_family: unknown\ntool_call_id: call-unknown\noutcome: unknown")
+                Some(
+                    format!(
+                        "tool_family: unknown\ntool_label: {tool}\ntool_call_id: call-unknown\noutcome: unknown"
+                    )
+                    .as_str()
+                )
             );
         }
         for response in [
@@ -2758,7 +2770,9 @@ mod tests {
             );
             assert_eq!(
                 post.body_excerpt.as_deref(),
-                Some("tool_family: non-file\noutcome: unknown\n---\n(no output captured)")
+                Some(
+                    "tool_family: non-file\ntool_label: Bash\noutcome: unknown\n---\n(no output captured)"
+                )
             );
         }
     }
@@ -2823,7 +2837,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_closed_tool_post_never_includes_output_or_name() {
+    fn unknown_closed_tool_post_records_sanitized_label_but_never_output() {
         let env = HookEnvelope::from_query_and_body(
             HookQuery {
                 event: "post-tool-use".into(),
@@ -2834,10 +2848,88 @@ mod tests {
         );
         let body = env.body_excerpt.unwrap();
         assert!(body.contains("tool_family: unknown"));
+        assert!(body.contains("tool_label: ARBITRARY_TOOL_SENTINEL"));
         assert!(body.contains("tool_call_id: unknown-1"));
         assert!(body.contains("outcome: unknown"));
-        assert!(!body.contains("ARBITRARY_TOOL_SENTINEL"));
         assert!(!body.contains("OUTPUT_SENTINEL"));
+    }
+
+    /// The counting gap the closed-tool summary had: every MCP tool call
+    /// collapsed into `tool_family: unknown`, so `memory_query`, Serena,
+    /// Graphify, Perplexity or Firecrawl could not be told apart afterwards.
+    /// The sanitized label names the tool (case preserved); the arguments
+    /// never follow it into the body.
+    #[test]
+    fn mcp_tool_names_are_recorded_as_labels_without_arguments() {
+        for (agent, raw, expected) in [
+            (
+                "claude-code",
+                serde_json::json!({"tool_name":"memory_query","tool_input":{"query":"SENTINEL_QUERY"},"tool_use_id":"call-mcp-1"}),
+                "tool_family: unknown\ntool_label: memory_query\ntool_call_id: call-mcp-1\noutcome: unknown",
+            ),
+            (
+                "open-code",
+                serde_json::json!({"tool":"ai-memory__memory_query","args":{"query":"SENTINEL_QUERY"},"callID":"call-mcp-2"}),
+                "tool_family: unknown\ntool_label: ai-memory__memory_query\ntool_call_id: call-mcp-2\noutcome: unknown",
+            ),
+            (
+                "open-code",
+                serde_json::json!({"tool":"Serena.get_symbol_def","args":{"body":"SENTINEL_QUERY"},"callID":"call-mcp-3"}),
+                "tool_family: unknown\ntool_label: Serena.get_symbol_def\ntool_call_id: call-mcp-3\noutcome: unknown",
+            ),
+        ] {
+            let env = HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: "post-tool-use".into(),
+                    agent: Some(agent.into()),
+                    ..Default::default()
+                },
+                raw,
+            );
+            assert_eq!(env.body_excerpt.as_deref(), Some(expected), "{agent}");
+        }
+    }
+
+    /// A label is recorded only when the whole name fits the shape: empty,
+    /// oversized, or carrying a space, quote, `=` or any other character, the
+    /// field is omitted — never clipped into something the tool was not.
+    #[test]
+    fn illegal_tool_names_are_omitted_not_truncated() {
+        let body_for = |name: &str| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: "post-tool-use".into(),
+                    agent: Some("claude-code".into()),
+                    ..Default::default()
+                },
+                serde_json::json!({"tool_name": name, "tool_input": {}, "tool_use_id": "call-omit-1"}),
+            )
+            .body_excerpt
+            .unwrap()
+        };
+        for illegal in [
+            String::new(),
+            "memory query".to_owned(),
+            "tool'x".to_owned(),
+            "tool\"x".to_owned(),
+            "a=b".to_owned(),
+            "café".to_owned(),
+            "x".repeat(81),
+        ] {
+            assert_eq!(
+                body_for(&illegal),
+                "tool_family: unknown\ntool_call_id: call-omit-1\noutcome: unknown",
+                "{illegal:?} must be omitted, not truncated"
+            );
+        }
+        // Boundary control: 80 recordable characters are recorded whole.
+        let exact = "x".repeat(80);
+        assert_eq!(
+            body_for(&exact),
+            format!(
+                "tool_family: unknown\ntool_label: {exact}\ntool_call_id: call-omit-1\noutcome: unknown"
+            )
+        );
     }
 
     #[test]
@@ -3148,7 +3240,9 @@ mod tests {
             );
             assert_eq!(
                 env.body_excerpt.as_deref(),
-                Some("tool_family: unknown\noutcome: unknown")
+                Some(
+                    format!("tool_family: unknown\ntool_label: {tool}\noutcome: unknown").as_str()
+                )
             );
         }
 
@@ -3288,7 +3382,7 @@ mod tests {
         assert_eq!(pre.title_hint.as_deref(), Some("tool non-file"));
         assert_eq!(
             pre.body_excerpt.as_deref(),
-            Some("tool_family: non-file\ntool_call_id: omp-1")
+            Some("tool_family: non-file\ntool_label: bash\ntool_call_id: omp-1")
         );
 
         let post = HookEnvelope::from_query_and_body(
@@ -3302,7 +3396,9 @@ mod tests {
         assert_eq!(post.title_hint.as_deref(), Some("tool non-file"));
         assert_eq!(
             post.body_excerpt.as_deref(),
-            Some("tool_family: non-file\ntool_call_id: omp-1\noutcome: unknown\n---\ntests passed")
+            Some(
+                "tool_family: non-file\ntool_label: bash\ntool_call_id: omp-1\noutcome: unknown\n---\ntests passed"
+            )
         );
     }
 }

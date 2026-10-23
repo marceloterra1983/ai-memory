@@ -2691,7 +2691,10 @@ if (inheritOnly) {
             .and_then(|s| s.as_str())
             .unwrap();
         assert!(command.contains("--agent devin"), "{command}");
-        assert!(!command.contains("grok"), "{command}");
+        // The native command embeds this executable's path. Matching the
+        // substring "grok" fails when that path contains it (this worktree
+        // is `grok-varredura`). The agent is selected by the flag.
+        assert!(!command.contains("--agent grok"), "{command}");
     }
 
     #[test]

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Fixed full-text query preparation so caller text longer than 4 KiB is cut
+  on a character boundary before tokenization. MCP, the web UI, and the CLI
+  share this cap. Shorter queries are unchanged.
+  (local-20261023; no upstream issue opened)
 - Fixed full-text query preparation so a `title:` or `body:` qualifier
   survives when the term contains punctuation (`title:current.md`,
   `body:foo-bar`). The column used to be quoted into the phrase and the

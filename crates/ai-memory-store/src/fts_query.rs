@@ -98,10 +98,18 @@ impl Default for FtsStopwords {
     }
 }
 
+/// Caller-supplied FTS text (MCP, the web UI, the CLI) is capped before
+/// tokenization. Four kibibytes covers a real question; anything past the
+/// cap is dropped on a char boundary so a huge query cannot inflate the
+/// OR-join or the FTS parser. Normal queries are unchanged.
+const FTS_QUERY_MAX_BYTES: usize = 4096;
+
 /// Sanitize free-text for use in `WHERE pages_fts MATCH ?`.
 ///
 /// Returns an empty string when `raw` is empty/whitespace-only; callers
-/// should skip the SQL query in that case.
+/// should skip the SQL query in that case. Input longer than
+/// [`FTS_QUERY_MAX_BYTES`] is cut on a char boundary first; the tail is not
+/// searched.
 ///
 /// Bare multi-word queries are joined with **`OR`**, not the FTS5 default
 /// (`AND`). A natural-language query like "cross project search strategy"
@@ -115,6 +123,7 @@ impl Default for FtsStopwords {
 /// the built-in English list; `FtsStopwords::none()` disables filtering).
 #[must_use]
 pub fn prepare_fts5_query(raw: &str, stopwords: &FtsStopwords) -> String {
+    let raw = cap_fts_query(raw);
     let explicit_syntax = raw.contains('"')
         || raw.contains('(')
         || raw.contains(')')
@@ -208,6 +217,17 @@ fn fts5_query_parses(query: &str) -> bool {
             .is_ok()
         })
     })
+}
+
+fn cap_fts_query(raw: &str) -> &str {
+    if raw.len() <= FTS_QUERY_MAX_BYTES {
+        return raw;
+    }
+    let mut end = FTS_QUERY_MAX_BYTES;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    &raw[..end]
 }
 
 fn prepare_fts5_token(token: &str) -> Vec<String> {
@@ -559,6 +579,30 @@ mod tests {
             prepare_fts5_query("title:handoff OR body:deploy"),
             "title:handoff OR body:deploy"
         );
+    }
+
+    /// A multi-kilobyte query string is caller input. Cap it before
+    /// tokenization so the FTS parser and the OR-join stay bounded. The cut
+    /// is on a char boundary and the tail token is gone.
+    #[test]
+    fn oversized_fts_query_is_capped_and_still_parses() {
+        assert_eq!(prepare_fts5_query("handoff"), "handoff");
+        let token = "handoff ";
+        let mut raw = token.repeat(super::FTS_QUERY_MAX_BYTES / token.len());
+        assert_eq!(raw.len(), super::FTS_QUERY_MAX_BYTES);
+        raw.push_str("TAILTOKEN");
+        let prepared = prepare_fts5_query(&raw);
+        assert!(!prepared.contains("TAILTOKEN"), "{prepared}");
+        assert!(prepared.contains("handoff"), "{prepared}");
+        assert_parses(&prepared);
+
+        let mut multibyte = "a".repeat(super::FTS_QUERY_MAX_BYTES - 1);
+        multibyte.push('é');
+        multibyte.push_str(" TAILTOKEN");
+        let prepared = prepare_fts5_query(&multibyte);
+        assert!(!prepared.contains("TAILTOKEN"), "{prepared}");
+        assert!(!prepared.contains('é'), "{prepared}");
+        assert_parses(&prepared);
     }
 
     // --- issue #953: configurable stopword list -----------------------

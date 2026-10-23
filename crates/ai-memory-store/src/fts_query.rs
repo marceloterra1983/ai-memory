@@ -211,6 +211,10 @@ fn fts5_query_parses(query: &str) -> bool {
 }
 
 fn prepare_fts5_token(token: &str) -> Vec<String> {
+    if let Some((column, term)) = known_column_term(token) {
+        return vec![qualify_column_term(column, term)];
+    }
+
     if has_unknown_bare_column(token) {
         return token
             .replace(':', " ")
@@ -226,11 +230,34 @@ fn prepare_fts5_token(token: &str) -> Vec<String> {
     }
 }
 
+/// `title:` / `body:` at the start of a token, ASCII case-insensitive.
+/// The returned column is the canonical lowercase spelling. `None` when the
+/// token is not a known column qualifier (so `pick:handoff` still degrades).
+fn known_column_term(token: &str) -> Option<(&'static str, &str)> {
+    for (canonical, prefix) in [("title:", "title:"), ("body:", "body:")] {
+        let prefix_len = prefix.len();
+        if token.len() >= prefix_len
+            && token.as_bytes()[..prefix_len].eq_ignore_ascii_case(prefix.as_bytes())
+        {
+            return Some((canonical, &token[prefix_len..]));
+        }
+    }
+    None
+}
+
+/// Keep the column and quote only the term. `title:current.md` used to become
+/// the phrase `"title:current.md"`, which searches every column. A
+/// punctuation-free term, including a trailing prefix `*`, stays bare.
+fn qualify_column_term(column: &str, term: &str) -> String {
+    if term.is_empty() || !should_quote_fts5_token(term) {
+        format!("{column}{term}")
+    } else {
+        format!("{column}{}", quote_fts5_token(term))
+    }
+}
+
 fn has_unknown_bare_column(token: &str) -> bool {
-    token.contains(':')
-        && !token.contains('"')
-        && !token.starts_with("title:")
-        && !token.starts_with("body:")
+    token.contains(':') && !token.contains('"') && known_column_term(token).is_none()
 }
 
 fn should_quote_fts5_token(token: &str) -> bool {
@@ -512,6 +539,26 @@ mod tests {
     #[test]
     fn known_columns_are_preserved() {
         assert_eq!(prepare_fts5_query("title:handoff"), "title:handoff");
+    }
+
+    /// `title:current.md` used to lose the column: quoting wrapped the whole
+    /// token, so FTS searched the phrase "title:current.md" in every column.
+    /// The qualifier stays, and only the term is quoted. A bare prefix and a
+    /// punctuation-free qualifier stay byte-identical.
+    #[test]
+    fn column_qualifier_survives_punctuation_in_the_term() {
+        let titled = prepare_fts5_query("title:current.md");
+        assert_parses(&titled);
+        assert_eq!(titled, r#"title:("current.md" OR "current md")"#);
+        let body = prepare_fts5_query("body:foo-bar");
+        assert_parses(&body);
+        assert_eq!(body, r#"body:("foo-bar" OR "foo bar")"#);
+        assert_eq!(prepare_fts5_query("title:curr*"), "title:curr*");
+        assert_eq!(prepare_fts5_query("TITLE:handoff"), "title:handoff");
+        assert_eq!(
+            prepare_fts5_query("title:handoff OR body:deploy"),
+            "title:handoff OR body:deploy"
+        );
     }
 
     // --- issue #953: configurable stopword list -----------------------

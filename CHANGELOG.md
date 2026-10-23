@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Fixed full-text query preparation so a `title:` or `body:` qualifier
+  survives when the term contains punctuation (`title:current.md`,
+  `body:foo-bar`). The column used to be quoted into the phrase and the
+  search ran against every column. A bare `title:handoff` and a prefix
+  `title:curr*` stay unchanged.
+  (local-20261023; no upstream issue opened)
 - Fixed model page-path cleanup so `.` / `..`, empty segments, trailing dots
   or spaces, DOS device names, and Git-reserved directories are rewritten
   before `Wiki::apply_batch`. One such path used to abort the whole

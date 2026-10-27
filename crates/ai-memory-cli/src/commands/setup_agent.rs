@@ -564,11 +564,13 @@ fn resolve_source(explicit: Option<&Path>, sub: &str) -> Result<PathBuf> {
 /// binary-relative spots:
 ///   * `<exe_dir>/hooks/<sub>` — the **release tarball** ships `hooks/` right
 ///     beside the binary (macOS/Windows/Linux archives), and
-///   * `<exe_dir>/../../hooks/<sub>` — `cargo run` from the repo, where the
-///     binary lives under `target/<profile>/`.
+///   * walk-up from the binary until an ancestor contains `hooks/<sub>` —
+///     `cargo run` from the repo under `target/<profile>/` or
+///     `target/<triple>/<profile>/`, and correctly yields nothing when
+///     `CARGO_TARGET_DIR` is outside a checkout that has no `hooks/` ancestor.
 ///
 /// Without the binary-sibling entry the flat tarball layout was unreachable:
-/// from `/private/tmp/<dir>/ai-memory` the `parent×3` dev fallback derived a
+/// from `/private/tmp/<dir>/ai-memory` the old `parent×3` dev fallback derived a
 /// bogus `/private/hooks/<sub>` and discovery failed (issue #107).
 fn source_candidates(explicit: Option<&Path>, sub: &str, exe: Option<PathBuf>) -> Vec<PathBuf> {
     if let Some(p) = explicit {
@@ -580,16 +582,27 @@ fn source_candidates(explicit: Option<&Path>, sub: &str, exe: Option<PathBuf>) -
         // Native Linux packages install hook sources under /usr/share.
         PathBuf::from(format!("/usr/share/ai-memory/hooks/{sub}")),
     ];
-    if let Some(exe) = exe {
+    let push_hooks = |v: &mut Vec<PathBuf>, root: PathBuf| {
+        let candidate = root
+            .join(crate::install_layout::HOOKS_DIR_NAME)
+            .join(sub);
+        if !v.contains(&candidate) {
+            v.push(candidate);
+        }
+    };
+    if let Some(exe) = exe.as_ref() {
         // Release tarball: `hooks/` sits in the same dir as the binary.
         if let Some(dir) = exe.parent() {
             v.push(dir.join(crate::install_layout::HOOKS_DIR_NAME).join(sub));
         }
-        // Repo-local fallback for `cargo run setup-agent` during dev:
-        // target/<profile>/<bin> → repo root.
-        if let Some(root) = exe.parent().and_then(Path::parent).and_then(Path::parent) {
-            v.push(root.join(crate::install_layout::HOOKS_DIR_NAME).join(sub));
-        }
+    }
+    // Repo-local fallback for `cargo run` / out-of-tree `CARGO_TARGET_DIR`:
+    // walk the exe, then cwd, then compile-time CARGO_MANIFEST_DIR.
+    if let Some(root) = crate::install_layout::repo_root_guess(
+        exe.as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    ) {
+        push_hooks(&mut v, root);
     }
     v
 }
@@ -597,6 +610,7 @@ fn source_candidates(explicit: Option<&Path>, sub: &str, exe: Option<PathBuf>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn source_candidates_include_binary_sibling_for_flat_tarball() {
@@ -622,12 +636,89 @@ mod tests {
 
     #[test]
     fn source_candidates_preserve_cargo_run_repo_root() {
-        // `cargo run`: target/<profile>/<bin> → repo root holds `hooks/`.
-        let exe = PathBuf::from("/home/dev/ai-memory/target/debug/ai-memory");
+        // `cargo run`: target/<profile>/<bin> → walk-up finds repo `hooks/`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("ai-memory");
+        let hooks = repo.join("hooks").join("claude-code");
+        let exe = repo.join("target").join("debug").join("ai-memory");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"").unwrap();
+
         let candidates = source_candidates(None, "claude-code", Some(exe));
         assert!(
-            candidates.contains(&PathBuf::from("/home/dev/ai-memory/hooks/claude-code")),
+            candidates.contains(&hooks),
             "repo-root hooks/ dir must still be probed; got {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn source_candidates_find_hooks_under_target_triple() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("ai-memory");
+        let hooks = repo.join("hooks").join("claude-code");
+        let exe = repo
+            .join("target")
+            .join("x86_64-unknown-linux-gnu")
+            .join("release")
+            .join("ai-memory");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"").unwrap();
+
+        let candidates = source_candidates(None, "claude-code", Some(exe));
+        assert!(
+            candidates.contains(&hooks),
+            "triple target layout must walk up to hooks/; got {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn source_candidates_skip_repo_root_when_target_outside_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let exe = tmp.path().join("cargo-target").join("debug").join("ai-memory");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"").unwrap();
+
+        let candidates = source_candidates(None, "claude-code", Some(exe.clone()));
+        let sibling = exe.parent().unwrap().join("hooks").join("claude-code");
+        assert!(
+            candidates.contains(&sibling),
+            "binary-sibling candidate must remain; got {candidates:?}"
+        );
+        // No ancestor has hooks/, so walk-up must not invent a bogus root
+        // under the temp tree (packaged /usr/... candidates still appear).
+        let under_tmp: Vec<_> = candidates
+            .iter()
+            .filter(|p| p.starts_with(tmp.path()))
+            .collect();
+        assert_eq!(
+            under_tmp,
+            vec![&sibling],
+            "only the sibling candidate under the external target; got {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn source_candidates_recover_via_cargo_manifest_when_target_outside_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let exe = tmp.path().join("cargo-target").join("debug").join("ai-memory");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"").unwrap();
+
+        let candidates = source_candidates(None, "claude-code", Some(exe));
+        let checkout_hooks = crate::install_layout::repo_root_guess(None, None)
+            .expect("CARGO_MANIFEST_DIR must locate the checkout")
+            .join(crate::install_layout::HOOKS_DIR_NAME)
+            .join("claude-code");
+        assert!(
+            candidates.contains(&checkout_hooks),
+            "manifest fallback must probe checkout hooks/; got {candidates:?}"
+        );
+        assert!(
+            checkout_hooks.is_dir(),
+            "checkout hooks/claude-code must exist: {}",
+            checkout_hooks.display()
         );
     }
 

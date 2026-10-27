@@ -5338,13 +5338,17 @@ fn hook_source_candidates(
 }
 
 fn repo_root_guess() -> Option<PathBuf> {
-    repo_root_from_exe(&current_exe_resolved()?)
+    crate::install_layout::repo_root_guess(
+        current_exe_resolved().as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
 }
 
-/// When the binary lives under target/{debug,release}/<name>, the
-/// workspace root is two parents up.
+/// Thin alias so install_hooks unit tests exercise the shared walk-up helper
+/// without importing `install_layout` at every call site.
+#[cfg(test)]
 fn repo_root_from_exe(exe: &Path) -> Option<PathBuf> {
-    Some(exe.parent()?.parent()?.parent()?.to_path_buf())
+    crate::install_layout::repo_root_from_exe(exe)
 }
 
 /// Directory the running binary lives in. The release tarball ships the
@@ -8640,6 +8644,7 @@ model = "gpt-5"
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         let exe = repo.join("target").join("release").join("ai-memory");
+        fs::create_dir_all(repo.join("hooks").join("claude-code")).unwrap();
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();
         let link_dir = tmp.path().join("home").join(".local").join("bin");
@@ -8662,6 +8667,51 @@ model = "gpt-5"
                 .join("hooks")
                 .join("claude-code"),
             "the checkout must be the first candidate, not the symlink's ancestor"
+        );
+    }
+
+    #[test]
+    fn repo_root_from_exe_finds_hooks_under_target_triple() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let exe = repo
+            .join("target")
+            .join("x86_64-unknown-linux-gnu")
+            .join("debug")
+            .join("ai-memory");
+        fs::create_dir_all(repo.join("hooks").join("claude-code")).unwrap();
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"").unwrap();
+
+        assert_eq!(repo_root_from_exe(&exe), Some(repo));
+    }
+
+    #[test]
+    fn repo_root_guess_recovers_checkout_when_target_is_outside_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("cargo-target").join("debug").join("ai-memory");
+        let foreign_cwd = tmp.path().join("foreign-home");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::create_dir_all(&foreign_cwd).unwrap();
+        fs::write(&exe, b"").unwrap();
+
+        let root = crate::install_layout::repo_root_guess(Some(&exe), Some(&foreign_cwd))
+            .expect("cwd miss + CARGO_MANIFEST_DIR must still find hooks/");
+        let candidates = hook_source_candidates(
+            "claude-code",
+            Some(root.clone()),
+            exe.parent().map(Path::to_path_buf),
+            None,
+        );
+        assert_eq!(
+            candidates[0],
+            root.join("hooks").join("claude-code"),
+            "checkout hooks must be the first candidate when target is external"
+        );
+        assert!(
+            candidates[0].is_dir(),
+            "manifest-derived hooks dir must exist on disk: {}",
+            candidates[0].display()
         );
     }
 

@@ -64,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local transport guards, model identity and existing input/vector behavior.
   (local-20261020; operational local fix, no upstream issue opened)
 
+### Changed
+- Annotated all 23 MCP tools with `readOnlyHint`, `destructiveHint`, and
+  `openWorldHint`. Destructive is set only on forget-sweep, delete-page,
+  consolidate, auto-improve, handoff cancel, and message cancel. Reads,
+  including handoff list, set read-only. Open-world is set only on tools
+  that can call an LLM. The activity-log write classifier is unchanged.
+  (local-20261030; no upstream issue opened)
+
 ### Added
 - Added a sanitized `tool_label` line to closed-tool observation bodies:
   the real tool name (`tool_name` / `tool` / `toolCall.name`, per agent),

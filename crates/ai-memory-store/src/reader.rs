@@ -1647,6 +1647,12 @@ pub struct PageSummary {
     pub tier: String,
     /// ISO-8601 timestamp of last update.
     pub updated_at: String,
+    /// `true` when `expires_at` is set and not after now. Inventory callers
+    /// still receive the row; retrieval that already hides expired pages
+    /// leaves this `false`. `#[serde(skip)]` keeps `GET .../pages` from
+    /// growing an `expired` key.
+    #[serde(skip)]
+    pub expired: bool,
 }
 
 /// Page author surfaced alongside read responses (P1.7).
@@ -8459,24 +8465,26 @@ impl ReaderPool {
             let kind_expr = page_kind_expr("pg.path", "pg.frontmatter_json");
             let mut stmt = conn.prepare(&format!(
                 "SELECT pg.path, pg.title, {kind_expr} AS kind, \
-                        pg.tier, pg.updated_at \
+                        pg.tier, pg.updated_at, \
+                        (pg.expires_at IS NOT NULL AND pg.expires_at <= ?3) AS expired \
                  FROM pages pg \
                  JOIN projects p ON p.id = pg.project_id \
                  JOIN workspaces w ON w.id = pg.workspace_id \
                  WHERE w.name = ?1 AND p.name = ?2 AND pg.is_latest = 1 \
                  ORDER BY pg.path ASC"
             ))?;
-            let rows = stmt.query_map(params![workspace, project], |row| {
+            let rows = stmt.query_map(params![workspace, project, now_us()], |row| {
                 let path: String = row.get(0)?;
                 let title: String = row.get(1)?;
                 let kind: String = row.get(2)?;
                 let tier: String = row.get(3)?;
                 let updated_us: i64 = row.get(4)?;
-                Ok((path, title, kind, tier, updated_us))
+                let expired: bool = row.get(5)?;
+                Ok((path, title, kind, tier, updated_us, expired))
             })?;
             let mut out = Vec::new();
             for r in rows {
-                let (path, title, kind, tier, updated_us) = r?;
+                let (path, title, kind, tier, updated_us, expired) = r?;
                 let updated_at = jiff::Timestamp::from_microsecond(updated_us)
                     .map(|ts| ts.to_string())
                     .unwrap_or_default();
@@ -8486,6 +8494,7 @@ impl ReaderPool {
                     kind,
                     tier,
                     updated_at,
+                    expired,
                 });
             }
             Ok(out)
@@ -8547,6 +8556,7 @@ impl ReaderPool {
                     kind,
                     tier,
                     updated_at,
+                    expired: false,
                 });
             }
             Ok(out)

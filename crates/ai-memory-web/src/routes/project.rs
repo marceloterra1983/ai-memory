@@ -78,13 +78,14 @@ async fn render(
         .map(|(name, pages)| Folder { name, pages })
         .collect();
 
-    // Recent pages: knowledge only, sorted by updated_at desc, take 20.
-    // Machinery updates constantly (logs append every consolidation,
-    // lint reruns daily), so an unfiltered recency sort would show
-    // nothing else.
+    // Recent pages: live knowledge only, newest first, take 20.
+    // Drop expired rows before the cut so a newer expired page cannot
+    // occupy a slot. Machinery updates constantly (logs append every
+    // consolidation, lint reruns daily), so an unfiltered recency sort
+    // would show nothing else. The sidebar above keeps every on-disk row.
     let mut sorted: Vec<_> = pages
         .iter()
-        .filter(|p| !is_system_page(&p.path))
+        .filter(|p| !p.expired && !is_system_page(&p.path))
         .cloned()
         .collect();
     sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));

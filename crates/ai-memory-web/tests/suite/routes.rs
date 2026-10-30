@@ -1524,6 +1524,103 @@ async fn api_recent_hides_expired_pages() {
     );
 }
 
+/// Twenty newer expired knowledge pages must not fill the HTML Recent
+/// Activity window. The sidebar and the JSON inventory still list the file.
+#[tokio::test]
+async fn project_recent_skips_expired_pages() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(new_page(
+            ws,
+            proj,
+            "concepts/live-window.md",
+            "Live Window Page",
+            "still current",
+        ))
+        .await
+        .unwrap();
+    for n in 1..=20 {
+        let mut expired = new_page(
+            ws,
+            proj,
+            &format!("concepts/expired-window-{n:02}.md"),
+            &format!("Expired Window {n:02}"),
+            "past its ttl",
+        );
+        expired.expires_at = Some(
+            jiff::Timestamp::from_microsecond(1).expect("one microsecond after the epoch is valid"),
+        );
+        store.writer.upsert_page(expired).await.unwrap();
+    }
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    let split = text.find("Recent Activity").expect("recent heading");
+    let (sidebar, recent) = text.split_at(split);
+    assert!(recent.contains("Live Window Page"));
+    assert!(
+        !recent.contains("Expired Window 01"),
+        "expired page leaked into Recent Activity: {recent}"
+    );
+    assert!(
+        sidebar.contains("Expired Window 01"),
+        "sidebar must still list the expired file"
+    );
+
+    let api = api_router(store.reader.clone(), wiki);
+    let pages_resp = api
+        .oneshot(
+            Request::builder()
+                .uri("/workspaces/default/projects/scratch/pages")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pages_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(pages_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let pages = json.as_array().expect("pages inventory is a JSON array");
+    assert!(
+        pages
+            .iter()
+            .any(|page| page["path"] == "concepts/expired-window-01.md"),
+        "inventory must still include the expired path: {json}"
+    );
+    for page in pages {
+        assert!(
+            page.get("expired").is_none(),
+            "inventory JSON must not grow an expired key: {page}"
+        );
+    }
+}
+
 /// Seed one session in `(ws, proj)` with `(kind, title, body)` rows, ended
 /// when `completed`. Returns the session id.
 async fn seed_session(

@@ -308,6 +308,18 @@ fn sanitize_event<'a>(event: Event<'a>, workspace: &str, project: &str) -> Event
 
 fn safe_url(url: CowStr<'_>) -> CowStr<'_> {
     let trimmed = url.trim_start();
+    // Network paths and backslashes are not a single-slash same-origin path.
+    // Browsers treat `\` as a path separator, so these fall to `#` before the
+    // `/` allow below. `http://` and `https://` contain `//` only after the
+    // scheme, so this prefix check leaves them clickable.
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("\\\\")
+        || trimmed.starts_with("/\\")
+        || trimmed.starts_with("\\/")
+        || trimmed.contains('\\')
+    {
+        return CowStr::Boxed("#".into());
+    }
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("http://")
         || lower.starts_with("https://")
@@ -350,7 +362,8 @@ fn safe_image_url(url: CowStr<'_>) -> CowStr<'_> {
 ///   * the wikilink rewriter, which falls back to literal `[[…]]`;
 ///   * `safe_url`, which independently allows the four explicitly
 ///     listed schemes (http/https/mailto + root/fragment/no-colon
-///     relatives) and rewrites everything else to `#`.
+///     relatives) and rewrites everything else to `#`. A network path
+///     (`//`, `\\`, `/\`, `\/`) or any backslash also falls to `#`.
 ///
 /// The two checks are NOT the same: `safe_url` ACCEPTS by allowlist;
 /// this helper REJECTS by denylist. The shared concern is "this looks
@@ -510,6 +523,42 @@ mod tests {
                 "target {target}: {html}"
             );
             assert!(!html.contains("example.invalid"), "target {target}: {html}");
+        }
+    }
+
+    #[test]
+    fn neutralises_network_path_links() {
+        for target in [
+            "//example.invalid/pixel.png",
+            r"\\example.invalid\pixel.png",
+            r"/\example.invalid/pixel.png",
+            // pulldown-cmark unescapes `\/` (punctuation) before safe_url.
+            // A doubled backslash leaves the `\/` prefix images already refuse.
+            r"\\/example.invalid/pixel.png",
+        ] {
+            let markdown = format!("[remote pixel]({target})");
+            let html = render(&markdown, "default", "scratch");
+            assert!(html.contains(r##"href="#""##), "target {target}: {html}");
+            assert!(!html.contains("example.invalid"), "target {target}: {html}");
+        }
+
+        for (target, href) in [
+            (
+                "https://example.com/docs",
+                r#"href="https://example.com/docs""#,
+            ),
+            (
+                "http://example.com/docs",
+                r#"href="http://example.com/docs""#,
+            ),
+            (
+                "mailto:person@example.com",
+                r#"href="mailto:person@example.com""#,
+            ),
+            ("/static/logo.svg", r#"href="/static/logo.svg""#),
+        ] {
+            let html = render(&format!("[ok]({target})"), "default", "scratch");
+            assert!(html.contains(href), "target {target}: {html}");
         }
     }
 

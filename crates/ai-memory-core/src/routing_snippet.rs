@@ -55,8 +55,11 @@ observations automatically.** They are not complete native transcripts;
 managed `ai-memory run` launches add the portable visible-event ledger. Do not
 manually write routine notes. Only write durable memory when the user explicitly asks
 to remember or annotate something permanently. For an explicitly time-bounded note,
-set `expires_at`; expired pages are hidden from normal reads and deleted by the next
-forget sweep, and a TTL outranks `pinned`. ai-memory is the cross-harness memory of
+set `expires_at`; search, briefing, GET recent, and the HTML Recent Activity
+column hide an expired page, but `memory_read_page` still reads the markdown
+from disk and does not consult `expires_at`. `list_pages`, the sidebar, and
+GET .../pages keep listing the file until the next forget sweep deletes it,
+and a TTL outranks `pinned`. ai-memory is the cross-harness memory of
 record for this project: if the harness you run in has its own local memory feature,
 do not keep durable project facts there in parallel — a harness-local store is
 invisible to every other agent and fragments continuity, so capture them here instead.
@@ -153,7 +156,7 @@ Choose project scope according to the MCP client's session-identity support:
 
 Lifecycle hooks automatically capture sanitized, bounded prompt and tool-lifecycle observations. These are not complete native transcripts; managed `ai-memory run` sessions additionally maintain the portable visible-event ledger.
 
-Do not manually record routine session activity. Write durable memory only when the user explicitly asks to remember or permanently annotate something. For time-bounded memory, set `expires_at`; expired pages are hidden from normal reads and removed by the next forget sweep, and TTL takes precedence over `pinned`.
+Do not manually record routine session activity. Write durable memory only when the user explicitly asks to remember or permanently annotate something. For time-bounded memory, set `expires_at`; search, briefing, GET recent, and the HTML Recent Activity column hide an expired page, but `memory_read_page` still reads the markdown from disk and does not consult `expires_at`. `list_pages`, the sidebar, and GET .../pages keep listing the file until the next forget sweep deletes it, and a TTL outranks `pinned`.
 
 ai-memory is the cross-harness memory of record for durable project knowledge. Do not duplicate the same durable project facts in harness-local memory stores that other agents cannot see.
 

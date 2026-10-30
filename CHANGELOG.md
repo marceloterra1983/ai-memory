@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Fixed the installed routing snippet so a refresh no longer says that expired
+  pages are hidden from normal reads and deleted by the next forget sweep.
+  Search, briefing, GET recent, and the HTML Recent Activity column hide an
+  expired page. `memory_read_page` still reads the file from disk and does not
+  consult `expires_at`. `list_pages`, the sidebar, and GET .../pages keep the
+  file until that sweep. A TTL still outranks `pinned`.
+  (local-20261030; no upstream issue opened)
 - Fixed hybrid-session compilation so a session page, its auto-handoff, an
   LLM consolidation prompt, and an auto-improve review include only
   observations from the scope being written. Observations captured for

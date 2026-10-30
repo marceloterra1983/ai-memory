@@ -497,6 +497,12 @@ pub async fn run_auto_improve_review(
     }
 
     let observations = reader.observations_for_session(session_id).await?;
+    // Duration, the minimum count, and the prompt share the scope being
+    // reviewed. Rows captured for another project do not fill the minimum.
+    let observations: Vec<_> = observations
+        .into_iter()
+        .filter(|observation| observation.in_written_scope(workspace_id, project_id))
+        .collect();
     let duration = session_duration_secs(&observations);
     if let Some(rejection) = preflight_rejection(&observations, duration, &cfg) {
         return Ok(AutoImproveReport {
@@ -3792,6 +3798,138 @@ mod tests {
         assert!(accepted.is_empty());
         assert!(rejected.iter().any(|r| r.reason == "duplicate_anchor"));
         assert!(rejected.iter().any(|r| r.reason == "patch_extra_h1"));
+    }
+
+    const LOCAL_PROJECT_SENTINEL: &str = "LOCAL_PROJECT_SENTINEL";
+    const FOREIGN_PROJECT_SENTINEL: &str = "FOREIGN_PROJECT_SENTINEL";
+
+    async fn seed_hybrid_review(
+        local_count: usize,
+        foreign_count: usize,
+    ) -> (TempDir, Store, WorkspaceId, ProjectId, SessionId) {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let local = store
+            .writer
+            .get_or_create_project(ws, "local-project", None)
+            .await
+            .unwrap();
+        let foreign = store
+            .writer
+            .get_or_create_project(ws, "foreign-project", None)
+            .await
+            .unwrap();
+        let session_id = SessionId::new();
+        store
+            .writer
+            .begin_session(NewSession {
+                occurred_at: None,
+                id: session_id,
+                workspace_id: ws,
+                project_id: local,
+                agent_kind: AgentKind::Other,
+                cwd: None,
+                actor_user: None,
+            })
+            .await
+            .unwrap();
+        for (project_id, body, count) in [
+            (local, LOCAL_PROJECT_SENTINEL, local_count),
+            (foreign, FOREIGN_PROJECT_SENTINEL, foreign_count),
+        ] {
+            for _ in 0..count {
+                store
+                    .writer
+                    .insert_observation(Sanitized::new(
+                        NewObservation {
+                            occurred_at: None,
+                            session_id,
+                            workspace_id: ws,
+                            project_id,
+                            kind: ObservationKind::UserPrompt,
+                            extension: None,
+                            source_event: None,
+                            title: "scope observation".into(),
+                            body: body.into(),
+                            importance: 5,
+                        },
+                        &Sanitizer::builtin(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        }
+        (tmp, store, ws, local, session_id)
+    }
+
+    #[tokio::test]
+    async fn hybrid_session_review_prompt_omits_the_foreign_project() {
+        let (_tmp, store, ws, local, session_id) = seed_hybrid_review(1, 1).await;
+        let llm = CapturingLlm::default();
+        run_auto_improve_review(
+            &store.reader,
+            &llm,
+            ws,
+            local,
+            session_id,
+            AutoImproveReviewConfig {
+                min_observations: 1,
+                min_session_duration_secs: 0,
+                ..AutoImproveReviewConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let prompt = llm
+            .prompt
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the review must call the model for the local observation");
+        assert!(
+            prompt.contains(LOCAL_PROJECT_SENTINEL),
+            "the requested scope's observation text must reach the prompt"
+        );
+        assert!(
+            !prompt.contains(FOREIGN_PROJECT_SENTINEL),
+            "another project's observation text must stay out of the prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_session_review_does_not_count_foreign_observations() {
+        let (_tmp, store, ws, local, session_id) = seed_hybrid_review(1, 7).await;
+        let llm = CapturingLlm::default();
+        let report = run_auto_improve_review(
+            &store.reader,
+            &llm,
+            ws,
+            local,
+            session_id,
+            AutoImproveReviewConfig {
+                min_observations: 8,
+                ..AutoImproveReviewConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.observations_considered, 1);
+        assert!(
+            report
+                .rejected_candidates
+                .iter()
+                .any(|candidate| candidate.reason == "too_few_observations"),
+            "seven foreign rows must not satisfy the local minimum"
+        );
+        assert!(
+            llm.prompt.lock().unwrap().is_none(),
+            "a below-minimum local slice must not call the model"
+        );
     }
 }
 

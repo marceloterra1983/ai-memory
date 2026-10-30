@@ -3316,12 +3316,19 @@ async fn process_authorized(
                 }
             }
         }
+        // Ephemeral classification used the full log above. The page compiles
+        // only the scope it is about to write, even when that slice is empty.
+        let page_observations: Vec<_> = observations
+            .iter()
+            .filter(|observation| observation.in_written_scope(page_ws, page_proj))
+            .cloned()
+            .collect();
         let new_page = synthesize_session_page(
             page_ws,
             page_proj,
             session_id,
             admitted.agent_kind(),
-            &observations,
+            &page_observations,
         );
         let page_id = state
             .wiki
@@ -3358,6 +3365,11 @@ async fn process_authorized(
         // Other harnesses are not gated: Claude Code also sets `agent_type` on
         // a top-level `--agent` session, which still owns its baton.
         let child_session = env.agent == AgentKind::OpenCode && body_is_subagent(&env.raw);
+        let handoff_observations: Vec<_> = observations
+            .iter()
+            .filter(|observation| observation.in_written_scope(page_ws, page_proj))
+            .cloned()
+            .collect();
         let handoff = (!managed && !child_session)
             .then(|| {
                 build_auto_handoff(
@@ -3366,7 +3378,7 @@ async fn process_authorized(
                     env.agent,
                     session_id,
                     env.cwd.clone(),
-                    &observations,
+                    &handoff_observations,
                     handoff_owner,
                     turn_checkpoint,
                 )
@@ -3948,6 +3960,10 @@ async fn consolidate_or_synth(
     if is_ephemeral_session(&observations) {
         return Ok(());
     }
+    let observations: Vec<_> = observations
+        .into_iter()
+        .filter(|observation| observation.in_written_scope(workspace_id, project_id))
+        .collect();
     let new_page = synthesize_session_page(
         workspace_id,
         project_id,
@@ -6790,6 +6806,264 @@ mod tests {
             briefing.counts.observations, 3,
             "session-start + prompt + one session-end observation"
         );
+    }
+
+    const LOCAL_PROJECT_SENTINEL: &str = "LOCAL_PROJECT_SENTINEL";
+    const FOREIGN_PROJECT_SENTINEL: &str = "FOREIGN_PROJECT_SENTINEL";
+
+    fn hook_fire(event: &str, cwd: &std::path::Path, sid: &str, prompt: &str) -> HookEnvelope {
+        HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: event.into(),
+                agent: Some("claude-code".into()),
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            serde_json::json!({
+                "session_id": sid,
+                "cwd": cwd.to_string_lossy(),
+                "prompt": prompt,
+            }),
+        )
+    }
+
+    async fn insert_user_prompt(
+        state: &HookState,
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        text: &str,
+    ) {
+        state
+            .writer
+            .insert_observation(Sanitized::new(
+                NewObservation {
+                    occurred_at: None,
+                    session_id,
+                    workspace_id,
+                    project_id,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: text.into(),
+                    body: text.into(),
+                    importance: 8,
+                },
+                &state.sanitizer,
+            ))
+            .await
+            .unwrap();
+    }
+
+    fn handoff_text(handoff: &ai_memory_core::Handoff) -> String {
+        format!(
+            "{}\n{}\n{}",
+            handoff.content.summary,
+            handoff.content.open_questions.join("\n"),
+            handoff.content.next_steps.join("\n")
+        )
+    }
+
+    /// The trailing `?` is the unresolved-question heuristic that opens the
+    /// auto-handoff. The scope marker is the sentinel substring.
+    #[tokio::test]
+    async fn hybrid_session_end_page_and_handoff_omit_the_foreign_project() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let sid = "11111111-1111-4111-8111-111111111111";
+        let session_id: SessionId = sid.parse().unwrap();
+        let cwd = tmp.path().join("hybrid-local-end");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let local_prompt = format!("{LOCAL_PROJECT_SENTINEL}?");
+        let foreign_text = format!("{FOREIGN_PROJECT_SENTINEL}?");
+
+        process(
+            &state,
+            hook_fire("session-start", &cwd, sid, &local_prompt),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        process(
+            &state,
+            hook_fire("user-prompt-submit", &cwd, sid, &local_prompt),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let (ws, proj, _) = state
+            .reader
+            .find_session_scope(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let foreign = state
+            .writer
+            .get_or_create_project(ws, "foreign-hybrid", None)
+            .await
+            .unwrap();
+        assert_ne!(foreign, proj);
+        insert_user_prompt(&state, session_id, ws, foreign, &foreign_text).await;
+        process(
+            &state,
+            hook_fire("session-end", &cwd, sid, &local_prompt),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let page = state
+            .reader
+            .page_body_by_ids(ws, proj, &format!("sessions/{session_id}.md"))
+            .await
+            .unwrap()
+            .expect("local session page");
+        assert!(page.body.contains(LOCAL_PROJECT_SENTINEL));
+        assert!(!page.body.contains(FOREIGN_PROJECT_SENTINEL));
+        let handoff = state
+            .reader
+            .latest_open_handoff(ws, proj, None, ai_memory_core::OwnerFilter::Any)
+            .await
+            .unwrap()
+            .expect("local handoff");
+        let handoff_text = handoff_text(&handoff);
+        assert!(handoff_text.contains(LOCAL_PROJECT_SENTINEL));
+        assert!(!handoff_text.contains(FOREIGN_PROJECT_SENTINEL));
+    }
+
+    #[tokio::test]
+    async fn hybrid_session_end_foreign_only_substantive_observation_still_writes_a_local_page() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let sid = "22222222-2222-4222-8222-222222222222";
+        let session_id: SessionId = sid.parse().unwrap();
+        let cwd = tmp.path().join("hybrid-local-ephemeral");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        process(
+            &state,
+            hook_fire("session-start", &cwd, sid, "session-start"),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let (ws, proj, _) = state
+            .reader
+            .find_session_scope(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let foreign = state
+            .writer
+            .get_or_create_project(ws, "foreign-hybrid", None)
+            .await
+            .unwrap();
+        insert_user_prompt(&state, session_id, ws, foreign, FOREIGN_PROJECT_SENTINEL).await;
+        process(
+            &state,
+            hook_fire("session-end", &cwd, sid, "session-end"),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let observations = state
+            .reader
+            .observations_for_session(session_id)
+            .await
+            .unwrap();
+        let substantive: Vec<_> = observations
+            .iter()
+            .filter(|observation| {
+                matches!(
+                    observation.kind,
+                    ObservationKind::UserPrompt
+                        | ObservationKind::PreToolUse
+                        | ObservationKind::PostToolUse
+                )
+            })
+            .collect();
+        assert_eq!(substantive.len(), 1);
+        assert_eq!(substantive[0].project_id, foreign);
+        let page = state
+            .reader
+            .page_body_by_ids(ws, proj, &format!("sessions/{session_id}.md"))
+            .await
+            .unwrap()
+            .expect("full-log classification must still write the local page");
+        assert!(!page.body.contains(FOREIGN_PROJECT_SENTINEL));
+    }
+
+    #[tokio::test]
+    async fn hybrid_session_rule_based_fallback_omits_the_foreign_project() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = make_state(&tmp).await;
+        state.consolidator = None;
+        let session_id = SessionId::new();
+        let foreign = state
+            .writer
+            .get_or_create_project(state.workspace_id, "foreign-hybrid", None)
+            .await
+            .unwrap();
+        state
+            .writer
+            .begin_session(NewSession {
+                occurred_at: None,
+                id: session_id,
+                workspace_id: state.workspace_id,
+                project_id: state.project_id,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            })
+            .await
+            .unwrap();
+        insert_user_prompt(
+            &state,
+            session_id,
+            state.workspace_id,
+            state.project_id,
+            LOCAL_PROJECT_SENTINEL,
+        )
+        .await;
+        insert_user_prompt(
+            &state,
+            session_id,
+            state.workspace_id,
+            foreign,
+            FOREIGN_PROJECT_SENTINEL,
+        )
+        .await;
+
+        consolidate_or_synth(
+            &state,
+            session_id,
+            state.workspace_id,
+            state.project_id,
+            AgentKind::ClaudeCode,
+            "pre-compact",
+            ai_memory_core::ActorContext::anonymous(),
+        )
+        .await
+        .unwrap();
+
+        let page = state
+            .reader
+            .page_body_by_ids(
+                state.workspace_id,
+                state.project_id,
+                &format!("sessions/{session_id}.md"),
+            )
+            .await
+            .unwrap()
+            .expect("rule-based fallback page");
+        assert!(page.body.contains(LOCAL_PROJECT_SENTINEL));
+        assert!(!page.body.contains(FOREIGN_PROJECT_SENTINEL));
     }
 
     // Issue #154: event capture must never create or attribute to the

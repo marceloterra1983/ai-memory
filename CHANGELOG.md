@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Fixed hybrid-session compilation so a session page, its auto-handoff, an
+  LLM consolidation prompt, and an auto-improve review include only
+  observations from the scope being written. Observations captured for
+  another project in the same session stay in that project's raw log.
+  (local-20261030; no upstream issue opened)
 - Fixed full-text query preparation so caller text longer than 4 KiB is cut
   on a character boundary before tokenization. MCP, the web UI, and the CLI
   share this cap. Shorter queries are unchanged.

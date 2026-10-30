@@ -140,6 +140,18 @@ pub struct Observation {
     pub created_at: Timestamp,
 }
 
+impl Observation {
+    /// Whether this row was captured in the scope a single-project compiler is writing.
+    ///
+    /// One session id can carry observations from more than one
+    /// `(workspace_id, project_id)`. A page, handoff, or prompt for one project
+    /// includes a row only when both ids match that written scope.
+    #[must_use]
+    pub fn in_written_scope(&self, workspace_id: WorkspaceId, project_id: ProjectId) -> bool {
+        self.workspace_id == workspace_id && self.project_id == project_id
+    }
+}
+
 /// Input for beginning a session row.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NewSession {
@@ -202,5 +214,31 @@ mod tests {
             "PostCompaction".parse::<ObservationKind>().unwrap(),
             ObservationKind::PostCompaction,
         );
+    }
+
+    #[test]
+    fn in_written_scope_is_true_only_when_both_ids_match() {
+        let workspace_id = crate::ids::WorkspaceId::from_slice(&[1u8; 16]).unwrap();
+        let project_id = crate::ids::ProjectId::from_slice(&[2u8; 16]).unwrap();
+        let other_workspace = crate::ids::WorkspaceId::from_slice(&[3u8; 16]).unwrap();
+        let other_project = crate::ids::ProjectId::from_slice(&[4u8; 16]).unwrap();
+        let observation = Observation {
+            id: crate::ids::ObservationId::from_slice(&[5u8; 16]).unwrap(),
+            session_id: crate::ids::SessionId::from_slice(&[6u8; 16]).unwrap(),
+            workspace_id,
+            project_id,
+            kind: ObservationKind::UserPrompt,
+            extension: None,
+            source_event: None,
+            title: "scope check".into(),
+            body: "scope check".into(),
+            importance: 5,
+            created_at: jiff::Timestamp::UNIX_EPOCH,
+        };
+
+        assert!(observation.in_written_scope(workspace_id, project_id));
+        assert!(!observation.in_written_scope(other_workspace, project_id));
+        assert!(!observation.in_written_scope(workspace_id, other_project));
+        assert!(!observation.in_written_scope(other_workspace, other_project));
     }
 }

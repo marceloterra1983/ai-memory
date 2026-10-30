@@ -223,6 +223,15 @@ impl Consolidator {
         }
 
         let (ws, proj) = self.resolve_target(session_id).await?;
+        // Dry-run returns before the prompt. An empty written scope still
+        // refuses first, and rows from another project are not backfilled.
+        let observations: Vec<_> = observations
+            .into_iter()
+            .filter(|observation| observation.in_written_scope(ws, proj))
+            .collect();
+        if observations.is_empty() {
+            return Err(ConsolidatorError::EmptySession(session_id));
+        }
         let agent_kind = self.resolve_agent_origin(session_id).await?;
         let path = PagePath::new(format!("sessions/{session_id}.md"))?;
 
@@ -657,6 +666,14 @@ impl Consolidator {
         // Resolve the target from where the observations landed — see
         // `resolve_target` / `consolidate_session` for the rationale.
         let (ws, proj) = self.resolve_target(session_id).await?;
+        // Same written-scope cut as `consolidate_session`, including dry-run.
+        let observations: Vec<_> = observations
+            .into_iter()
+            .filter(|observation| observation.in_written_scope(ws, proj))
+            .collect();
+        if observations.is_empty() {
+            return Err(ConsolidatorError::EmptySession(session_id));
+        }
         let agent_kind = self.resolve_agent_origin(session_id).await?;
 
         // Preflight admission BEFORE the LLM (see `consolidate_session`). The
@@ -4771,5 +4788,226 @@ mod tests {
             slot_page.body.contains("New focus."),
             "state slots still refresh"
         );
+    }
+
+    const LOCAL_PROJECT_SENTINEL: &str = "LOCAL_PROJECT_SENTINEL";
+    const FOREIGN_PROJECT_SENTINEL: &str = "FOREIGN_PROJECT_SENTINEL";
+
+    /// Records the structured-completion prompt, then returns a fixed page that
+    /// contains neither scope sentinel. The written page is not the assertion.
+    struct HybridScopeLlm {
+        captured: std::sync::Mutex<String>,
+        response: serde_json::Value,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for HybridScopeLlm {
+        fn name(&self) -> &'static str {
+            "hybrid-scope"
+        }
+
+        fn model(&self) -> &str {
+            "hybrid-scope"
+        }
+
+        async fn complete(
+            &self,
+            _request: ChatRequest,
+        ) -> ai_memory_llm::LlmResult<ai_memory_llm::ChatResponse> {
+            unreachable!("consolidation uses structured completion");
+        }
+
+        async fn complete_structured_raw(
+            &self,
+            request: ChatRequest,
+            _schema: serde_json::Value,
+        ) -> ai_memory_llm::LlmResult<serde_json::Value> {
+            let mut text = request.system.unwrap_or_default();
+            for message in &request.messages {
+                text.push('\n');
+                text.push_str(&message.content);
+            }
+            *self.captured.lock().unwrap() = text;
+            Ok(self.response.clone())
+        }
+    }
+
+    fn fixed_consolidation_page() -> serde_json::Value {
+        serde_json::json!({
+            "title": "Written scope",
+            "body_markdown": "Fixed consolidation body.",
+            "tags": [],
+        })
+    }
+
+    fn fixed_consolidation_batch(session: SessionId) -> serde_json::Value {
+        serde_json::json!({
+            "rationale": "Fixed consolidation body.",
+            "updates": [{
+                "path": format!("sessions/{session}.md"),
+                "tier": "episodic",
+                "title": "Written scope",
+                "body_markdown": "Fixed consolidation body.",
+                "tags": []
+            }]
+        })
+    }
+
+    async fn insert_scope_observation(
+        store: &ai_memory_store::Store,
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        body: &str,
+    ) {
+        store
+            .writer
+            .insert_observation(ai_memory_core::Sanitized::new(
+                ai_memory_core::NewObservation {
+                    occurred_at: None,
+                    session_id,
+                    workspace_id,
+                    project_id,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: "scope observation".into(),
+                    body: body.into(),
+                    importance: 5,
+                },
+                &ai_memory_core::Sanitizer::builtin(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    /// Session row frozen on the foreign project; three local observations and
+    /// one foreign one, so the written target is the observation majority.
+    async fn seed_hybrid_consolidation(
+        tmp: &std::path::Path,
+    ) -> (
+        ai_memory_store::Store,
+        Wiki,
+        SessionId,
+        WorkspaceId,
+        ProjectId,
+        ProjectId,
+    ) {
+        let store = ai_memory_store::Store::open(tmp).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let local = store
+            .writer
+            .get_or_create_project(ws, "local-project", None)
+            .await
+            .unwrap();
+        let foreign = store
+            .writer
+            .get_or_create_project(ws, "foreign-project", None)
+            .await
+            .unwrap();
+        let session_id = SessionId::new();
+        store
+            .writer
+            .begin_session(ai_memory_core::NewSession {
+                occurred_at: None,
+                id: session_id,
+                workspace_id: ws,
+                project_id: foreign,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            })
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            insert_scope_observation(&store, session_id, ws, local, LOCAL_PROJECT_SENTINEL).await;
+        }
+        insert_scope_observation(&store, session_id, ws, foreign, FOREIGN_PROJECT_SENTINEL).await;
+        let wiki = Wiki::new(tmp, store.writer.clone()).unwrap();
+        (store, wiki, session_id, ws, local, foreign)
+    }
+
+    fn assert_written_scope_prompt(captured: &str) {
+        assert!(
+            captured.contains(LOCAL_PROJECT_SENTINEL),
+            "the written scope's observation text must reach the prompt"
+        );
+        assert!(
+            !captured.contains(FOREIGN_PROJECT_SENTINEL),
+            "another project's observation text must stay out of the prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_session_consolidation_prompt_keeps_only_the_written_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, wiki, session, ws, local, foreign) =
+            seed_hybrid_consolidation(tmp.path()).await;
+        assert_eq!(
+            store
+                .reader
+                .session_scope_from_observations(session)
+                .await
+                .unwrap(),
+            Some((ws, local)),
+            "the write target is the observation majority, not the session row"
+        );
+        let llm = Arc::new(HybridScopeLlm {
+            captured: std::sync::Mutex::new(String::new()),
+            response: fixed_consolidation_page(),
+        });
+        // Startup ids are the foreign project. A fallback to them would keep
+        // the foreign sentinel and drop the local one.
+        Consolidator::new(
+            store.reader.clone(),
+            store.writer.clone(),
+            wiki,
+            llm.clone(),
+            ws,
+            foreign,
+        )
+        .consolidate_session(
+            session,
+            false,
+            ai_memory_core::ActorContext::anonymous(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_written_scope_prompt(&llm.captured.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn hybrid_session_multi_consolidation_prompt_keeps_only_the_written_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, wiki, session, ws, _local, foreign) =
+            seed_hybrid_consolidation(tmp.path()).await;
+        let llm = Arc::new(HybridScopeLlm {
+            captured: std::sync::Mutex::new(String::new()),
+            response: fixed_consolidation_batch(session),
+        });
+        Consolidator::new(
+            store.reader.clone(),
+            store.writer.clone(),
+            wiki,
+            llm.clone(),
+            ws,
+            foreign,
+        )
+        .consolidate_session_multi(
+            session,
+            false,
+            ai_memory_core::ActorContext::anonymous(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_written_scope_prompt(&llm.captured.lock().unwrap());
     }
 }

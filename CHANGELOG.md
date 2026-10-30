@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Corrected the cargo-deny note for RUSTSEC-2024-0449. `unsafe-libyaml` is
+  pulled by `serde_yaml`, which ships inside `ai-memory-wiki` page
+  frontmatter, not only as a dev-dependency of `ai-memory-core`. The ignore
+  stays. This note does not switch parsers.
+  (local-20261030; no upstream issue opened)
 - Fixed full-text query preparation so caller text longer than 4 KiB is cut
   on a character boundary before tokenization. MCP, the web UI, and the CLI
   share this cap. Shorter queries are unchanged.

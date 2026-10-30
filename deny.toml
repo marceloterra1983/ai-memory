@@ -21,9 +21,13 @@ ignore = [
     # embeddings); no runtime code ships from it. Revisit when candle
     # replaces it upstream.
     "RUSTSEC-2024-0436",
-    # RUSTSEC-2024-0449: `unsafe-libyaml` is unmaintained. Pulled only
-    # by serde_yaml, which is a dev-dependency of ai-memory-core and
-    # ai-memory-wiki; nothing from it ships in the released binary.
+    # RUSTSEC-2024-0449: `unsafe-libyaml` is unmaintained. Pulled by
+    # serde_yaml. In ai-memory-core that is a dev-dependency. In
+    # ai-memory-wiki it is a normal dependency: page frontmatter passes
+    # through it, and ai-memory-cli links that crate, so the library
+    # ships in the binary. The advisory does not describe an exploit
+    # seen in this repository. The ignore stays until the wiki stops
+    # using serde_yaml.
     "RUSTSEC-2024-0449",
     # RUSTSEC-2026-0367/0368/0369: the three `zip` advisories all
     # concern `ZipArchive::extract()` / `ZipStreamReader::extract()`

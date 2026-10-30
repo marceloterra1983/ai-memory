@@ -17,13 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   neutralized to `href="#"`, matching images. Explicit `http://`, `https://`,
   and `mailto:` links stay clickable, and same-origin relative links stay
   scoped to the project.
+  (local-20261030; no upstream issue opened)
 - Fixed the HTML project Recent Activity list so a newer expired page cannot
   take one of the 20 slots. The sidebar and `GET .../pages` still list files
   that remain on disk. Exact page reads of an expired file stay available.
+  (local-20261030; no upstream issue opened)
 - Fixed writer shutdown so dropping the last handle closes the command
   channel. A full queue used to discard `Shutdown` and leave the worker
   blocked in `recv` while `Drop` waited on `join`. Commands already queued
   still run before the thread exits.
+  (local-20261030; no upstream issue opened)
 - Corrected the cargo-deny note for RUSTSEC-2024-0449. `unsafe-libyaml` is
   pulled by `serde_yaml`, which ships inside `ai-memory-wiki` page
   frontmatter, not only as a dev-dependency of `ai-memory-core`. The ignore

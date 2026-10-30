@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Fixed markdown links so a protocol-relative or backslash target is
+  neutralized to `href="#"`, matching images. Explicit `http://`, `https://`,
+  and `mailto:` links stay clickable, and same-origin relative links stay
+  scoped to the project.
+  (local-20261030; no upstream issue opened)
 - Fixed full-text query preparation so caller text longer than 4 KiB is cut
   on a character boundary before tokenization. MCP, the web UI, and the CLI
   share this cap. Shorter queries are unchanged.

@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed the HTML project Recent Activity list so a newer expired page cannot
   take one of the 20 slots. The sidebar and `GET .../pages` still list files
   that remain on disk. Exact page reads of an expired file stay available.
+- Fixed writer shutdown so dropping the last handle closes the command
+  channel. A full queue used to discard `Shutdown` and leave the worker
+  blocked in `recv` while `Drop` waited on `join`. Commands already queued
+  still run before the thread exits.
   (local-20261030; no upstream issue opened)
 - Fixed full-text query preparation so caller text longer than 4 KiB is cut
   on a character boundary before tokenization. MCP, the web UI, and the CLI

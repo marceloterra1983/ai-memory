@@ -782,6 +782,9 @@ pub(crate) enum WriteCmd {
         need: crate::ProjectAccess,
         reply: oneshot::Sender<StoreResult<Result<(), ai_memory_core::AuthzError>>>,
     },
+    // `Drop` closes the channel instead of sending this. The variant stays so
+    // an already-queued `Shutdown` still stops the worker; only tests enqueue it.
+    #[cfg_attr(not(test), allow(dead_code))]
     Shutdown,
 }
 
@@ -792,7 +795,7 @@ pub struct WriterHandle {
 }
 
 struct WriterInner {
-    tx: mpsc::Sender<WriteCmd>,
+    tx: Mutex<Option<mpsc::Sender<WriteCmd>>>,
     join: Mutex<Option<JoinHandle<()>>>,
     /// Per-path mutex shared by every clone of this handle. Wiki instances that
     /// share the writer take it around the file snapshot, conditional upsert,
@@ -813,7 +816,7 @@ impl WriterHandle {
 
         Self {
             inner: Arc::new(WriterInner {
-                tx,
+                tx: Mutex::new(Some(tx)),
                 join: Mutex::new(Some(handle)),
                 page_locks: Mutex::new(HashMap::new()),
             }),
@@ -2331,10 +2334,16 @@ impl WriterHandle {
     /// Instantaneous write-queue depth as `(queued, capacity)`. A queue
     /// pinned near capacity means writers are being backpressured — the
     /// wedged-writer signal `status` surfaces (2.0 item 7).
+    ///
+    /// Returns `(0, 0)` once the last handle has taken the sender.
     #[must_use]
     pub fn queue_depth(&self) -> (usize, usize) {
-        let max = self.inner.tx.max_capacity();
-        (max.saturating_sub(self.inner.tx.capacity()), max)
+        let guard = self.inner.tx.lock().expect("writer sender mutex poisoned");
+        let Some(tx) = guard.as_ref() else {
+            return (0, 0);
+        };
+        let max = tx.max_capacity();
+        (max.saturating_sub(tx.capacity()), max)
     }
 
     /// Record a completed cross-session ("experience") pass for a scope.
@@ -3285,17 +3294,24 @@ impl WriterHandle {
     }
 
     async fn send(&self, cmd: WriteCmd) -> StoreResult<()> {
-        self.inner
+        let tx = self
+            .inner
             .tx
-            .send(cmd)
-            .await
-            .map_err(|_| StoreError::WriterClosed)
+            .lock()
+            .expect("writer sender mutex poisoned")
+            .as_ref()
+            .cloned()
+            .ok_or(StoreError::WriterClosed)?;
+        tx.send(cmd).await.map_err(|_| StoreError::WriterClosed)
     }
 }
 
 impl Drop for WriterInner {
     fn drop(&mut self) {
-        let _ = self.tx.try_send(WriteCmd::Shutdown);
+        // Closing the channel is what unblocks `recv`. `try_send(Shutdown)`
+        // is discarded when the queue is full, and `join` would then wait
+        // forever. Commands already queued still run.
+        drop(self.tx.lock().expect("writer sender mutex poisoned").take());
         if let Some(handle) = self.join.lock().expect("writer join mutex poisoned").take() {
             let _ = handle.join();
         }
@@ -4608,16 +4624,21 @@ mod tests {
         writer: &WriterHandle,
         name: &str,
     ) -> oneshot::Receiver<StoreResult<WorkspaceId>> {
-        let (tx, rx) = oneshot::channel();
-        writer
+        let (reply, rx) = oneshot::channel();
+        let tx = writer
             .inner
             .tx
-            .send(WriteCmd::GetOrCreateWorkspace {
-                name: name.to_owned(),
-                reply: tx,
-            })
-            .await
-            .expect("writer channel closed while enqueueing");
+            .lock()
+            .expect("writer sender mutex poisoned")
+            .as_ref()
+            .expect("writer channel closed while enqueueing")
+            .clone();
+        tx.send(WriteCmd::GetOrCreateWorkspace {
+            name: name.to_owned(),
+            reply,
+        })
+        .await
+        .expect("writer channel closed while enqueueing");
         rx
     }
 
@@ -4738,9 +4759,9 @@ mod tests {
             .unwrap();
     }
 
-    /// Dropping the last handle queues `Shutdown` behind the pending
-    /// commands and joins the thread: every already-enqueued command is
-    /// answered, and the join returning proves the thread exited (no hang).
+    /// Dropping the last handle closes the command channel and joins the
+    /// thread: every already-enqueued command is answered, and the join
+    /// returning proves the thread exited (no hang).
     #[tokio::test]
     async fn drop_completes_pending_commands_and_joins_thread() {
         let tmp = TempDir::new().unwrap();
@@ -4754,7 +4775,7 @@ mod tests {
             pending.push(enqueue_workspace(&writer, &format!("drain-{i:02}")).await);
         }
         // Joins the writer thread inside `Drop for WriterInner`; returns
-        // only after the queue (including Shutdown) was drained.
+        // only after the queued commands drain and the channel closes.
         drop(writer);
 
         for rx in pending {
@@ -4844,16 +4865,21 @@ mod tests {
         let writer = store.writer.clone();
         drop(store);
 
-        writer
+        let tx = writer
             .inner
             .tx
-            .send(WriteCmd::Shutdown)
+            .lock()
+            .expect("writer sender mutex poisoned")
+            .as_ref()
+            .expect("writer channel closed before Shutdown")
+            .clone();
+        tx.send(WriteCmd::Shutdown)
             .await
             .expect("writer channel closed before Shutdown");
 
-        // Sending only enqueues Shutdown. Wait for receiver closure to make
-        // this a post-shutdown probe instead of racing the actor's teardown.
-        tokio::time::timeout(std::time::Duration::from_secs(10), writer.inner.tx.closed())
+        // Sending only enqueues Shutdown. `closed` waits for the receiver to
+        // drop, so this stays a post-shutdown probe instead of racing teardown.
+        tokio::time::timeout(std::time::Duration::from_secs(10), tx.closed())
             .await
             .expect("writer did not close after Shutdown");
         let err = tokio::time::timeout(
@@ -4866,6 +4892,144 @@ mod tests {
         assert!(
             matches!(err, StoreError::WriterClosed),
             "expected WriterClosed, got {err:?}"
+        );
+    }
+
+    /// A full queue must not pin `Drop`: the worker is held inside SQL, the
+    /// channel is filled to capacity, and the last handle is dropped on a
+    /// plain thread. `recv_timeout` fails if `join` waits forever.
+    #[tokio::test]
+    async fn drop_unblocks_when_the_queue_is_full() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let writer = store.writer.clone();
+        let db_path = store.db_path().to_owned();
+
+        let locker = Connection::open(&db_path).unwrap();
+        locker.busy_timeout(Duration::from_secs(30)).unwrap();
+        if let Err(exclusive) = locker.execute_batch("BEGIN EXCLUSIVE") {
+            locker
+                .execute_batch("BEGIN IMMEDIATE")
+                .unwrap_or_else(|immediate| {
+                    panic!(
+                        "could not lock the database: exclusive={exclusive}; immediate={immediate}"
+                    )
+                });
+        }
+
+        // `GetOrCreateWorkspace` reads, then writes. SQLite skips the busy
+        // handler on that lock upgrade and returns SQLITE_BUSY at once, so the
+        // worker would not stay inside the command. `ClaimSessionConsolidation`
+        // starts with `BEGIN IMMEDIATE`, which waits out `busy_timeout`.
+        let (block_reply, mut block_rx) = oneshot::channel();
+        let block_tx = writer
+            .inner
+            .tx
+            .lock()
+            .expect("writer sender mutex poisoned")
+            .as_ref()
+            .expect("writer channel closed while enqueueing the blocker")
+            .clone();
+        block_tx
+            .send(WriteCmd::ClaimSessionConsolidation {
+                now: 0,
+                stale_before: 0,
+                reply: block_reply,
+            })
+            .await
+            .expect("writer channel closed while enqueueing the blocker");
+        drop(block_tx);
+        let dequeued = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let (queued, _) = writer.queue_depth();
+            if queued == 0 {
+                break;
+            }
+            if tokio::time::Instant::now() >= dequeued {
+                panic!("worker did not dequeue the command blocked on the SQL lock");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // The command has left the queue and must still be inside SQL.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        match block_rx.try_recv() {
+            Err(oneshot::error::TryRecvError::Empty) => {}
+            Ok(result) => panic!("SQL lock did not hold the writer: {result:?}"),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                panic!("writer dropped the blocking reply")
+            }
+        }
+
+        let mut pending = Vec::new();
+
+        let (_, capacity) = writer.queue_depth();
+        assert!(
+            capacity > 0,
+            "writer sender was taken before the queue filled"
+        );
+        let mut n = 1usize;
+        while writer.queue_depth().0 < capacity {
+            let (queued, cap) = writer.queue_depth();
+            if queued >= cap {
+                break;
+            }
+            pending.push(enqueue_workspace(&writer, &format!("drain-full-{n:04}")).await);
+            n += 1;
+            assert!(
+                n <= cap + 1,
+                "enqueued past capacity without filling the queue: queued={queued} capacity={cap}"
+            );
+        }
+        let (queued, cap) = writer.queue_depth();
+        assert!(cap > 0, "writer sender disappeared while filling the queue");
+        assert_eq!(queued, cap, "queue must be at capacity before drop");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = started_tx.send(());
+            drop(writer);
+            drop(store);
+            let _ = done_tx.send(());
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("drop thread did not start");
+        // `send` on the start channel returns before `drop`. Keep the SQL
+        // lock until this thread has entered `join` with the queue still full.
+        thread::sleep(Duration::from_millis(100));
+        locker.execute_batch("ROLLBACK").unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("writer drop did not return with a full queue");
+
+        let claimed = tokio::time::timeout(Duration::from_secs(10), block_rx)
+            .await
+            .expect("blocking command was not answered before the writer stopped")
+            .expect("blocking reply dropped")
+            .expect("blocking command must finish once the SQL lock is released");
+        assert!(claimed.is_none(), "no consolidation job was queued");
+
+        let mut committed = 0usize;
+        for rx in pending {
+            tokio::time::timeout(Duration::from_secs(10), rx)
+                .await
+                .expect("pending command was not answered before the writer stopped")
+                .expect("reply oneshot dropped")
+                .expect("pending command must have committed");
+            committed += 1;
+        }
+        let conn = Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspaces WHERE name LIKE 'drain-full-%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count as usize, committed,
+            "queued commands must have committed"
         );
     }
 }

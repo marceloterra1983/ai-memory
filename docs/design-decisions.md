@@ -253,7 +253,7 @@ Project resolution chain: explicit param → server's default → cwd-based heur
   `log.md` line before that background task finishes. Indexes still commit in
   the same transaction as the data; no detached indexing task runs after the
   write ack (basic-memory #763/#578/#839).
-- **Migrations**: `sqlx::migrate!` runs on startup; never inline DDL (basic-memory #727).
+- **Migrations**: `refinery` runs on startup; never inline DDL (basic-memory #727).
 - **Schema versioning**: one source of truth for the schema; derived clients/docs. No "update 7 files" checklists (agentmemory AGENTS.md smell).
 - **Backup/move**: `ai-memory export <dir>` dumps wiki/ + sqlite snapshot. `ai-memory import <dir>` consumes. Default data dir is portable. Optional: `auto_git_commit = true` config flag → commits the wiki directory on every `memory_lint` run.
 - **Self-healing**: startup checks (`memory_diagnose`): vector dim/provider drift, FTS index corruption, orphan pages, broken links, zombie sessions. `memory_heal` auto-fixes the safe subset.

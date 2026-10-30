@@ -59,8 +59,9 @@ ai-memory is what's on the other side of those walls.
   episodic notes go cold they can be compacted down to their durable facts
   (file paths, error codes, decisions) instead of dropped, near-duplicates
   collapse into one, and likely contradictions get flagged — all with **zero
-  API calls**. Nothing is hard-deleted: the original stays in git and the
-  version chain (`restore-page` brings it back). Access-weighted retention is
+  API calls**. A TTL forget sweep hard-deletes the file and its rows even
+  when the page is pinned, and decay eviction removes the markdown;
+  `restore-page` only recovers a git revision. Access-weighted retention is
   always on because it can only ever keep memory *longer*; the parts that
   rewrite or drop content (compaction, dedup, per-tier curves) stay off by
   default until you turn them on.
@@ -490,7 +491,7 @@ diagram, crate breakdown, schema notes, and invariants.
 | [`docs/security.md`](docs/security.md) | The full security model. |
 | [`docs/support-matrix.md`](docs/support-matrix.md) | The full agent/platform matrix with notes. |
 | [`docs/use-cases.md`](docs/use-cases.md) | Scenario walkthroughs. |
-| [`DATA_HANDLING.md`](DATA_HANDLING.md) | **Data-flow reference for security/legal review.** What's stored, what's local-only, the two opt-in external paths, and how deletion/retention work. |
+| [`DATA_HANDLING.md`](DATA_HANDLING.md) | **Data-flow reference for security/legal review.** What's stored, what's local-only, the four opt-in external paths, and how deletion/retention work. |
 | [`docs/sso.md`](docs/sso.md) | Enterprise identity: the OIDC device-auth flow, its scope, and how to front the server with an OIDC-aware gateway. |
 | [`docs/airgapped-install.md`](docs/airgapped-install.md) | Offline/air-gapped install: self-contained build, checksum-verified release binaries, and offline local embedding models. |
 | [`docs/MIGRATION-2.0.md`](docs/MIGRATION-2.0.md) | Upgrading an existing store to 2.0: the backup-gated automatic migration and how to restore. |

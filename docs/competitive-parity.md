@@ -166,8 +166,9 @@ implemented without a separate decision.** Ordered by leverage.
    belief-strength confidence, and the LLM dream pass — audited row-by-row in
    the borrowed-ideas table above; the design of record is
    [`design-memory-aging.md`](design-memory-aging.md).
-   **Still unshipped:** MCP tool behavior hints
-   (readOnly/destructive/idempotent) on the 23-tool surface; typed-edge **rank**
+   `readOnlyHint`, `destructiveHint`, and `openWorldHint` shipped on all 23
+   tools; `idempotentHint` was left unset on purpose.
+   **Still unshipped:** typed-edge **rank**
    weighting and a `contradicts` authority cap (A5 flags, it doesn't yet rank);
    a read-only graph visualization in `/web`; a first-class TS SDK story for
    ecosystem parity.

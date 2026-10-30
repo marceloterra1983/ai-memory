@@ -42,9 +42,11 @@ canonicalize accidental aliases without changing published commits.
 ## Required gates before push/merge
 
 All of these must pass before push/merge. CI requires the dependency-policy
-checks; `bin/release` enforces formatting, diff, lint and tests, but currently
-reports dependency-policy failures as warnings for operator review. The build
-is self-contained, so none of them needs an environment variable.
+checks. `bin/release` enforces formatting, diff, lint and tests, and treats
+`cargo deny check` as blocking when installed; a missing `cargo-deny` is
+reported as a skip. Its `cargo audit` step remains an explicit warning for
+operator review. The build is self-contained, so none of them needs an
+environment variable.
 
 ```bash
 cargo fmt --all -- --check

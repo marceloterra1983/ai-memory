@@ -113,8 +113,11 @@ operator action, both on by default:
   tombstones after `[decay] hard_delete_after_days` (default 180). Semantic,
   procedural and pinned pages are exempt, and raw observations are kept
   (`observation_retention_days = 0`).
-- **TTL pages.** A page written with `expires_at` is hidden after its expiry
-  and hard-deleted by the next forget sweep; a TTL outranks `pinned`.
+- **TTL pages.** After `expires_at`, search, briefing, GET recent, and the
+  HTML Recent Activity column hide the page. `memory_read_page` still reads
+  the markdown from disk and does not consult `expires_at`; `list_pages`, the
+  sidebar, and GET .../pages keep listing the file. The next forget sweep
+  hard-deletes that file and its rows even when the page is pinned.
 
 Everything else persists until removed. Deletion is filesystem-level: removing
 the data directory removes everything in it. For scoped deletion, a per-project

@@ -1068,13 +1068,14 @@ fn codex_upsert_mcp_server(
     // "approve memory_briefing?" …) which makes the MCP unusable
     // for an auto-capture workflow. The valid TOML values per
     // Codex's `AppToolApproval` enum are "auto" / "prompt" /
-    // "approve" — `approve` means "no prompt, just run it". ai-
-    // memory's surface is dominantly read-only (query, recent,
-    // status, briefing, explore); the few writes (consolidate,
-    // forget_sweep) are tagged `destructiveHint: true` upstream
-    // so any agent that wants to gate THOSE specifically can
-    // override per-tool — see Codex's `[mcp_servers.X.tools]`
-    // map.
+    // "approve" — `approve` means "no prompt, just run it". The
+    // server marks `destructiveHint: true` only on
+    // `memory_forget_sweep`, `memory_delete_page`,
+    // `memory_consolidate`, `memory_auto_improve`,
+    // `memory_handoff_cancel`, and `memory_message_cancel`; every
+    // other tool declares `readOnlyHint` or `destructiveHint: false`.
+    // An agent that wants to gate those six can override per-tool
+    // — see Codex's `[mcp_servers.X.tools]` map.
     server["default_tools_approval_mode"] = value("approve");
     if let Some(b) = bearer_header_value(args.auth_token.as_deref()) {
         let mut headers = Table::new();

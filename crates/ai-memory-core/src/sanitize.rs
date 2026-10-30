@@ -355,9 +355,13 @@ impl Sanitized<NewObservation> {
     /// same as the body.
     #[must_use]
     pub fn new(mut obs: NewObservation, sanitizer: &Sanitizer) -> Self {
-        obs.title = truncate_for_title(&sanitizer.scrub(&obs.title));
-        obs.body =
-            truncate_utf8_bytes_head_tail(&sanitizer.scrub(&obs.body), OBSERVATION_BODY_MAX_BYTES);
+        obs.title = scrub_then_bound(&obs.title, TextCeiling::Title, || sanitizer).into_owned();
+        obs.body = scrub_then_bound(
+            &obs.body,
+            TextCeiling::HeadTail(OBSERVATION_BODY_MAX_BYTES),
+            || sanitizer,
+        )
+        .into_owned();
         Self(obs)
     }
 }
@@ -473,6 +477,96 @@ pub fn truncate_utf8_bytes_head_tail(input: &str, max: usize) -> String {
     output.push_str(&input[..head_end]);
     output.push_str(&format!("\n...[truncated {omitted} bytes]...\n"));
     output.push_str(&input[tail_start..]);
+    output
+}
+
+/// How far a scrubbed string may extend, and which marker the cut keeps whole.
+///
+/// The ceiling is applied only after [`Sanitizer::scrub`]. A caller that used
+/// to truncate first can pass the same numeric cap and still redact a secret
+/// that used to be sliced below its pattern's minimum length.
+#[derive(Debug, Clone, Copy)]
+pub enum TextCeiling {
+    /// At most 80 displayed characters, with an ellipsis inside the cap.
+    Title,
+    /// At most `max` UTF-8 bytes, with an ellipsis inside the cap.
+    Ellipsis(usize),
+    /// Head and tail, with the `[truncated N bytes]` marker between them.
+    HeadTail(usize),
+    /// Cut on a char boundary and append `marker`, which may extend past `max`.
+    Append {
+        /// Byte budget for the scrubbed text, not counting `marker`.
+        max: usize,
+        /// Suffix inserted whole after the cut.
+        marker: &'static str,
+    },
+    /// Cut on a char boundary and add no marker.
+    Cut(usize),
+    /// Leave text at or under `max` bytes untouched. Otherwise [`Self::Ellipsis`].
+    ///
+    /// The sanitizer factory is not called when the text already fits, so a
+    /// spool path can avoid compiling patterns for an in-cap field.
+    EllipsisWhenOver(usize),
+    /// Leave text at or under `max` bytes untouched. Otherwise [`Self::Cut`].
+    ///
+    /// Same factory rule as [`Self::EllipsisWhenOver`].
+    CutWhenOver(usize),
+}
+
+/// Scrub `input`, then apply `ceiling`.
+///
+/// Returns a borrow of `input` only when a `WhenOver` ceiling leaves the bytes
+/// untouched. Every other ceiling returns an owned string, and the factory
+/// runs only when a scrub is actually required.
+#[must_use]
+pub fn scrub_then_bound<'a, S>(
+    input: &'a str,
+    ceiling: TextCeiling,
+    sanitizer: impl FnOnce() -> S,
+) -> std::borrow::Cow<'a, str>
+where
+    S: std::borrow::Borrow<Sanitizer>,
+{
+    if let TextCeiling::EllipsisWhenOver(max) | TextCeiling::CutWhenOver(max) = ceiling
+        && input.len() <= max
+    {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    let sanitizer = sanitizer();
+    let scrubbed = sanitizer.borrow().scrub(input);
+    std::borrow::Cow::Owned(match ceiling {
+        TextCeiling::Title => truncate_for_title(&scrubbed),
+        TextCeiling::Ellipsis(max) | TextCeiling::EllipsisWhenOver(max) => {
+            truncate_utf8_bytes(&scrubbed, max)
+        }
+        TextCeiling::HeadTail(max) => truncate_utf8_bytes_head_tail(&scrubbed, max),
+        TextCeiling::Append { max, marker } => append_after_cut(&scrubbed, max, marker),
+        TextCeiling::Cut(max) | TextCeiling::CutWhenOver(max) => cut_utf8(&scrubbed, max),
+    })
+}
+
+fn cut_utf8(input: &str, max: usize) -> String {
+    if input.len() <= max {
+        return input.to_string();
+    }
+    let mut end = max;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    input[..end].to_string()
+}
+
+fn append_after_cut(input: &str, max: usize, marker: &str) -> String {
+    if input.len() <= max {
+        return input.to_string();
+    }
+    let mut end = max;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut output = String::with_capacity(end + marker.len());
+    output.push_str(&input[..end]);
+    output.push_str(marker);
     output
 }
 
@@ -1175,5 +1269,95 @@ mod tests {
             let out = s().scrub(raw);
             assert_eq!(out, raw, "must be left alone: {raw}");
         }
+    }
+
+    fn secret() -> String {
+        format!("sk-{}", "A".repeat(32))
+    }
+
+    #[test]
+    fn in_cap_text_does_not_build_a_sanitizer() {
+        let secret = secret();
+        let out = scrub_then_bound(
+            &secret,
+            TextCeiling::CutWhenOver(secret.len()),
+            || -> &Sanitizer { panic!("in-cap text must not scrub") },
+        );
+        assert_eq!(out.as_ref(), secret);
+    }
+
+    #[test]
+    fn over_cap_cut_redacts_before_the_ceiling_and_keeps_the_marker_text() {
+        let secret = secret();
+        let input = format!("{secret} tail");
+        let out = scrub_then_bound(&input, TextCeiling::CutWhenOver(secret.len()), s);
+        assert!(
+            !out.contains("sk-"),
+            "a ceiling inside the token must not leave a fragment: {out}"
+        );
+        assert!(
+            out.contains("[REDACTED:api_key]"),
+            "the redaction marker must survive intact: {out}"
+        );
+    }
+
+    #[test]
+    fn ellipsis_ceiling_redacts_a_token_shorter_than_its_pattern_when_cut_first() {
+        let secret = secret();
+        let out = scrub_then_bound(&secret, TextCeiling::Ellipsis(12), s);
+        assert!(!out.contains("sk-"), "{out}");
+        assert!(out.len() <= 12, "{out}");
+        assert_eq!(out.as_ref(), truncate_utf8_bytes(&s().scrub(&secret), 12));
+    }
+
+    #[test]
+    fn head_tail_keeps_its_truncation_marker_after_redaction() {
+        let input = format!("{}{}{}", secret(), ".".repeat(80), "T".repeat(80));
+        let out = scrub_then_bound(&input, TextCeiling::HeadTail(128), s);
+        assert!(!out.contains("sk-"), "{out}");
+        assert!(out.contains("[REDACTED:api_key]"), "{out}");
+        assert!(
+            out.contains("\n...[truncated ") && out.contains(" bytes]...\n"),
+            "truncation marker must stay whole: {out}"
+        );
+        assert!(out.len() <= 128, "{}", out.len());
+    }
+
+    #[test]
+    fn append_ceiling_adds_the_marker_whole_after_redaction() {
+        let input = format!("{}{}", secret(), ".".repeat(80));
+        let out = scrub_then_bound(
+            &input,
+            TextCeiling::Append {
+                max: 32,
+                marker: "\n[truncated by ai-memory]",
+            },
+            s,
+        );
+        assert!(!out.contains("sk-"), "{out}");
+        assert!(out.ends_with("\n[truncated by ai-memory]"), "{out}");
+    }
+
+    #[test]
+    fn title_ceiling_redacts_before_the_character_cap() {
+        let input = format!("{} {}", "x".repeat(70), secret());
+        let out = scrub_then_bound(&input, TextCeiling::Title, s);
+        assert!(!out.contains("sk-"), "{out}");
+        assert!(out.contains("REDACT"), "{out}");
+        assert!(out.chars().count() <= 80, "{out}");
+    }
+
+    #[test]
+    fn ellipsis_when_over_matches_scrub_then_truncate_only_past_the_cap() {
+        let short = "ordinary context";
+        let out = scrub_then_bound(
+            short,
+            TextCeiling::EllipsisWhenOver(64),
+            || -> &Sanitizer { panic!("in-cap text must not scrub") },
+        );
+        assert_eq!(out.as_ref(), short);
+        let long = format!("{}{}", secret(), "Y".repeat(40));
+        let out = scrub_then_bound(&long, TextCeiling::EllipsisWhenOver(24), s);
+        assert_eq!(out.as_ref(), truncate_utf8_bytes(&s().scrub(&long), 24));
     }
 }

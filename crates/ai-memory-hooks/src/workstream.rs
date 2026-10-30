@@ -11,7 +11,7 @@ use ai_memory_core::{
     LinkManagedRunRequest, ListManagedWorkstreamsRequest, ManagedRunContextResponse, ManagedRunId,
     ManagedRunStatus, ManagedWorkstreamSummary, NewWorkstreamEvent, PrepareManagedRunRequest,
     PrepareManagedRunResponse, RenameManagedWorkstreamRequest, RenamedManagedWorkstream, Sanitizer,
-    WorkstreamEventKind, WorkstreamId,
+    TextCeiling, WorkstreamEventKind, WorkstreamId, scrub_then_bound,
 };
 use ai_memory_store::{
     FinishWorkstreamRun, PrepareWorkstreamRun, ReaderPool, RenameWorkstream, ScopeResolutionError,
@@ -927,8 +927,15 @@ fn sanitize_events(
         if event.event_id.trim().is_empty() || event.event_id.len() > MAX_EVENT_ID_BYTES {
             return Err("invalid workstream event id".to_string());
         }
-        event.content = sanitizer.scrub(&event.content);
-        truncate_owned(&mut event.content, MAX_EVENT_CONTENT_BYTES);
+        event.content = scrub_then_bound(
+            &event.content,
+            TextCeiling::Append {
+                max: MAX_EVENT_CONTENT_BYTES,
+                marker: "\n[truncated by ai-memory]",
+            },
+            || sanitizer,
+        )
+        .into_owned();
         if let Some(role) = &event.role
             && (role.len() > 32
                 || !role
@@ -975,8 +982,15 @@ fn append_boundary_events(
     if checkpoint.is_empty() {
         checkpoint.push_str("No Git repository checkpoint was available.");
     }
-    checkpoint = sanitizer.scrub(&checkpoint);
-    truncate_owned(&mut checkpoint, MAX_EVENT_CONTENT_BYTES);
+    checkpoint = scrub_then_bound(
+        &checkpoint,
+        TextCeiling::Append {
+            max: MAX_EVENT_CONTENT_BYTES,
+            marker: "\n[truncated by ai-memory]",
+        },
+        || sanitizer,
+    )
+    .into_owned();
     request.events.push(NewWorkstreamEvent {
         event_id: format!("managed-run:{run_id}:checkpoint"),
         agent,
@@ -993,8 +1007,15 @@ fn append_boundary_events(
         for loss in &request.losses {
             let _ = writeln!(content, "- {loss}");
         }
-        content = sanitizer.scrub(&content);
-        truncate_owned(&mut content, MAX_EVENT_CONTENT_BYTES);
+        content = scrub_then_bound(
+            &content,
+            TextCeiling::Append {
+                max: MAX_EVENT_CONTENT_BYTES,
+                marker: "\n[truncated by ai-memory]",
+            },
+            || sanitizer,
+        )
+        .into_owned();
         request.events.push(NewWorkstreamEvent {
             event_id: format!("managed-run:{run_id}:losses"),
             agent,
@@ -1061,18 +1082,6 @@ fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     builder.mode(0o700);
     builder.create(path)
-}
-
-fn truncate_owned(value: &mut String, max: usize) {
-    if value.len() <= max {
-        return;
-    }
-    let mut end = max;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value.truncate(end);
-    value.push_str("\n[truncated by ai-memory]");
 }
 
 #[cfg(test)]

@@ -2940,13 +2940,22 @@ async fn handle_send_message(
         };
 
     let sanitizer = ai_memory_core::Sanitizer::builtin();
-    let body =
-        ai_memory_core::truncate_utf8_bytes(&sanitizer.scrub(&req.body), MESSAGE_BODY_MAX_CHARS);
+    let body = ai_memory_core::scrub_then_bound(
+        &req.body,
+        ai_memory_core::TextCeiling::Ellipsis(MESSAGE_BODY_MAX_CHARS),
+        || &sanitizer,
+    )
+    .into_owned();
     let subject = req
         .subject
         .as_deref()
         .map(|s| {
-            ai_memory_core::truncate_utf8_bytes(&sanitizer.scrub(s), MESSAGE_SUBJECT_MAX_CHARS)
+            ai_memory_core::scrub_then_bound(
+                s,
+                ai_memory_core::TextCeiling::Ellipsis(MESSAGE_SUBJECT_MAX_CHARS),
+                || &sanitizer,
+            )
+            .into_owned()
         })
         .filter(|s| !s.is_empty());
 

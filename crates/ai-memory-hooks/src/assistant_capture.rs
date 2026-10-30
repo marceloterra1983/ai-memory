@@ -13,7 +13,7 @@
 //! opt-in path that re-introduces a sanitized, capped excerpt: the client-side
 //! [`transform_for_client`] and the server-side [`apply_assistant_backstop`].
 
-use ai_memory_core::{AgentKind, Sanitizer, truncate_utf8_bytes};
+use ai_memory_core::{AgentKind, Sanitizer, TextCeiling, scrub_then_bound};
 use serde::{Deserialize, Serialize};
 
 use crate::payload::{HookEnvelope, HookEvent};
@@ -134,8 +134,12 @@ pub fn transform_for_client(
             captured: false,
         };
     };
-    let scrubbed = Sanitizer::builtin().scrub(&value);
-    let excerpt = truncate_utf8_bytes(&scrubbed, ASSISTANT_EXCERPT_MAX_BYTES);
+    let excerpt = scrub_then_bound(
+        &value,
+        TextCeiling::Ellipsis(ASSISTANT_EXCERPT_MAX_BYTES),
+        Sanitizer::builtin,
+    )
+    .into_owned();
     if excerpt.is_empty() {
         return ClientAssistantTransform {
             changed,
@@ -195,10 +199,14 @@ pub fn apply_assistant_backstop(
         // a forged or buggy client that satisfies the gates cannot inject an
         // oversized Stop body (the request body limit alone is 10 MiB). Almost
         // always a no-op, since a well-behaved client already truncated.
-        env.body_excerpt = Some(truncate_utf8_bytes(
-            &sanitizer.scrub(&protocol.excerpt),
-            ASSISTANT_EXCERPT_MAX_BYTES,
-        ));
+        env.body_excerpt = Some(
+            scrub_then_bound(
+                &protocol.excerpt,
+                TextCeiling::Ellipsis(ASSISTANT_EXCERPT_MAX_BYTES),
+                || sanitizer,
+            )
+            .into_owned(),
+        );
     }
 }
 

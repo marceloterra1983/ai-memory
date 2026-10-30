@@ -1,6 +1,5 @@
 //! Incremental, read-only extraction from native harness session stores.
 
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
@@ -8,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ai_memory_core::{
-    AgentKind, MANAGED_WORKSTREAM_PACKET_MARKER, NewWorkstreamEvent, Sanitizer, WorkstreamEventKind,
+    AgentKind, MANAGED_WORKSTREAM_PACKET_MARKER, NewWorkstreamEvent, Sanitizer, TextCeiling,
+    WorkstreamEventKind, scrub_then_bound,
 };
 use anyhow::{Context as _, Result, anyhow};
 use rusqlite::{Connection, OpenFlags, params};
@@ -2247,14 +2247,14 @@ fn push_event(
     if content.trim().is_empty() {
         return;
     }
-    // The server needs complete secret delimiters; scrub before a local cap
-    // can remove them, leaving uncapped events for its configured sanitizer.
-    let content = if content.len() > MAX_EVENT_BYTES {
-        Cow::Owned(Sanitizer::builtin().scrub(content))
-    } else {
-        Cow::Borrowed(content)
-    };
-    let content = truncate_utf8(&content, MAX_EVENT_BYTES);
+    // The server scrubs in-cap events itself. Over the cap, scrub before the
+    // cut so a secret delimiter is not sliced off, and do not compile the
+    // built-in patterns unless that cut is required.
+    let content = scrub_then_bound(
+        content,
+        TextCeiling::CutWhenOver(MAX_EVENT_BYTES),
+        Sanitizer::builtin,
+    );
     let seed = format!(
         "{}\0{session}\0{record_id}\0{block}\0{}\0{content}",
         agent.as_str(),
@@ -2267,7 +2267,7 @@ fn push_event(
         source_record_id: Some(record_id.to_string()),
         kind,
         role: role.map(str::to_string),
-        content: content.to_string(),
+        content: content.into_owned(),
         occurred_at,
         metadata,
     });
@@ -3531,17 +3531,6 @@ fn value_text(value: &Value) -> String {
 
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
-}
-
-fn truncate_utf8(value: &str, max: usize) -> &str {
-    if value.len() <= max {
-        return value;
-    }
-    let mut end = max;
-    while !value.is_char_boundary(end) {
-        end -= 1
-    }
-    &value[..end]
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {

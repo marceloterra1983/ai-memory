@@ -1,7 +1,8 @@
 //! Wire envelope received on `POST /hook`.
 
 use ai_memory_core::{
-    AgentKind, OBSERVATION_BODY_MAX_BYTES, ObservationKind, Sanitizer, truncate_utf8_bytes,
+    AgentKind, OBSERVATION_BODY_MAX_BYTES, ObservationKind, Sanitizer, TextCeiling,
+    scrub_then_bound, truncate_utf8_bytes,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1056,7 +1057,12 @@ fn best_body_excerpt(
 ) -> Option<String> {
     match event {
         HookEvent::UserPrompt => extract_content(raw, &["prompt", "message", "text"]).map(|body| {
-            truncate_utf8_bytes(&sanitizer.scrub(&body), USER_PROMPT_EXCERPT_MAX_BYTES)
+            scrub_then_bound(
+                &body,
+                TextCeiling::Ellipsis(USER_PROMPT_EXCERPT_MAX_BYTES),
+                || sanitizer,
+            )
+            .into_owned()
         }),
         HookEvent::PostToolUse => {
             let tool = extract_string(raw, &["tool", "tool_name", "name"])
@@ -1074,10 +1080,20 @@ fn best_body_excerpt(
             ))
         }
         HookEvent::Notification => extract_content(raw, &["message", "text"]).map(|body| {
-            truncate_utf8_bytes(&sanitizer.scrub(&body), NOTIFICATION_EXCERPT_MAX_BYTES)
+            scrub_then_bound(
+                &body,
+                TextCeiling::Ellipsis(NOTIFICATION_EXCERPT_MAX_BYTES),
+                || sanitizer,
+            )
+            .into_owned()
         }),
         HookEvent::PostCompaction => extract_content(raw, &["summary"]).map(|body| {
-            truncate_utf8_bytes(&sanitizer.scrub(&body), POST_COMPACTION_EXCERPT_MAX_BYTES)
+            scrub_then_bound(
+                &body,
+                TextCeiling::Ellipsis(POST_COMPACTION_EXCERPT_MAX_BYTES),
+                || sanitizer,
+            )
+            .into_owned()
         }),
         _ => None,
     }
@@ -1098,7 +1114,10 @@ fn first_line(s: &str) -> String {
 }
 
 fn truncate_excerpt(s: &str, sanitizer: &Sanitizer) -> String {
-    truncate_utf8_bytes(&sanitizer.scrub(s), TOOL_EXCERPT_MAX_BYTES)
+    scrub_then_bound(s, TextCeiling::Ellipsis(TOOL_EXCERPT_MAX_BYTES), || {
+        sanitizer
+    })
+    .into_owned()
 }
 
 /// Scrub and cap oversized core lifecycle body fields before the native hook
@@ -1169,9 +1188,12 @@ fn cap_object_fields(
         let Some(text) = value_to_text(field) else {
             continue;
         };
-        if text.len() > max_bytes {
-            *field =
-                serde_json::Value::String(truncate_utf8_bytes(&sanitizer.scrub(&text), max_bytes));
+        if let std::borrow::Cow::Owned(bounded) =
+            scrub_then_bound(&text, TextCeiling::EllipsisWhenOver(max_bytes), || {
+                sanitizer
+            })
+        {
+            *field = serde_json::Value::String(bounded);
             changed = true;
         }
     }

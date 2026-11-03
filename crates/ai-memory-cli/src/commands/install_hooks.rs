@@ -3822,10 +3822,10 @@ function gitRepoProject(cwd: string): string | undefined {
 /// written in the CLI spool's exact on-disk contract
 /// (`{ms:013}-{pid}-{seq:016x}.json`, `SpoolEntry` fields, 0700 dir /
 /// 0600 files, tmp+rename) so `ai-memory hook-drain` and the shell
-/// hooks' piggyback drain deliver them too; the plugin also drains its
-/// own spool on first use and after any queue flush. An `ingest_key`
-/// is minted at spool time, so a double drain (plugin + CLI) dedupes
-/// server-side instead of double-ingesting.
+/// hooks' piggyback drain deliver them too. The plugin's spool drain is
+/// disabled because it removes entries without the drain lock or delivery
+/// receipts; recovery belongs to the external sidecar or native hook-drain.
+/// An `ingest_key` is minted at spool time for idempotent retries.
 ///
 /// Implemented as a transformation over the rendered source (rather
 /// than another copy of the template) so all TS integrations share one
@@ -3874,8 +3874,8 @@ fn add_hook_spooling(source: String) -> Result<String> {
         &format!("{resolve_fn}{runtime}{ENQUEUE_ANCHOR}"),
         1,
     );
-    // Drain the offline spool alongside every queue flush, and extend the
-    // imports the runtime needs.
+    // Preserve the spool-drain call alongside every queue flush; the shared
+    // runtime disables it. Extend the imports the retained runtime needs.
     let drain_anchor =
         "async function drainHookQueue(): Promise<void> {\n  if (hookDraining) return;";
     if out.matches(drain_anchor).count() != 1 {
@@ -8689,7 +8689,11 @@ model = "gpt-5"
     #[test]
     fn repo_root_guess_recovers_checkout_when_target_is_outside_tree() {
         let tmp = tempfile::tempdir().unwrap();
-        let exe = tmp.path().join("cargo-target").join("debug").join("ai-memory");
+        let exe = tmp
+            .path()
+            .join("cargo-target")
+            .join("debug")
+            .join("ai-memory");
         let foreign_cwd = tmp.path().join("foreign-home");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::create_dir_all(&foreign_cwd).unwrap();
@@ -8780,7 +8784,7 @@ model = "gpt-5"
     #[test]
     fn generated_ts_integrations_spool_failed_deliveries() {
         // #580: every queue-based TS integration must persist a failed
-        // delivery instead of dropping it, and must self-drain the spool.
+        // delivery instead of dropping it, leaving recovery to external drains.
         for (name, source) in [
             (
                 "opencode",
@@ -8825,10 +8829,10 @@ model = "gpt-5"
                 source.contains(r#"return join(env, "hook-spool");"#),
                 "{name}: spool dir must honour AI_MEMORY_DATA_DIR"
             );
-            // Every queue flush also kicks a spool drain.
+            // Every queue flush still reaches the disabled spool-drain entry.
             assert!(
                 source.contains("if (hookDraining) return;\n  requestSpoolDrain();"),
-                "{name}: drainHookQueue must trigger the spool drain"
+                "{name}: drainHookQueue must retain its spool-drain call"
             );
             crate::commands::render_shared::assert_shared_ts_delivery_runtime(name, &source);
             // Deliveries share one abort: a torn-down state spools the rest
@@ -9119,7 +9123,7 @@ model = "gpt-5"
     /// Executes the generated plugin against a fake OpenCode 2 host
     /// (`tests/fixtures/opencode2-plugin.mjs`) instead of only matching
     /// template text: completion events, handoff claims, per-location
-    /// cleanup, same-millisecond spooling and bounded unload.
+    /// cleanup, same-millisecond spooling, preserved backlog and bounded unload.
     #[test]
     fn opencode2_plugin_passes_the_node_host_fixture() {
         let Some(()) = crate::commands::render_shared::node_strip_types_available() else {
@@ -9155,7 +9159,7 @@ model = "gpt-5"
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            output.status.success() && stdout.matches("PASS:").count() == 3,
+            output.status.success() && stdout.matches("PASS:").count() == 4,
             "opencode2 host fixture failed ({})\nstdout:\n{stdout}\nstderr:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stderr),

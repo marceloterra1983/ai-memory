@@ -13,10 +13,10 @@
 //! no new spool file. It is not a claim that the client goes quiet altogether.
 //! The consumer resolves routing marker params before it ever calls
 //! `capturePolicy`, the handoff fetch is a separate path (asserted below), and
-//! a spool backlog written before the handover can still drain — dispose calls
-//! `requestHookDrain`, and the patched `drainHookQueue` fires
-//! `requestSpoolDrain` even with an empty queue. Suppressing new capture is the
-//! contract; erasing the backlog is not.
+//! dispose still reaches `requestSpoolDrain` through `requestHookDrain` and
+//! `drainHookQueue`, even with an empty queue. That spool drain is disabled:
+//! existing envelopes stay intact for the external delivery sidecar or native
+//! `hook-drain`, independently of the new-capture ownership gate.
 //!
 //! Tiered slow: rendering the plugin spawns the CLI and each case spawns Node.
 //!

@@ -646,6 +646,12 @@ On Unix, the helper uses a trusted `setsid` launcher when available and falls
 back to a separate process group otherwise; Windows uses detached/breakaway
 process flags. The spool is capped, so a permanently undrained backlog is
 eventually pruned rather than unbounded, but old undelivered events can be lost.
+Generated TypeScript plugins do not drain the shared spool: their drain is
+disabled because it removed envelopes without the drain lock or delivery
+receipts. Without the external `ai-memory-hook-delivery` sidecar, automatic
+recovery requires native hooks to trigger `hook-drain`. Hosts running only
+TypeScript integrations such as OpenCode or Pi leave the backlog undrained
+and risk losing events to bounded-queue pruning.
 The built-in timings stay short on agent-facing paths, but high-latency or
 large-backlog instances can raise them with whole-minute runtime env vars in the
 agent's environment; no `install-hooks` rerun is needed:
@@ -1596,16 +1602,17 @@ OpenClaw, OMP / Oh My Pi, and Pi do not need script extraction because
 `install-hooks` generates TypeScript plugin/extension files for them
 instead. For Pi, the generated extension also provides the MCP bridge.
 
-The generated TypeScript integrations survive an unreachable server the
-same way the native hooks do: a delivery that fails at the network level
+The generated TypeScript integrations preserve failed deliveries when the
+server is unreachable: a delivery that fails at the network level
 (or gets a 5xx) is written to `<data_dir>/hook-spool/` in the exact
-format `ai-memory hook-drain` reads, and the plugin drains that backlog
-itself once the server is reachable again — so a day of laptop work off
-the server's network is captured, not silently dropped. Each spooled
-entry carries an idempotency key, so the plugin's own drain and a
-manual `hook-drain` can race without double-ingesting. Note the spool
-lands in the *agent host's* data dir (`AI_MEMORY_DATA_DIR` or the
-platform default), which is where a native `ai-memory` install looks.
+format `ai-memory hook-drain` reads. The plugins' own drain is disabled
+because it deleted envelopes without the drain lock or delivery receipts.
+Recovery relies on the external `ai-memory-hook-delivery` sidecar or native
+`hook-drain`, triggered by native hooks or run manually. Without either,
+TypeScript-only hosts leave the backlog undrained and risk bounded-queue
+pruning. Each spooled entry retains its idempotency key for retry. The spool
+lands in the *agent host's* data dir (`AI_MEMORY_DATA_DIR` or the platform
+default), which is where a native `ai-memory` install looks.
 
 This path is friction-free when:
 - You have curl + bash but not docker

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Disabled the generated OpenCode, OpenCode 2, Pi, OMP, and OpenClaw
+  TypeScript spool drain, which could delete envelopes after HTTP responses
+  without taking the drain lock or checking delivery receipts. Preserved
+  failed-delivery spooling for the external delivery sidecar or native
+  `hook-drain`; TypeScript-only hosts without either no longer drain their
+  backlog automatically and risk pruning from bounded queues.
 - Fixed full-text query preparation so caller text longer than 4 KiB is cut
   on a character boundary before tokenization. MCP, the web UI, and the CLI
   share this cap. Shorter queries are unchanged.

@@ -200,9 +200,9 @@ pub(crate) fn ts_string_literal(s: &str) -> String {
 /// Two things it deliberately does not do. It does not suppress the consumer's
 /// routing work around the call (`applyMarkerParams` reads the marker before
 /// `capturePolicy` is even reached), and it does not erase an existing spool
-/// backlog: a consumer that reaches `drainHookQueue` — on dispose, for
-/// instance — still kicks off `requestSpoolDrain`, so events spooled before the
-/// handover can still be delivered.
+/// backlog. Queue flushes still reach `requestSpoolDrain`, but that drain is
+/// disabled: existing envelopes await the external delivery sidecar or native
+/// `hook-drain`, independently of this ownership gate.
 #[must_use]
 pub(crate) fn ts_capture_policy_v1(capture_mode: &str) -> String {
     const TEMPLATE: &str = r##"// capture-policy-v1 (generated; do not fork between adapters)
@@ -1976,7 +1976,7 @@ fn claude_code_windows_command_is_unchanged_by_the_codex_fix() {
 /// TypeScript runtime shared by every generated integration that must
 /// survive an unreachable server (#580): a spool writer emitting the CLI
 /// `hook-spool` on-disk contract (same filenames, same `SpoolEntry` JSON,
-/// same permissions) plus a self-drain. Callers only need `TOKEN`,
+/// same permissions) with its receipt-free self-drain disabled. Callers need `TOKEN`,
 /// `timeoutSignal`, and the node `join`/`homedir`/fs imports in scope.
 /// Runtime credential fallback shared by every generated TypeScript
 /// integration. #552 moved the bearer out of generated files into a 0600
@@ -2041,8 +2041,9 @@ pub(crate) fn ts_spool_runtime() -> &'static str {
     r#"
 // ---- offline spool (#580): the same on-disk contract as `ai-memory hook` ----
 // <data_dir>/hook-spool, entries the CLI's hook-drain understands. Written on
-// delivery failure, drained here on first use and after each queue flush; the
-// ingest_key minted at spool time makes a double drain idempotent server-side.
+// delivery failure, retained for the external delivery sidecar or native
+// hook-drain. The TS drain is disabled because it deletes without receipts;
+// the ingest_key minted at spool time keeps retries idempotent server-side.
 function hookSpoolDir(): string {
   const env = process.env.AI_MEMORY_DATA_DIR;
   if (env && env.trim()) return join(env, "hook-spool");
@@ -2069,8 +2070,7 @@ function spoolFailedHook(url: URL | string, payload: Record<string, unknown>): v
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const createdMs = Date.now();
     // Idempotency key minted ONCE at spool time and baked into the URL,
-    // so this plugin's drain and the CLI's drain can both deliver the
-    // entry without double-ingesting.
+    // so external/native retries can deliver the entry without double-ingesting.
     const key = `ts${createdMs.toString(16)}${Math.floor(Math.random() * 0xffffffff).toString(16)}`;
     const u = new URL(String(url));
     if (!u.searchParams.has("ingest_key")) u.searchParams.set("ingest_key", key);
@@ -2096,6 +2096,10 @@ function spoolFailedHook(url: URL | string, payload: Record<string, unknown>): v
 let spoolDrainPromise: Promise<void> | undefined;
 
 function requestSpoolDrain(): void {
+  return; // ai-memory-hook-delivery owns the spool; TS drain deletes without receipts.
+  // shortcut: without the sidecar, only native hook-drain recovers the backlog
+  // and TS-only hosts risk bounded-queue pruning, evolve when TS delivery
+  // takes the drain lock and verifies receipts before deleting envelopes.
   if (spoolDrainPromise) return;
   spoolDrainPromise = drainHookSpool().finally(() => {
     spoolDrainPromise = undefined;
@@ -2168,9 +2172,23 @@ pub(crate) fn node_strip_types_available() -> Option<()> {
 /// Two copies of the spool state in one process (OpenCode 2 location
 /// instances, OMP and Pi sharing an extensions dir) must not write the
 /// same file name in the same millisecond, and every request deadline
-/// must compose with the state's abort signal.
+/// must compose with the state's abort signal. The receipt-free spool drain
+/// must remain disabled in every integration.
 #[cfg(test)]
 pub(crate) fn assert_shared_ts_delivery_runtime(name: &str, source: &str) {
+    assert!(
+        source.contains(
+            "function requestSpoolDrain(): void {\n  return; // ai-memory-hook-delivery owns the spool; TS drain deletes without receipts.\n"
+        ),
+        "{name}: the receipt-free TS spool drain must remain disabled"
+    );
+    assert_eq!(
+        source
+            .matches("function requestSpoolDrain(): void {\n")
+            .count(),
+        1,
+        "{name}: the external installer's spool-drain anchor must remain unique"
+    );
     assert!(
         source.contains("const spoolSeqPrefix = Math.floor(Math.random() * 0x100000000)"),
         "{name}: spool names need a per-state random prefix"

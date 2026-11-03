@@ -56,20 +56,20 @@ pub fn cargo_manifest_dir() -> Option<&'static Path> {
 /// Order: walk from the executable, then from `cwd`, then from the compile-time
 /// `CARGO_MANIFEST_DIR`. The first ancestor that contains `hooks/` wins.
 pub fn repo_root_guess(exe: Option<&Path>, cwd: Option<&Path>) -> Option<PathBuf> {
-    if let Some(exe) = exe {
-        if let Some(root) = repo_root_from_exe(exe) {
-            return Some(root);
-        }
+    if let Some(exe) = exe
+        && let Some(root) = repo_root_from_exe(exe)
+    {
+        return Some(root);
     }
-    if let Some(cwd) = cwd {
-        if let Some(root) = repo_root_from_dir(cwd) {
-            return Some(root);
-        }
+    if let Some(cwd) = cwd
+        && let Some(root) = repo_root_from_dir(cwd)
+    {
+        return Some(root);
     }
-    if let Some(manifest) = cargo_manifest_dir() {
-        if let Some(root) = repo_root_from_dir(manifest) {
-            return Some(root);
-        }
+    if let Some(manifest) = cargo_manifest_dir()
+        && let Some(root) = repo_root_from_dir(manifest)
+    {
+        return Some(root);
     }
     None
 }
@@ -129,7 +129,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Simulate CARGO_TARGET_DIR outside the checkout: binary under
         // an external target dir with no hooks/ ancestor.
-        let exe = tmp.path().join("cargo-target").join("debug").join("ai-memory");
+        let exe = tmp
+            .path()
+            .join("cargo-target")
+            .join("debug")
+            .join("ai-memory");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();
 
@@ -154,22 +158,27 @@ mod tests {
         let repo = tmp.path().join("repo");
         let nested = repo.join("crates").join("ai-memory-cli");
         let hooks = repo.join(HOOKS_DIR_NAME);
-        let exe = tmp.path().join("cargo-target").join("debug").join("ai-memory");
+        let exe = tmp
+            .path()
+            .join("cargo-target")
+            .join("debug")
+            .join("ai-memory");
         fs::create_dir_all(hooks.join("claude-code")).unwrap();
         fs::create_dir_all(&nested).unwrap();
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();
 
-        assert_eq!(
-            repo_root_guess(Some(&exe), Some(&nested)),
-            Some(repo)
-        );
+        assert_eq!(repo_root_guess(Some(&exe), Some(&nested)), Some(repo));
     }
 
     #[test]
     fn repo_root_guess_falls_back_to_cargo_manifest_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let exe = tmp.path().join("cargo-target").join("debug").join("ai-memory");
+        let exe = tmp
+            .path()
+            .join("cargo-target")
+            .join("debug")
+            .join("ai-memory");
         let foreign_cwd = tmp.path().join("foreign-home");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::create_dir_all(&foreign_cwd).unwrap();

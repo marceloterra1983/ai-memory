@@ -583,9 +583,7 @@ fn source_candidates(explicit: Option<&Path>, sub: &str, exe: Option<PathBuf>) -
         PathBuf::from(format!("/usr/share/ai-memory/hooks/{sub}")),
     ];
     let push_hooks = |v: &mut Vec<PathBuf>, root: PathBuf| {
-        let candidate = root
-            .join(crate::install_layout::HOOKS_DIR_NAME)
-            .join(sub);
+        let candidate = root.join(crate::install_layout::HOOKS_DIR_NAME).join(sub);
         if !v.contains(&candidate) {
             v.push(candidate);
         }
@@ -676,7 +674,11 @@ mod tests {
     #[test]
     fn source_candidates_skip_repo_root_when_target_outside_tree() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let exe = tmp.path().join("cargo-target").join("debug").join("ai-memory");
+        let exe = tmp
+            .path()
+            .join("cargo-target")
+            .join("debug")
+            .join("ai-memory");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();
 
@@ -702,7 +704,11 @@ mod tests {
     #[test]
     fn source_candidates_recover_via_cargo_manifest_when_target_outside_tree() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let exe = tmp.path().join("cargo-target").join("debug").join("ai-memory");
+        let exe = tmp
+            .path()
+            .join("cargo-target")
+            .join("debug")
+            .join("ai-memory");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();
 

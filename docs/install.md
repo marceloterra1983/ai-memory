@@ -1610,8 +1610,9 @@ because it deleted envelopes without the drain lock or delivery receipts.
 Recovery relies on the external `ai-memory-hook-delivery` sidecar or native
 `hook-drain`, triggered by native hooks or run manually. Without either,
 TypeScript-only hosts leave the backlog undrained, and it grows without limit
-because the TypeScript writer does not prune. Each spooled entry retains its
-idempotency key for retry. The spool
+because the TypeScript writer does not prune. A later native `hook-drain`
+discards entries older than 7 days without delivering them. Each spooled entry
+retains its idempotency key for retry. The spool
 lands in the *agent host's* data dir (`AI_MEMORY_DATA_DIR` or the platform
 default), which is where a native `ai-memory` install looks.
 

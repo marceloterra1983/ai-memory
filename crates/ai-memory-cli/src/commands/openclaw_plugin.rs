@@ -476,7 +476,7 @@ function postPreCompact(event: any, ctx: any): void {{
   try {{
     // Fire-and-forget, but never silent loss: an unreachable server or
     // 5xx spools the event in the CLI hook-spool format for a later
-    // drain (#580); a delivered post opportunistically drains backlog.
+    // drain (#580) by the sidecar or native hook-drain, never by this plugin.
     // Tracked in pendingHookRequests so session_end can await a bounded
     // flush instead of letting teardown kill the in-flight fetch (#676).
     const request = fetch(url, {{
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn openclaw_plugin_spools_failed_deliveries() {
         // #580: OpenClaw's fire-and-forget postHook must persist failures
-        // in the CLI hook-spool format and drain the backlog on success.
+        // in the CLI hook-spool format; its drain request stays a guarded no-op.
         let plugin = build_plugin("http://127.0.0.1:49374", Some("tok"), None, "denylist");
         assert!(plugin.contains("function spoolFailedHook("));
         assert!(plugin.contains("async function drainHookSpool()"));

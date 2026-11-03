@@ -2098,8 +2098,8 @@ let spoolDrainPromise: Promise<void> | undefined;
 function requestSpoolDrain(): void {
   return; // ai-memory-hook-delivery owns the spool; TS drain deletes without receipts.
   // shortcut: without the sidecar, only native hook-drain recovers the backlog
-  // and TS-only hosts risk bounded-queue pruning, evolve when TS delivery
-  // takes the drain lock and verifies receipts before deleting envelopes.
+  // and TS-only hosts grow it without limit (this writer does not prune), evolve
+  // when TS delivery takes the drain lock and verifies receipts before deleting.
   if (spoolDrainPromise) return;
   spoolDrainPromise = drainHookSpool().finally(() => {
     spoolDrainPromise = undefined;

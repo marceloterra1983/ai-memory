@@ -650,8 +650,8 @@ Generated TypeScript plugins do not drain the shared spool: their drain is
 disabled because it removed envelopes without the drain lock or delivery
 receipts. Without the external `ai-memory-hook-delivery` sidecar, automatic
 recovery requires native hooks to trigger `hook-drain`. Hosts running only
-TypeScript integrations such as OpenCode or Pi leave the backlog undrained
-and risk losing events to bounded-queue pruning.
+TypeScript integrations such as OpenCode or Pi leave the backlog undrained, and
+it grows without limit because only the native enqueue path enforces the cap.
 The built-in timings stay short on agent-facing paths, but high-latency or
 large-backlog instances can raise them with whole-minute runtime env vars in the
 agent's environment; no `install-hooks` rerun is needed:
@@ -1609,8 +1609,9 @@ format `ai-memory hook-drain` reads. The plugins' own drain is disabled
 because it deleted envelopes without the drain lock or delivery receipts.
 Recovery relies on the external `ai-memory-hook-delivery` sidecar or native
 `hook-drain`, triggered by native hooks or run manually. Without either,
-TypeScript-only hosts leave the backlog undrained and risk bounded-queue
-pruning. Each spooled entry retains its idempotency key for retry. The spool
+TypeScript-only hosts leave the backlog undrained, and it grows without limit
+because the TypeScript writer does not prune. Each spooled entry retains its
+idempotency key for retry. The spool
 lands in the *agent host's* data dir (`AI_MEMORY_DATA_DIR` or the platform
 default), which is where a native `ai-memory` install looks.
 

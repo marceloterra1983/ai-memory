@@ -25,9 +25,10 @@ ignore = [
     # by serde_yaml, which is a dev-dependency of ai-memory-core and
     # ai-memory-wiki; nothing from it ships in the released binary.
     "RUSTSEC-2024-0449",
-    # RUSTSEC-2026-0367/0368/0369: the three `zip` advisories all
+    # RUSTSEC-2026-0367/0368/0369/0429: the four `zip` advisories all
     # concern `ZipArchive::extract()` / `ZipStreamReader::extract()`
-    # (SUID/SGID preservation and symlink escapes during extraction).
+    # (SUID/SGID preservation, symlink escapes and an abort on an
+    # oversized symlink entry during extraction).
     # Neither API is called anywhere in this workspace or in
     # candle-core, the only other consumer of `zip` in the graph
     # (in-memory archive reads for pickle/npy only). The one release
@@ -39,6 +40,7 @@ ignore = [
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
 ]
 
 [licenses]

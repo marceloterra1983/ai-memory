@@ -57,7 +57,9 @@ impl AnthropicProvider {
     /// Returns a `reqwest::Error` if the underlying HTTP client cannot
     /// be built.
     pub fn new(api_key: SecretString, model: impl Into<String>) -> LlmResult<Self> {
-        let client = reqwest::Client::builder().build()?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         Ok(Self {
             client,
             auth: AnthropicAuth::ApiKey(api_key),
@@ -79,7 +81,9 @@ impl AnthropicProvider {
     /// Returns a `reqwest::Error` if the underlying HTTP client cannot
     /// be built.
     pub fn new_oauth(token: SecretString, model: impl Into<String>) -> LlmResult<Self> {
-        let client = reqwest::Client::builder().build()?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         Ok(Self {
             client,
             auth: AnthropicAuth::OAuth(token),

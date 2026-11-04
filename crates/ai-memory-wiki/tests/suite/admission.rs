@@ -684,3 +684,68 @@ async fn non_blocking_webhook_skipped_by_run_but_dispatched_async() {
         "dispatch_async must fire the non-blocking webhook"
     );
 }
+
+#[tokio::test]
+async fn webhook_redirects_cannot_forward_private_page_or_fake_admission() {
+    use std::sync::atomic::AtomicUsize;
+    for status in [302, 307, 308] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let record = hits.clone();
+        let target = spawn_server(Router::new().fallback(move || {
+            let record = record.clone();
+            async move {
+                record.fetch_add(1, Ordering::SeqCst);
+                Json(json!({}))
+            }
+        }))
+        .await;
+        let location = format!("{target}/receiver");
+        let origin = spawn_server(Router::new().route(
+            "/admit",
+            post(move || {
+                let location = location.clone();
+                async move {
+                    (
+                        StatusCode::from_u16(status).unwrap(),
+                        [("location", location)],
+                        Json(json!({})),
+                    )
+                }
+            }),
+        ))
+        .await;
+        let config = |url| WebhookConfig {
+            name: "redirect-guard".into(),
+            url,
+            timeout_ms: 1000,
+            failure_policy: FailurePolicy::Reject,
+            events: vec![AdmissionOp::WritePage],
+            blocking: true,
+        };
+        let chain = AdmissionChain::new(vec![config(format!("{origin}/admit"))]).unwrap();
+        let (path, mut md) = page();
+        md.body = "private page contents".into();
+        let result = chain
+            .run(&path, &mut md, &AdmissionContext::default())
+            .await;
+        assert!(
+            result.is_err(),
+            "admission accepted HTTP {status}: {result:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "private page followed HTTP {status}"
+        );
+        let chain = AdmissionChain::new(vec![config(format!("{target}/receiver"))]).unwrap();
+        chain
+            .run(&path, &mut md, &AdmissionContext::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "legitimate admission control was not contacted"
+        );
+    }
+}

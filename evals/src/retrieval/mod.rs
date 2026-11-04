@@ -471,6 +471,7 @@ async fn run_config(
     );
 
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
     let max_k = args.ks.iter().copied().max().unwrap_or(10);

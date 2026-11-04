@@ -74,7 +74,10 @@ impl CodexProvider {
     pub fn new(auth: CodexAuth, model: impl Into<String>) -> LlmResult<Self> {
         read_credentials(&auth.auth_file)?;
         Ok(Self {
-            client: reqwest::Client::builder().build().map_err(LlmError::from)?,
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(LlmError::from)?,
             model: model.into(),
             auth,
             timeout: Duration::from_secs(crate::DEFAULT_REQUEST_TIMEOUT_SECS),
@@ -935,5 +938,26 @@ mod tests {
                 .count(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod redirect_regressions {
+    use super::*;
+
+    #[tokio::test]
+    async fn client_refuses_redirects_and_refresh_reports_non_2xx() {
+        let root = tempfile::tempdir().unwrap();
+        let auth_file = root.path().join("auth.json");
+        std::fs::write(&auth_file, serde_json::json!({"tokens":{"access_token":"fixture-token","account_id":"fixture-account"}}).to_string()).unwrap();
+        let provider = CodexProvider::new(
+            CodexAuth {
+                auth_file,
+                executable: root.path().join("unused-codex"),
+            },
+            "fixture",
+        )
+        .unwrap();
+        crate::integration::http_redirects::assert_client_refuses_redirects(provider.client).await;
     }
 }

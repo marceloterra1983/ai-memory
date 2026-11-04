@@ -154,7 +154,10 @@ impl OpenAiOAuthProvider {
                 token_path.display()
             ))
         })?;
-        let client = reqwest::Client::builder().build().map_err(LlmError::from)?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(LlmError::from)?;
         Ok(Self {
             client,
             model: model.into(),
@@ -923,5 +926,27 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(extract_output_text(&nested).as_deref(), Some("nested"));
+    }
+}
+
+#[cfg(test)]
+mod redirect_regressions {
+    use super::*;
+
+    #[tokio::test]
+    async fn client_refuses_redirects_and_refresh_reports_non_2xx() {
+        let root = tempfile::tempdir().unwrap();
+        let token_path = root.path().join("token.json");
+        OpenAiOAuthToken::from_token_response(
+            "fixture-access",
+            "fixture-refresh",
+            3600,
+            None,
+            None,
+        )
+        .save(&token_path)
+        .unwrap();
+        let provider = OpenAiOAuthProvider::new(token_path, "fixture").unwrap();
+        crate::integration::http_redirects::assert_client_refuses_redirects(provider.client).await;
     }
 }

@@ -210,6 +210,7 @@ impl CopilotAuthState {
             )));
         }
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(COPILOT_USER_AGENT)
             .build()
             .map_err(LlmError::from)?;
@@ -1362,5 +1363,23 @@ mod tests {
     fn epoch_seconds_convert_to_millis() {
         assert_eq!(unix_epoch_to_ms(1_700_000_000), 1_700_000_000_000);
         assert_eq!(unix_epoch_to_ms(1_700_000_000_000), 1_700_000_000_000);
+    }
+}
+
+#[cfg(test)]
+mod redirect_regressions {
+    use super::*;
+
+    #[tokio::test]
+    async fn client_refuses_redirects_and_refresh_reports_non_2xx() {
+        let root = tempfile::tempdir().unwrap();
+        let state = CopilotAuthState::new(CopilotAuth {
+            token_file: root.path().join("token.json"),
+            github_token: Some(SecretString::from("fixture-github")),
+            direct_api_token: None,
+            api_base_url: None,
+        })
+        .unwrap();
+        crate::integration::http_redirects::assert_client_refuses_redirects(state.client).await;
     }
 }

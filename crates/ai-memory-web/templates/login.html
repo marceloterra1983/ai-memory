@@ -62,6 +62,7 @@
       password: document.getElementById("password").value
     };
     fetch(basePath + "/auth/login", {
+      redirect: "error",
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },

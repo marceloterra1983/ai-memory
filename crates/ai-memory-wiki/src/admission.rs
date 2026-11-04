@@ -322,9 +322,12 @@ impl AdmissionChain {
                 webhooks.len()
             ))));
         }
-        let client = reqwest::Client::builder().build().map_err(|e| {
-            WikiError::Io(std::io::Error::other(format!("admission http client: {e}")))
-        })?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| {
+                WikiError::Io(std::io::Error::other(format!("admission http client: {e}")))
+            })?;
         Ok(Self {
             webhooks: Arc::new(webhooks),
             client,

@@ -137,6 +137,7 @@
       encodeURIComponent(item.getAttribute("data-id")) + "/" + action + "?" + query.toString();
     buttons.forEach(function (b) { b.disabled = true; });
     fetch(url, {
+      redirect: "error",
       method: "POST",
       credentials: "same-origin",
       headers: {

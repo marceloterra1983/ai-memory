@@ -18,7 +18,7 @@ public struct HealthClient: Sendable {
         config.timeoutIntervalForResource = timeout
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.waitsForConnectivity = false
-        session = URLSession(configuration: config)
+        session = URLSession(configuration: config, delegate: RefuseRedirects(), delegateQueue: nil)
     }
 
     public func fetch(baseURL: URL, token: String?) async throws -> StatusReport {
@@ -50,6 +50,18 @@ public struct HealthClient: Sendable {
         } catch {
             throw HealthError.decode
         }
+    }
+}
+
+private final class RefuseRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }
 

@@ -162,9 +162,10 @@ pub async fn ingest_question(
                 .json(&chunk)
                 .send()
                 .await
-                .context("posting hook batch")?
-                .error_for_status()
-                .context("hook batch rejected")?;
+                .context("posting hook batch")?;
+            if !resp.status().is_success() {
+                bail!("hook batch rejected: HTTP {}", resp.status());
+            }
             let ack: serde_json::Value = resp.json().await?;
             let accepted: Vec<usize> = match ack.get("accepted_indices") {
                 Some(serde_json::Value::Array(idx)) => idx
@@ -281,5 +282,72 @@ mod tests {
         let items = build_items(&question);
         // still start, prompt, stop, end — the system turn produced nothing
         assert_eq!(items.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod redirect_regressions {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn ingest_redirects_are_errors_even_with_a_success_ack() {
+        let question: Question = serde_json::from_value(serde_json::json!({
+            "question_id":"redirect-fixture","question_type":"single-session-user",
+            "question":"?","answer":"a","question_date":"d",
+            "haystack_dates":["2023/05/20 (Sat) 02:21"],
+            "haystack_session_ids":["fixture-session"],
+            "haystack_sessions":[[{"role":"user","content":"private fixture event"}]],
+            "answer_session_ids":["fixture-session"]
+        }))
+        .unwrap();
+        let count = build_items(&question).len();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        for status in [302, 307, 308, 200] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut headers = String::new();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    headers.push_str(&line);
+                }
+                assert!(headers.to_lowercase().contains(&format!(
+                    "authorization: bearer {}",
+                    EVAL_AUTH_TOKEN.to_lowercase()
+                )));
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                assert!(String::from_utf8_lossy(&body).contains("private fixture event"));
+                let ack = serde_json::json!({"accepted":count}).to_string();
+                reader.get_mut().write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{ack}", ack.len()).as_bytes()).await.unwrap();
+            });
+            let result = ingest_question(&client, &url, &question).await;
+            task.await.unwrap();
+            if status == 200 {
+                assert_eq!(result.unwrap(), count);
+            } else {
+                assert!(result.is_err(), "ingest accepted HTTP {status}: {result:?}");
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains(&status.to_string())
+                );
+            }
+        }
     }
 }

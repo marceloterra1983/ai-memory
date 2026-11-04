@@ -250,7 +250,9 @@ struct OpenCodeResponsesProvider {
 impl OpenCodeResponsesProvider {
     fn new(api_key: SecretString, model: String, base_url: String) -> LlmResult<Self> {
         Ok(Self {
-            client: reqwest::Client::builder().build()?,
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
             api_key,
             base_url,
             model,
@@ -693,5 +695,21 @@ mod tests {
             header_value(&requests[1], "x-opencode-session"),
             Some(expected_id.as_str())
         );
+    }
+}
+
+#[cfg(test)]
+mod redirect_regressions {
+    use super::*;
+
+    #[tokio::test]
+    async fn client_refuses_redirects_and_refresh_reports_non_2xx() {
+        let provider = OpenCodeResponsesProvider::new(
+            SecretString::from("fixture-key"),
+            "luna".into(),
+            "http://127.0.0.1".into(),
+        )
+        .unwrap();
+        crate::integration::http_redirects::assert_client_refuses_redirects(provider.client).await;
     }
 }

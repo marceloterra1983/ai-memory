@@ -43,6 +43,7 @@
             .querySelector('meta[name="ai-memory-login-path"]')
             ?.getAttribute("content") || (basePath + "/web/login");
           fetch(basePath + "/auth/logout", {
+            redirect: "error",
             method: "POST",
             credentials: "include",
             headers: {

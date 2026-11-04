@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use ai_memory_core::AgentKind;
 use ai_memory_workstream::{ManagedHarness, build_launch_plan, list_native_sessions};
 
+use super::show::terminal_text;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, get_json};
 
@@ -324,16 +325,17 @@ fn render_human(report: &DoctorReport) {
     }
 
     for row in &report.rows {
+        let agent = terminal_text(&row.agent);
         let mark = if row.uncaptured { "⚠" } else { "✓" };
         println!(
             "  {mark} {:<14} {:>4} local ({} recent) → {:>4} captured",
-            row.agent, row.local_total, row.local_recent, row.captured
+            agent, row.local_total, row.local_recent, row.captured
         );
         if row.uncaptured {
             println!(
                 "      └ ran here but nothing was captured — install its hook:\n        \
                  ai-memory install-hooks --agent {} --apply",
-                row.agent
+                agent
             );
         }
     }

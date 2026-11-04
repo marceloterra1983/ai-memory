@@ -88,6 +88,46 @@ async fn cli(root: &Path, url: &str, args: &[&str]) -> String {
 }
 
 #[tokio::test]
+async fn terminal_doctor_neutralizes_agent_and_preserves_json() {
+    let root = tempfile::tempdir().unwrap();
+    let bad = "café\nFORGED\u{1b}]52;c;dummy\u{7}";
+    let app = Router::new().route(
+        "/admin/sessions/by-agent",
+        any(move || async move {
+            Json(json!({"by_agent":[
+                {"agent":bad,"sessions":2},
+                {"agent":"codex","sessions":1}
+            ]}))
+        }),
+    );
+    let server = ApiFixture::start_app(app).await;
+    let args = ["doctor", "--workspace", "ws", "--project", "p"];
+    let output = cli(root.path(), &server.url, &args).await;
+    assert!(
+        output.lines().any(
+            |line| line == "  ✓ café?FORGED?]52;c;dummy?    0 local (0 recent) →    2 captured"
+        ),
+        "{output:?}"
+    );
+    assert!(
+        !output.contains('\u{1b}') && !output.contains('\u{7}'),
+        "{output:?}"
+    );
+    assert!(
+        !output.lines().any(|line| line.starts_with("FORGED")),
+        "{output:?}"
+    );
+    assert!(output.contains("codex") && output.contains("1 captured"));
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let output = cli(root.path(), &server.url, &json_args).await;
+    let report = serde_json::from_str::<Value>(&output).unwrap();
+    assert_eq!(report["rows"][0]["agent"], bad);
+    assert_eq!(report["rows"][0]["captured"], 2);
+    assert_eq!(report["rows"][1]["agent"], "codex");
+}
+
+#[tokio::test]
 async fn terminal_grants_neutralize_controls_and_preserve_json() {
     let root = tempfile::tempdir().unwrap();
     let rows = json!([

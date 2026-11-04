@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Neutralized terminal controls in synthetic session-finalization errors,
   purge-preview refusals (plain bodies and JSON `error` fields), forbidden
-  handoff warnings, and both workstream-rename confirmations. Preserved
-  structured JSON output.
+  handoff warnings, both workstream-rename confirmations, and `doctor` agent
+  names. Preserved structured JSON output.
   (local-20261104; no upstream issue opened)
 - Disabled the generated OpenCode, OpenCode 2, Pi, OMP, and OpenClaw
   TypeScript spool drain, which could delete envelopes after HTTP responses

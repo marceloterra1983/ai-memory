@@ -121,7 +121,7 @@ impl ServerEndpoint {
     ///    container as `serve`, which already reads the same env var via
     ///    clap to nest its router).
     pub async fn from_config_resolving_auth(config: &Config) -> Self {
-        let client = reqwest::Client::new();
+        let client = http_client();
         let token = crate::auth_bearer::resolve_bearer(
             &client,
             &config.oidc_device_token_path(),
@@ -248,6 +248,32 @@ pub(crate) fn split_origin_and_path(raw: &str) -> (String, String) {
     (trimmed.to_string(), String::new())
 }
 
+/// Builder behind every CLI client that carries the server bearer or a
+/// captured event. Redirects are never followed: a 3xx from an SSO portal or
+/// proxy would otherwise be consumed as the answer (a login page parsed as
+/// JSON, written as a backup tarball, or counted as a delivery), and a
+/// 307/308 replays the request body — plus the `Authorization` header when
+/// the `Location` stays on the same host and port — to the redirect target.
+/// This is the one place the policy is named; a caller that needs more
+/// (the native hook adds `no_proxy`) extends this builder instead of
+/// starting its own.
+pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+}
+
+/// Shared reqwest client for the thin-client CLI subcommands, session
+/// finalization and backfill's explicit-server bearer resolution. See
+/// [`http_client_builder`] for why redirects are refused.
+///
+/// There is no fallback to `reqwest::Client::new()` on a build failure:
+/// that is the same build with the default (redirect-following) policy and
+/// panics on the same failure, so it could only add a path that follows.
+pub(crate) fn http_client() -> reqwest::Client {
+    http_client_builder()
+        .build()
+        .expect("building the no-redirect HTTP client")
+}
+
 /// GET `<endpoint>{path}` with optional query params, deserialise JSON.
 ///
 /// # Errors
@@ -258,7 +284,7 @@ pub async fn get_json<T: DeserializeOwned>(
     path: &str,
     query: &[(&str, &str)],
 ) -> Result<T> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = endpoint.build_url(path);
     let mut req = client.get(&url);
     if !query.is_empty() {
@@ -284,7 +310,7 @@ pub async fn patch_json<B: Serialize, T: DeserializeOwned>(
     path: &str,
     body: &B,
 ) -> Result<T> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = endpoint.build_url(path);
     let req = endpoint.authenticate(client.patch(&url).json(body));
     let resp = req
@@ -315,7 +341,7 @@ pub async fn post_json_no_content<B: Serialize>(
     path: &str,
     body: &B,
 ) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = endpoint.build_url(path);
     let req = endpoint.authenticate(client.post(&url).json(body));
     let resp = req
@@ -328,7 +354,7 @@ pub async fn post_json_no_content<B: Serialize>(
 
 /// POST an empty body and require a successful response.
 pub async fn post_empty(endpoint: &ServerEndpoint, path: &str) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = endpoint.build_url(path);
     let req = endpoint.authenticate(client.post(&url));
     let resp = req
@@ -349,7 +375,7 @@ pub async fn post_json_with_query<B: Serialize, T: DeserializeOwned>(
     query: &[(&str, &str)],
     body: &B,
 ) -> Result<T> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = build_url_with_query(endpoint, path, query)?;
     let req = client.post(&url);
     let req = endpoint.authenticate(req.json(body));
@@ -436,7 +462,7 @@ fn augment_connect_error(
 /// Returns an error when the connection fails, the response is non-2xx,
 /// or the body cannot be read or written.
 pub async fn post_to_file(endpoint: &ServerEndpoint, path: &str, dest: &Path) -> Result<u64> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = endpoint.build_url(path);
     let req = endpoint.authenticate(client.post(&url));
     let resp = req

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::FinalizeSessionArgs;
 use crate::config::Config;
-use crate::http_client::{ServerEndpoint, ServerResponseError, get_json};
+use crate::http_client::{ServerEndpoint, ServerResponseError, get_json, http_client};
 
 #[derive(Debug, Serialize)]
 struct SessionEndPayload<'a> {
@@ -83,7 +83,7 @@ pub(crate) async fn finalize(
         return Ok((workspace, project, Vec::new()));
     }
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let fallback_cwd = effective_cwd(config)?;
     let mut finalized = Vec::with_capacity(sessions.len());
     for session in &sessions {

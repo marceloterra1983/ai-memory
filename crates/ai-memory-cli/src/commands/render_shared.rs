@@ -2126,7 +2126,11 @@ async function drainHookSpool(): Promise<void> {
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (entry.token) headers["Authorization"] = `Bearer ${entry.token}`;
+      // A redirect is refused, not followed: it rejects like an unreachable
+      // server, so the drain stops and keeps its backlog. Following it would
+      // count a gateway's login page (200) as delivered and delete the entry.
       const resp = await fetch(entry.url, {
+        redirect: "error",
         method: "POST",
         headers,
         body: entry.body,

@@ -47,7 +47,7 @@ use ai_memory_workstream::{
 use super::doctor::{SCANNED_HARNESSES, relocated_session_dir};
 use super::run;
 use crate::config::Config;
-use crate::http_client::{ServerEndpoint, get_json, post_json};
+use crate::http_client::{ServerEndpoint, get_json, http_client, post_json};
 
 /// Circuit breaker on total imported events across the whole bootstrap. Once
 /// reached, no further sessions are started; the remaining sessions are
@@ -170,7 +170,7 @@ async fn backfill_endpoint(
     if let Some(url) = args.server_url.as_deref() {
         let static_token = crate::config::read_hook_auth_token(&config.data_dir);
         let token = super::hook_spool::resolve_bearer(
-            &reqwest::Client::new(),
+            &http_client(),
             &config.data_dir,
             static_token.as_deref(),
         )

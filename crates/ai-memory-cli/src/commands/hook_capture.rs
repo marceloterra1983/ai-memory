@@ -379,11 +379,14 @@ fn repository_identity(
 /// is pure overhead for a loopback/LAN POST. Built once per invocation and
 /// reused for both the event POST and the handoff GET. Default root certs
 /// are kept so HTTPS targets (e.g. a TLS proxy) still work.
+/// Redirects are refused (the shared policy in `http_client_builder`): a 3xx
+/// from an SSO portal or proxy never counts as a delivery, replays an event,
+/// or injects foreign HTML as a handoff.
 pub fn build_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::http_client::http_client_builder()
         .no_proxy()
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .unwrap_or_else(|_| crate::http_client::http_client())
 }
 
 /// Outcome of one spooled-event POST — enough for the drain loop to decide

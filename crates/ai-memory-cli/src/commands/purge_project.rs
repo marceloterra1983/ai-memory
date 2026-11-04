@@ -3,6 +3,7 @@
 use anyhow::{Result, bail};
 use serde::Serialize;
 
+use super::show::terminal_text;
 use crate::cli::PurgeProjectArgs;
 use crate::commands::purge_preview::{PreviewOutcome, refused_message, run_preview};
 use crate::config::Config;
@@ -44,6 +45,7 @@ fn purge_summary_line(verb: &str, label: &str, report: &serde_json::Value) -> St
     // its portable event ledger. Always name them.
     let workstreams = report["workstreams_deleted"].as_u64().unwrap_or(0);
     let managed_runs = report["managed_runs_deleted"].as_u64().unwrap_or(0);
+    let label = terminal_text(label);
     let mut line = format!(
         "{verb} {label}: {pages} pages, {sessions} sessions, \
          {observations} observations, {handoffs} handoffs, {embeddings} embeddings, \
@@ -163,7 +165,7 @@ pub async fn run(config: &Config, args: PurgeProjectArgs) -> Result<()> {
              <data_dir>/raw/workstreams/ and can be removed:"
         );
         for id in ids.iter().filter_map(serde_json::Value::as_str) {
-            println!("  - {id}");
+            println!("  - {}", terminal_text(id));
         }
     }
     if let Some(failed) = report["files_failed"].as_array()

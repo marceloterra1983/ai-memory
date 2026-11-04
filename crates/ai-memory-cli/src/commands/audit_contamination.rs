@@ -7,6 +7,7 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::AuditContaminationArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, get_json};
@@ -64,20 +65,24 @@ pub async fn run(config: &Config, args: AuditContaminationArgs) -> Result<()> {
         report.summary.sessions_misbucketed
     );
     for f in &report.findings {
-        let expected = f.expected_project.as_deref().unwrap_or("?");
+        let expected = terminal_text(f.expected_project.as_deref().unwrap_or("?"));
         match f.check.as_str() {
             "session_wrong_bucket" => println!(
                 "  [{}] session {} landed in {}/{} but its cwd ({}) resolves to project {}",
-                f.confidence,
-                f.entity_id,
-                f.landed_workspace,
-                f.landed_project,
-                f.cwd.as_deref().unwrap_or("?"),
+                terminal_text(&f.confidence),
+                terminal_text(&f.entity_id),
+                terminal_text(&f.landed_workspace),
+                terminal_text(&f.landed_project),
+                terminal_text(f.cwd.as_deref().unwrap_or("?")),
                 expected,
             ),
             other => println!(
                 "  [{}] {} {} in {}/{}",
-                f.confidence, other, f.entity_id, f.landed_workspace, f.landed_project
+                terminal_text(&f.confidence),
+                terminal_text(other),
+                terminal_text(&f.entity_id),
+                terminal_text(&f.landed_workspace),
+                terminal_text(&f.landed_project)
             ),
         }
     }

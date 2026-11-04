@@ -635,13 +635,25 @@ pub(super) fn harness_name(harness: RunHarnessChoice) -> String {
         .map_or_else(|| "unknown".to_owned(), |value| value.get_name().to_owned())
 }
 
-pub(super) fn terminal_text(text: &str) -> String {
+pub(crate) fn terminal_text(text: &str) -> String {
     text.chars()
         .map(|character| {
             if character.is_control() {
                 '?'
             } else {
                 character
+            }
+        })
+        .collect()
+}
+
+pub(super) fn terminal_body(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character == '\n' || character == '\t' || !character.is_control() {
+                character
+            } else {
+                '?'
             }
         })
         .collect()

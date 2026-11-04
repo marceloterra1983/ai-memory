@@ -6,6 +6,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::SearchArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, get_json};
@@ -47,9 +48,9 @@ pub async fn run(config: &Config, args: SearchArgs) -> Result<()> {
     } else {
         println!("{} result(s) for {:?}:", hits.len(), args.query);
         for hit in &hits {
-            println!("  {}  rank={:.4}", hit.path, hit.rank);
-            println!("    {}", hit.title);
-            println!("    {}", hit.snippet);
+            println!("  {}  rank={:.4}", terminal_text(&hit.path), hit.rank);
+            println!("    {}", terminal_text(&hit.title));
+            println!("    {}", terminal_text(&hit.snippet));
         }
     }
     Ok(())

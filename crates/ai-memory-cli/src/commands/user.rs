@@ -8,6 +8,7 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::{
     UserAddArgs, UserAddHumanArgs, UserArgs, UserCommand, UserDisableArgs, UserEnableArgs,
     UserExpireArgs, UserListArgs, UserPatchArgs, UserResetPasswordArgs, UserReviveArgs,
@@ -206,9 +207,9 @@ async fn list(ep: &ServerEndpoint, args: UserListArgs) -> Result<()> {
     for u in &resp.users {
         println!(
             "{:<user_w$}  {:<name_w$}  {:<role_w$}  {:<12}",
-            u.username,
-            u.name.as_deref().unwrap_or("-"),
-            u.role,
+            terminal_text(&u.username),
+            terminal_text(u.name.as_deref().unwrap_or("-")),
+            terminal_text(&u.role),
             u.status(),
             user_w = user_w,
             name_w = name_w,
@@ -336,7 +337,7 @@ async fn patch(ep: &ServerEndpoint, args: UserPatchArgs) -> Result<()> {
     } else {
         println!(
             "✓ updated user '{}' ({})",
-            resp.user.username,
+            terminal_text(&resp.user.username),
             resp.user.status()
         );
     }
@@ -357,9 +358,9 @@ fn print_token(resp: &UserWithToken, json: bool, verb: &str) -> Result<()> {
         let _ = writeln!(
             stderr,
             "✓ {verb} user '{}'\n\nStore this token now — it will NOT be shown again.",
-            resp.user.username
+            terminal_text(&resp.user.username)
         );
-        println!("{}", resp.token);
+        println!("{}", terminal_text(&resp.token));
     }
     Ok(())
 }
@@ -375,21 +376,25 @@ fn print_temp_password(resp: &UserWithPassword, json: bool, verb: &str) -> Resul
         );
     } else {
         let mut stderr = io::stderr().lock();
-        let _ = writeln!(stderr, "✓ {verb} user '{}'", resp.user.username);
+        let _ = writeln!(
+            stderr,
+            "✓ {verb} user '{}'",
+            terminal_text(&resp.user.username)
+        );
         if let Some(name) = &resp.user.name {
-            let _ = writeln!(stderr, "  name:  {name}");
+            let _ = writeln!(stderr, "  name:  {}", terminal_text(name));
         }
         if let Some(email) = &resp.user.email {
-            let _ = writeln!(stderr, "  email: {email}");
+            let _ = writeln!(stderr, "  email: {}", terminal_text(email));
         }
         let _ = writeln!(
             stderr,
             "  role:  {}\n\n\
              Store this temporary password now — it will NOT be shown again. \
              The user must change it on next login.",
-            resp.user.role
+            terminal_text(&resp.user.role)
         );
-        println!("{}", resp.temporary_password);
+        println!("{}", terminal_text(&resp.temporary_password));
     }
     Ok(())
 }

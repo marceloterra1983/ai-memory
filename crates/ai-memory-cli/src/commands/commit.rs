@@ -3,6 +3,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::CommitArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -39,13 +40,16 @@ pub async fn run(config: &Config, args: CommitArgs) -> Result<()> {
     )
     .await?;
     if resp.committed {
-        println!("committed: {}", resp.oid.as_deref().unwrap_or("(unknown)"));
+        println!(
+            "committed: {}",
+            terminal_text(resp.oid.as_deref().unwrap_or("(unknown)"))
+        );
     } else {
         println!(
             "nothing to commit{}",
             resp.reason
                 .as_deref()
-                .map(|r| format!(" ({r})"))
+                .map(|r| format!(" ({})", terminal_text(r)))
                 .unwrap_or_default()
         );
     }

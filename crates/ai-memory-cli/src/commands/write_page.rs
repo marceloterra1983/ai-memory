@@ -9,6 +9,7 @@ use std::io::Read;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::WritePageArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -75,10 +76,13 @@ pub async fn run(config: &Config, args: WritePageArgs) -> Result<()> {
     .await
     .context("writing page via server")?;
 
-    let short_id = &resp.page_id[..resp.page_id.len().min(8)];
+    let short_id = terminal_text(&resp.page_id.chars().take(8).collect::<String>());
     println!(
         "✓ wrote {} (page_id={}) under {}/{}",
-        resp.path, short_id, workspace, project
+        terminal_text(&resp.path),
+        short_id,
+        workspace,
+        project
     );
     Ok(())
 }

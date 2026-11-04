@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::DeletePageArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -54,6 +55,12 @@ pub async fn run(config: &Config, args: DeletePageArgs) -> Result<()> {
     .context("deleting page via server")?;
 
     let status = if resp.deleted { "✓ deleted" } else { "no-op" };
-    println!("{} {} under {}/{}", status, resp.path, workspace, project);
+    println!(
+        "{} {} under {}/{}",
+        status,
+        terminal_text(&resp.path),
+        workspace,
+        project
+    );
     Ok(())
 }

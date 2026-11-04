@@ -3,6 +3,7 @@
 use ai_memory_core::WorkstreamEvent;
 use anyhow::Result;
 
+use super::show::terminal_text;
 use crate::cli::WorkstreamSearchArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, get_json};
@@ -32,8 +33,8 @@ pub async fn run(config: &Config, args: WorkstreamSearchArgs) -> Result<()> {
             "## Event {} | {} | {}\n{}\n",
             event.sequence,
             event.agent.as_str(),
-            role,
-            event.content
+            terminal_text(role),
+            super::show::terminal_body(&event.content)
         );
     }
     Ok(())

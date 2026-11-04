@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::RestorePageArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -55,17 +56,17 @@ pub async fn run(config: &Config, args: RestorePageArgs) -> Result<()> {
 
     println!(
         "restored {} under {}/{} from {} (page_id={})",
-        resp.path,
+        terminal_text(&resp.path),
         workspace,
         project,
-        resp.restored_from,
-        &resp.page_id[..resp.page_id.len().min(8)]
+        terminal_text(&resp.restored_from),
+        terminal_text(&resp.page_id.chars().take(8).collect::<String>())
     );
     if let Some(pre) = resp.pre_checkpoint {
-        println!("pre-restore checkpoint: {pre}");
+        println!("pre-restore checkpoint: {}", terminal_text(&pre));
     }
     if let Some(cp) = resp.checkpoint {
-        println!("restore checkpoint: {cp}");
+        println!("restore checkpoint: {}", terminal_text(&cp));
     }
     Ok(())
 }

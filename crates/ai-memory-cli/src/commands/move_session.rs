@@ -4,6 +4,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
+use super::show::terminal_text;
 use crate::cli::MoveSessionArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -84,8 +85,8 @@ pub async fn run(config: &Config, args: MoveSessionArgs) -> Result<()> {
 fn scope(label: &serde_json::Value) -> String {
     format!(
         "{}/{}",
-        label["workspace"].as_str().unwrap_or("?"),
-        label["project"].as_str().unwrap_or("?")
+        terminal_text(label["workspace"].as_str().unwrap_or("?")),
+        terminal_text(label["project"].as_str().unwrap_or("?"))
     )
 }
 
@@ -103,7 +104,7 @@ fn print_session_report(report: &serde_json::Value, applied: bool) {
     let verb = if applied { "Moved" } else { "Would move" };
     println!(
         "{verb} session {} from {} to {}:",
-        report["session_id"].as_str().unwrap_or("?"),
+        terminal_text(report["session_id"].as_str().unwrap_or("?")),
         scope(&report["from"]),
         scope(&report["to"]),
     );
@@ -118,7 +119,7 @@ fn print_session_report(report: &serde_json::Value, applied: bool) {
     );
     print_source_scopes(report, &scope(&report["to"]));
     if let Some(warning) = report["cwd_warning"].as_str() {
-        println!("Warning: {warning}");
+        println!("Warning: {}", terminal_text(warning));
     }
     print_checkpoints(report);
 }
@@ -138,10 +139,10 @@ fn print_would_create(report: &serde_json::Value) {
 /// changed the tree.
 fn print_checkpoints(report: &serde_json::Value) {
     if let Some(oid) = report["pre_checkpoint"].as_str() {
-        println!("Pre-move checkpoint: {oid}");
+        println!("Pre-move checkpoint: {}", terminal_text(oid));
     }
     if let Some(oid) = report["checkpoint"].as_str() {
-        println!("Checkpoint: {oid}");
+        println!("Checkpoint: {}", terminal_text(oid));
     }
 }
 
@@ -164,7 +165,7 @@ fn print_batch_report(report: &serde_json::Value, applied: bool) {
         for s in sessions {
             println!(
                 "{:<38} {:<8} {:>6} {:>8} {:>5} {:<22} {}",
-                s["session_id"].as_str().unwrap_or("?"),
+                terminal_text(s["session_id"].as_str().unwrap_or("?")),
                 if s["session_moved"].as_bool().unwrap_or(false) {
                     "moved"
                 } else {
@@ -173,8 +174,8 @@ fn print_batch_report(report: &serde_json::Value, applied: bool) {
                 s["summary"]["observations"].as_u64().unwrap_or(0),
                 s["summary"]["handoffs"].as_u64().unwrap_or(0),
                 s["summary"]["consolidation_jobs"].as_u64().unwrap_or(0),
-                s["page"].as_str().unwrap_or("none"),
-                s["cwd"].as_str().unwrap_or(""),
+                terminal_text(s["page"].as_str().unwrap_or("none")),
+                terminal_text(s["cwd"].as_str().unwrap_or("")),
             );
         }
         let rehomed = sessions
@@ -227,8 +228,8 @@ fn print_source_scopes(report: &serde_json::Value, destination: &str) {
     for s in &others {
         println!(
             "    {}/{}: {} observation(s)",
-            s["workspace"].as_str().unwrap_or("?"),
-            s["project"].as_str().unwrap_or("?"),
+            terminal_text(s["workspace"].as_str().unwrap_or("?")),
+            terminal_text(s["project"].as_str().unwrap_or("?")),
             s["observations"].as_u64().unwrap_or(0),
         );
     }
@@ -241,6 +242,7 @@ fn print_source_scopes(report: &serde_json::Value, destination: &str) {
 
 fn print_counts(summary: &serde_json::Value, page: &str) {
     let n = |key: &str| summary[key].as_u64().unwrap_or(0);
+    let page = terminal_text(page);
     println!("  observations:        {}", n("observations"));
     println!("  handoffs:            {}", n("handoffs"));
     println!("  consolidation jobs:  {}", n("consolidation_jobs"));

@@ -74,7 +74,7 @@ pub async fn run(config: &Config, args: UpgradeArgs) -> Result<()> {
     // Sync FS after await is intentional for this CLI one-shot path.
     refresh_staged_hooks(config)?;
     warn_remote_server(config);
-    println!("✓ upgraded to {tag}");
+    println!("✓ upgraded to {}", super::show::terminal_text(&tag));
     info!(%tag, path = %exe.display(), "native upgrade complete");
     Ok(())
 }
@@ -122,7 +122,10 @@ async fn fetch_verified_archive(
 ) -> Result<Vec<u8>> {
     let archive_url = format!("{base}/download/{tag}/{asset}");
     let checksum_url = format!("{archive_url}.sha256");
-    println!("→ downloading {asset} ({tag})");
+    println!(
+        "→ downloading {asset} ({})",
+        super::show::terminal_text(tag)
+    );
     let archive_bytes = fetcher
         .get_bytes(&archive_url)
         .await

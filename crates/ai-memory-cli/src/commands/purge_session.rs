@@ -3,6 +3,7 @@
 use anyhow::{Result, bail};
 use serde::Serialize;
 
+use super::show::terminal_text;
 use crate::cli::PurgeSessionArgs;
 use crate::commands::purge_preview::{PreviewOutcome, refused_message, run_preview};
 use crate::config::Config;
@@ -170,7 +171,7 @@ pub async fn run(config: &Config, args: PurgeSessionArgs) -> Result<()> {
     {
         println!("Wiki pages removed:");
         for path in paths.iter().filter_map(serde_json::Value::as_str) {
-            println!("  - {path}");
+            println!("  - {}", terminal_text(path));
         }
     }
     if let Some(failed) = report["files_failed"].as_array()
@@ -181,7 +182,7 @@ pub async fn run(config: &Config, args: PurgeSessionArgs) -> Result<()> {
             failed.len()
         );
         for path in failed.iter().filter_map(serde_json::Value::as_str) {
-            println!("  - {path}");
+            println!("  - {}", terminal_text(path));
         }
     }
     if report["compacted"].as_bool().unwrap_or(false) {

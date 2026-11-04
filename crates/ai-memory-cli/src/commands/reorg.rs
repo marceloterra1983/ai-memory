@@ -5,6 +5,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::ReorgArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -66,7 +67,12 @@ pub async fn run(config: &Config, args: ReorgArgs) -> Result<()> {
         println!("{:<38} {:<20} cwd", "session_id", "new_project");
         println!("{}", "-".repeat(80));
         for e in &report.plan {
-            println!("{:<38} {:<20} {}", e.session_id, e.new_project, e.cwd);
+            println!(
+                "{:<38} {:<20} {}",
+                terminal_text(&e.session_id),
+                terminal_text(&e.new_project),
+                terminal_text(&e.cwd)
+            );
         }
         println!("\n(dry-run; omit --dry-run to apply)");
     } else {

@@ -9,6 +9,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::hook_spool::{SpoolHealth, spool_dir, spool_health};
+use super::show::terminal_text;
 use crate::cli::StatusArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, get_json};
@@ -232,11 +233,11 @@ pub async fn run(config: &Config, args: StatusArgs) -> Result<()> {
             }))?
         );
     } else {
-        println!("ai-memory {} (server)", report.version);
+        println!("ai-memory {} (server)", terminal_text(&report.version));
         println!("  server:       {}", ep.url);
-        println!("  data-dir:     {}", report.data_dir);
-        println!("  db:           {}", report.db_path);
-        println!("  bind:         {}", report.bind);
+        println!("  data-dir:     {}", terminal_text(&report.data_dir));
+        println!("  db:           {}", terminal_text(&report.db_path));
+        println!("  bind:         {}", terminal_text(&report.bind));
         println!(
             "  pages:        {} (all versions: {})",
             report.counts.pages_latest, report.counts.pages_all
@@ -263,7 +264,10 @@ pub async fn run(config: &Config, args: StatusArgs) -> Result<()> {
         for triple in &report.derived.embedding_triples {
             println!(
                 "    {}/{} dim {}: {} rows",
-                triple.provider, triple.model, triple.dim, triple.count
+                terminal_text(&triple.provider),
+                terminal_text(&triple.model),
+                triple.dim,
+                triple.count
             );
         }
         // Only shown when there is something to act on. A recovered count with
@@ -309,7 +313,7 @@ pub async fn run(config: &Config, args: StatusArgs) -> Result<()> {
                 .derived
                 .typed_links_from_latest_pages
                 .iter()
-                .map(|(k, v)| format!("{k}: {v}"))
+                .map(|(k, v)| format!("{}: {v}", terminal_text(k)))
                 .collect();
             println!("    typed edges: {}", typed.join(", "));
         }
@@ -322,7 +326,8 @@ pub async fn run(config: &Config, args: StatusArgs) -> Result<()> {
             match (&wiki.backup_archive, wiki.backup_archive_bytes) {
                 (Some(path), Some(bytes)) => println!(
                     "  wiki format:  {migrated}; pre-migration backup still on disk: \
-                     {path} ({})",
+                     {} ({})",
+                    terminal_text(path),
                     super::compact::human_bytes(bytes)
                 ),
                 _ => println!("  wiki format:  {migrated}"),
@@ -368,23 +373,26 @@ pub async fn run(config: &Config, args: StatusArgs) -> Result<()> {
         println!("  providers:");
         println!(
             "    llm:       {}",
-            provider_health_line(&report.providers.llm)
+            terminal_text(&provider_health_line(&report.providers.llm))
         );
         println!(
             "    embedding: {}",
-            provider_health_line(&report.providers.embedding)
+            terminal_text(&provider_health_line(&report.providers.embedding))
         );
         if report.providers.llm.status == ProviderHealthStatus::Error
             && let Some(hint) = &report.providers.llm.retry_hint
         {
-            println!("    retry:     {hint}");
+            println!("    retry:     {}", terminal_text(hint));
         }
         // Only present when `llm_fallbacks` is configured — an older server
         // or a plain single-provider setup reports an empty list.
         if !report.providers.llm_candidates.is_empty() {
             println!("    fallback chain:");
             for candidate in &report.providers.llm_candidates {
-                println!("      {}", fallback_candidate_line(candidate));
+                println!(
+                    "      {}",
+                    terminal_text(&fallback_candidate_line(candidate))
+                );
             }
         }
     }

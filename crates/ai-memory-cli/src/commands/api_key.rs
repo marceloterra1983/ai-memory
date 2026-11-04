@@ -7,6 +7,7 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::{
     ApiKeyAddArgs, ApiKeyArgs, ApiKeyCommand, ApiKeyListArgs, ApiKeyRevokeArgs, ApiKeyRotateArgs,
 };
@@ -118,10 +119,10 @@ async fn list(ep: &ServerEndpoint, args: ApiKeyListArgs) -> Result<()> {
     for c in &resp.credentials {
         println!(
             "{:<id_w$}  {:<label_w$}  {:<8}  {}",
-            c.id,
-            c.label,
+            terminal_text(&c.id),
+            terminal_text(&c.label),
             c.status(),
-            c.preview.as_deref().unwrap_or("-"),
+            terminal_text(c.preview.as_deref().unwrap_or("-")),
             id_w = id_w,
             label_w = label_w,
         );
@@ -170,9 +171,10 @@ fn print_token(resp: &CredentialWithToken, json: bool, verb: &str) -> Result<()>
             stderr,
             "✓ {verb} API key '{}' ({})\n\n\
              Store this token now — it will NOT be shown again.",
-            resp.credential.id, resp.credential.label
+            terminal_text(&resp.credential.id),
+            terminal_text(&resp.credential.label)
         );
-        println!("{}", resp.token);
+        println!("{}", terminal_text(&resp.token));
     }
     Ok(())
 }

@@ -13,6 +13,7 @@ use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
+use super::show::terminal_text;
 use crate::cli::{AuthArgs, AuthCommand, AuthProviderChoice};
 use crate::config::Config;
 
@@ -27,7 +28,7 @@ const POLLING_SAFETY_MARGIN_SECS: u64 = 3;
 /// # Errors
 /// Returns an error if token storage or provider auth requests fail.
 pub async fn run(config: &Config, args: AuthArgs) -> Result<()> {
-    match args.command {
+    let result = match args.command {
         AuthCommand::Login(args) => match args.provider {
             AuthProviderChoice::OpenaiOauth => {
                 if args.github_token.is_some() || args.client_id.is_some() || args.issuer.is_some()
@@ -63,7 +64,8 @@ pub async fn run(config: &Config, args: AuthArgs) -> Result<()> {
             AuthProviderChoice::OidcDevice => logout_oidc_device(config),
         },
         AuthCommand::Status(_) => status(config),
-    }
+    };
+    result.map_err(|error| anyhow!("{}", terminal_text(&format!("{error:#}"))))
 }
 
 async fn login_oidc_device(
@@ -77,10 +79,10 @@ async fn login_oidc_device(
     let device = request_device_code(&client, &discovery, client_id, OIDC_DEFAULT_SCOPE).await?;
 
     match device.verification_uri_complete.as_deref() {
-        Some(complete) => println!("Open this URL: {complete}"),
+        Some(complete) => println!("Open this URL: {}", terminal_text(complete)),
         None => {
-            println!("Open this URL: {}", device.verification_uri);
-            println!("Enter code: {}", device.user_code);
+            println!("Open this URL: {}", terminal_text(&device.verification_uri));
+            println!("Enter code: {}", terminal_text(&device.user_code));
         }
     }
     println!("Waiting for authorization...");
@@ -154,7 +156,7 @@ async fn login_openai_oauth(config: &Config, timeout_secs: u64) -> Result<()> {
     let client = auth_http_client()?;
     let device = start_device_authorization(&client).await?;
     println!("Open this URL: {DEVICE_BROWSER_URL}");
-    println!("Enter code: {}", device.user_code);
+    println!("Enter code: {}", terminal_text(&device.user_code));
     println!("Waiting for authorization...");
 
     let code =
@@ -175,7 +177,7 @@ async fn login_openai_oauth(config: &Config, timeout_secs: u64) -> Result<()> {
 
     println!("openai-oauth: logged in");
     if let Some(account_id) = token.extra.account_id.as_deref() {
-        println!("account: {account_id}");
+        println!("account: {}", terminal_text(account_id));
     }
     println!("token file: {}", path.display());
     Ok(())
@@ -231,7 +233,7 @@ fn status(config: &Config) -> Result<()> {
         Some(token) => {
             println!("openai-oauth: logged in");
             if let Some(account_id) = token.extra.account_id.as_deref() {
-                println!("account: {account_id}");
+                println!("account: {}", terminal_text(account_id));
             }
             println!("expires in: {}", format_duration_until(token.expires_at_ms));
             println!("token file: {}", openai_path.display());
@@ -269,7 +271,7 @@ fn status(config: &Config) -> Result<()> {
                 );
             }
             if let Some(api_base_url) = token.api_base_url.as_deref() {
-                println!("api base: {api_base_url}");
+                println!("api base: {}", terminal_text(api_base_url));
             }
             println!("token file: {}", copilot_path.display());
         }
@@ -283,7 +285,7 @@ fn status(config: &Config) -> Result<()> {
     match OidcToken::load(&oidc_path).map_err(anyhow::Error::from)? {
         Some(token) => {
             println!("oidc-device: logged in");
-            println!("issuer: {}", token.extra.issuer);
+            println!("issuer: {}", terminal_text(&token.extra.issuer));
             println!("expires in: {}", format_duration_until(token.expires_at_ms));
             println!("token file: {}", oidc_path.display());
         }
@@ -298,8 +300,8 @@ fn status(config: &Config) -> Result<()> {
 async fn run_copilot_device_flow(client_id: &str, timeout_secs: u64) -> Result<String> {
     let client = auth_http_client()?;
     let device = start_github_device_authorization(&client, client_id).await?;
-    println!("Open this URL: {}", device.verification_uri);
-    println!("Enter code: {}", device.user_code);
+    println!("Open this URL: {}", terminal_text(&device.verification_uri));
+    println!("Enter code: {}", terminal_text(&device.user_code));
     println!("Waiting for authorization...");
     poll_github_device_authorization(
         &client,

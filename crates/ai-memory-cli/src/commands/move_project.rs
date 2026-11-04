@@ -3,6 +3,7 @@
 use anyhow::{Result, bail};
 use serde::Serialize;
 
+use super::show::terminal_text;
 use crate::cli::MoveProjectArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -125,8 +126,8 @@ pub async fn run(config: &Config, args: MoveProjectArgs) -> Result<()> {
             for c in conflicts {
                 println!(
                     "  {} → {}",
-                    c["path"].as_str().unwrap_or("?"),
-                    c["moved_to"].as_str().unwrap_or("?"),
+                    terminal_text(c["path"].as_str().unwrap_or("?")),
+                    terminal_text(c["moved_to"].as_str().unwrap_or("?")),
                 );
             }
         }

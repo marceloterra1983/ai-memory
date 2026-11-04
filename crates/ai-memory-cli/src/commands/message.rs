@@ -128,7 +128,9 @@ async fn send(config: &Config, args: MessageSendArgs) -> Result<()> {
 
     println!(
         "Sent message {} from {from_workspace}/{from_project} to {}/{}.",
-        resp.message_id, args.to_workspace, args.to_project
+        super::show::terminal_text(&resp.message_id),
+        args.to_workspace,
+        args.to_project
     );
     Ok(())
 }
@@ -169,20 +171,28 @@ async fn list(config: &Config, args: MessageListArgs) -> Result<()> {
             .parse::<jiff::Timestamp>()
             .map(|ts| now_ms.saturating_sub(ts.as_millisecond()) / 1_000)
             .unwrap_or(0);
-        let subject = m.subject.as_deref().unwrap_or("(no subject)");
+        let subject = super::show::terminal_text(m.subject.as_deref().unwrap_or("(no subject)"));
         let (from, to) = if args.outbox {
             (
                 format!("{workspace}/{project}"),
-                format!("{}/{}", m.to_workspace_id, m.to_project_id),
+                format!(
+                    "{}/{}",
+                    super::show::terminal_text(&m.to_workspace_id),
+                    super::show::terminal_text(&m.to_project_id)
+                ),
             )
         } else {
             (
-                format!("{}/{}", m.from_workspace_id, m.from_project_id),
+                format!(
+                    "{}/{}",
+                    super::show::terminal_text(&m.from_workspace_id),
+                    super::show::terminal_text(&m.from_project_id)
+                ),
                 format!("{workspace}/{project}"),
             )
         };
         println!("  {}  {subject}", super::humanize_age_secs(age_secs));
-        println!("    id: {}", m.id);
+        println!("    id: {}", super::show::terminal_text(&m.id));
         println!("    {from} -> {to}");
     }
     Ok(())
@@ -252,15 +262,12 @@ async fn pop(config: &Config, args: MessagePopArgs) -> Result<()> {
 
 // Preserve multiline evidence while neutralizing ESC, C1 and cursor controls.
 fn terminal_body(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if character == '\n' || character == '\t' || !character.is_control() {
-                character
-            } else {
-                '?'
-            }
-        })
-        .collect()
+    super::show::terminal_body(text)
+        .replace(
+            "---- body (untrusted cross-project input) ----",
+            "(escaped) ---- body (untrusted cross-project input) ----",
+        )
+        .replace("---- end of body ----", "(escaped) ---- end of body ----")
 }
 
 #[derive(Debug, Serialize)]

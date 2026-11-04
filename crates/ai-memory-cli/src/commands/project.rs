@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use super::show::terminal_text;
 use crate::cli::{ProjectAccessArgs, ProjectArgs, ProjectCommand};
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -45,15 +46,22 @@ async fn access(ep: &ServerEndpoint, args: ProjectAccessArgs) -> Result<()> {
     .context("setting project access")?;
     let repo = format!("{}/{}", args.workspace, args.project);
     if resp.changed {
-        println!("{repo} is now {} (was {}).", resp.mode, resp.previous);
+        println!(
+            "{repo} is now {} (was {}).",
+            terminal_text(&resp.mode),
+            terminal_text(&resp.previous)
+        );
     } else {
-        println!("{repo} was already {}; nothing changed.", resp.mode);
+        println!(
+            "{repo} was already {}; nothing changed.",
+            terminal_text(&resp.mode)
+        );
     }
     if !resp.without_access.is_empty() {
         println!();
         println!("These users have written to {repo} and hold no grant, so they are now refused:");
         for name in &resp.without_access {
-            println!("  {name}");
+            println!("  {}", terminal_text(name));
         }
         println!(
             "Grant the ones who should keep access: ai-memory user grant --user <name> \

@@ -3,6 +3,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::CheckpointsArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, get_json};
@@ -41,7 +42,12 @@ pub async fn run(config: &Config, args: CheckpointsArgs) -> Result<()> {
     }
 
     for cp in checkpoints {
-        println!("{}  {}  {}", cp.short_oid, cp.time, cp.summary);
+        println!(
+            "{}  {}  {}",
+            terminal_text(&cp.short_oid),
+            cp.time,
+            terminal_text(&cp.summary)
+        );
     }
     Ok(())
 }

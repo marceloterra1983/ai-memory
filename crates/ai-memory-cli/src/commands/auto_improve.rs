@@ -4,6 +4,7 @@ use ai_memory_store::SkippedProposal;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::AutoImproveArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -121,25 +122,33 @@ fn render_human(response: &StageResponse) -> String {
     if response.approval_required {
         lines.push(format!(
             "Staged auto-improve run {} for manual approval",
-            response.run_id
+            terminal_text(&response.run_id)
         ));
     } else {
         lines.push(format!(
             "Auto-approved auto-improve run {}",
-            response.run_id
+            terminal_text(&response.run_id)
         ));
     }
-    lines.push(format!("Approval policy: {}", response.approval_policy));
+    lines.push(format!(
+        "Approval policy: {}",
+        terminal_text(&response.approval_policy)
+    ));
     for proposal in &response.proposals {
         if let Some(page_id) = &proposal.page_id {
             lines.push(format!(
                 "  - {} [{}] page {} ({})",
-                proposal.id, proposal.status, page_id, proposal.sidecar_path
+                terminal_text(&proposal.id),
+                terminal_text(&proposal.status),
+                terminal_text(page_id),
+                terminal_text(&proposal.sidecar_path)
             ));
         } else {
             lines.push(format!(
                 "  - {} [{}] ({})",
-                proposal.id, proposal.status, proposal.sidecar_path
+                terminal_text(&proposal.id),
+                terminal_text(&proposal.status),
+                terminal_text(&proposal.sidecar_path)
             ));
         }
     }

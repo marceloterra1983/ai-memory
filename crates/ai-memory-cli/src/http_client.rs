@@ -47,7 +47,10 @@ impl fmt::Display for ServerResponseError {
         write!(
             formatter,
             "{} {}: server returned {}: {}",
-            self.method, self.path, self.status, self.body
+            self.method,
+            crate::commands::show::terminal_text(&self.path),
+            self.status,
+            crate::commands::show::terminal_text(&self.body)
         )
     }
 }

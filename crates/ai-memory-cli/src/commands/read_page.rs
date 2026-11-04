@@ -13,6 +13,7 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::ReadPageArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, get_json};
@@ -70,11 +71,11 @@ pub async fn run(config: &Config, args: ReadPageArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&page)?);
     } else {
         if let Some(ref title) = page.title {
-            println!("# {title}");
+            println!("# {}", terminal_text(title));
         }
-        println!("path: {}", page.path);
+        println!("path: {}", terminal_text(&page.path));
         println!();
-        print!("{}", page.body);
+        print!("{}", super::show::terminal_body(&page.body));
         if !page.body.ends_with('\n') {
             println!();
         }

@@ -4,6 +4,7 @@ use ai_memory_core::{AgentKind, SessionId};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::show::terminal_text;
 use crate::cli::FinalizeSessionArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, ServerResponseError, get_json, http_client};
@@ -185,7 +186,7 @@ fn print_report(
             report.project
         );
         for session_id in &report.finalized {
-            println!("  - {session_id}");
+            println!("  - {}", terminal_text(session_id));
         }
     }
     Ok(())

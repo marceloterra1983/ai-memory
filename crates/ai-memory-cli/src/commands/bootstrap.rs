@@ -18,6 +18,7 @@ use ai_memory_consolidate::{
 use anyhow::{Context, Result};
 use tracing::info;
 
+use super::show::terminal_text;
 use crate::cli::BootstrapArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -278,10 +279,10 @@ fn print_human_report(outcome: &BootstrapOutcome, workspace: &str, project: &str
             }
         );
         for p in &outcome.pages_written {
-            println!("  - {p}");
+            println!("  - {}", terminal_text(p));
         }
         if !outcome.rationale.is_empty() {
-            println!("\nRationale: {}", outcome.rationale);
+            println!("\nRationale: {}", terminal_text(&outcome.rationale));
         }
     }
 

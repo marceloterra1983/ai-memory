@@ -148,13 +148,15 @@ pub async fn grant(ep: &ServerEndpoint, args: &UserGrantArgs) -> Result<()> {
     })?;
     let who = &args.user;
     let project = format!("{}/{}", args.workspace, args.project);
-    match (resp.changed, resp.previous) {
+    let level = super::show::terminal_text(&resp.level);
+    let previous = resp.previous.as_deref().map(super::show::terminal_text);
+    match (resp.changed, previous) {
         (false, _) => println!(
             "{who} already holds {} on {project}; nothing changed.",
-            resp.level
+            level
         ),
-        (true, Some(previous)) => println!("{who}: {previous} -> {} on {project}.", resp.level),
-        (true, None) => println!("{who} now holds {} on {project}.", resp.level),
+        (true, Some(previous)) => println!("{who}: {previous} -> {level} on {project}."),
+        (true, None) => println!("{who} now holds {level} on {project}."),
     }
     Ok(())
 }

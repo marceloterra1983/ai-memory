@@ -82,7 +82,7 @@ fn render_human(summaries: &[ManagedWorkstreamSummary], workspace: &str, project
         let _ = writeln!(
             output,
             "{marker} {}  {}  [{}]",
-            summary.name,
+            super::show::terminal_text(&summary.name),
             humanize_age(&summary.last_active_at),
             harnesses,
         );
@@ -131,5 +131,26 @@ mod tests {
             render_human(&[], "default", "game")
                 .contains("No managed workstreams for this checkout.")
         );
+    }
+}
+
+#[cfg(test)]
+mod terminal_regressions {
+    use super::*;
+
+    #[test]
+    fn terminal_workstream_name_cannot_forge_a_row() {
+        let rows = [ManagedWorkstreamSummary {
+            workstream_id: ai_memory_core::WorkstreamId::new(),
+            name: "café\nforged\u{1b}[2J".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            last_active_at: "2026-01-01T00:00:00Z".into(),
+            current: false,
+            linked_harnesses: vec![ai_memory_core::AgentKind::Codex],
+        }];
+        let output = render_human(&rows, "local", "project");
+        assert!(output.contains("café?forged?[2J"), "{output:?}");
+        assert_eq!(output.lines().count(), 3);
+        assert!(output.contains("[codex]"));
     }
 }

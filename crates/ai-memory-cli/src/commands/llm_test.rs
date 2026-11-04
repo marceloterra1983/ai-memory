@@ -4,6 +4,7 @@ use ai_memory_llm::{ChatRequest, ProviderChoice, ProviderConfig, build_provider}
 use anyhow::{Context, Result};
 use tracing::info;
 
+use super::show::terminal_text;
 use crate::cli::{LlmProviderChoice, LlmTestArgs};
 use crate::config::Config;
 
@@ -48,21 +49,26 @@ pub async fn run(config: &Config, args: LlmTestArgs) -> Result<()> {
                 }),
             )
             .await
+            .map_err(|error| anyhow::anyhow!("{}", terminal_text(&error.to_string())))
             .context("calling provider for structured output")?;
         println!("--- model: {} ---", client.model());
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
-    let resp = client.complete(request).await.context("calling provider")?;
+    let resp = client
+        .complete(request)
+        .await
+        .map_err(|error| anyhow::anyhow!("{}", terminal_text(&error.to_string())))
+        .context("calling provider")?;
 
-    println!("--- model: {} ---", resp.model);
+    println!("--- model: {} ---", terminal_text(&resp.model));
     if let Some(u) = resp.usage {
         println!(
             "--- usage: in={} out={} ---",
             u.input_tokens, u.output_tokens
         );
     }
-    println!("{}", resp.text);
+    println!("{}", super::show::terminal_body(&resp.text));
     Ok(())
 }
 

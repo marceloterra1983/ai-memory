@@ -77,12 +77,12 @@ pub async fn run(config: &Config, args: HandoffsArgs) -> Result<()> {
             out,
             "  {}  from {} -> {}",
             super::humanize_age_secs(now_ms.saturating_sub(h.created_at_ms) / 1_000),
-            h.from_agent,
-            target
+            super::show::terminal_text(&h.from_agent),
+            super::show::terminal_text(target)
         );
-        let _ = writeln!(out, "    id: {}", h.id);
+        let _ = writeln!(out, "    id: {}", super::show::terminal_text(&h.id));
         if let Some(cwd) = h.cwd.as_deref() {
-            let _ = writeln!(out, "    cwd: {cwd}");
+            let _ = writeln!(out, "    cwd: {}", super::show::terminal_text(cwd));
         }
     }
     let _ = writeln!(

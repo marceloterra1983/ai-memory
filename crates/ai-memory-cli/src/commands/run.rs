@@ -335,13 +335,13 @@ pub(super) async fn run_from_with_wiring(
             "ai-memory: linked {} session {} is missing from its native store; starting fresh and repointing workstream '{}' after the new session is established",
             harness.as_str(),
             display_session_id(&orphaned_session),
-            prepared.workstream_name
+            super::show::terminal_text(&prepared.workstream_name)
         );
     } else if force_fresh && plan.mode == LaunchMode::Session {
         eprintln!(
             "ai-memory: starting a fresh {} session in workstream '{}'",
             harness.as_str(),
-            prepared.workstream_name
+            super::show::terminal_text(&prepared.workstream_name)
         );
     }
     if automatic_harness
@@ -729,7 +729,7 @@ pub(super) async fn run_from_with_wiring(
     }
     eprintln!(
         "ai-memory: workstream '{}' saved {imported} new event(s)",
-        prepared.workstream_name
+        super::show::terminal_text(&prepared.workstream_name)
     );
     interrupt_task.abort();
     if let Some((session, finalized)) = finalize_hookless_session(
@@ -2109,7 +2109,7 @@ fn choose_native_session(
         output,
         "ai-memory: no {} session is linked to workstream '{}'.",
         harness.as_str(),
-        workstream_name
+        super::show::terminal_text(workstream_name)
     )?;
     writeln!(output, "Previous sessions for this checkout:")?;
     for (index, candidate) in candidates.iter().enumerate() {
@@ -2333,7 +2333,7 @@ async fn wait_out_held_lease(
         "ai-memory: the workstream is held by {} until {} — usually a launcher that exited \
          without releasing it. Waiting {}s for that lease to lapse (Ctrl-C to abort; \
          `--new <name>` starts a separate workstream).",
-        held.owner,
+        super::show::terminal_text(&held.owner),
         held.expires,
         wait.as_secs_f64().ceil()
     );
@@ -5384,5 +5384,29 @@ mod tests {
         );
         drop(seen);
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod terminal_regressions {
+    use super::*;
+
+    #[test]
+    fn terminal_native_choice_neutralizes_received_workstream_name() {
+        let mut output = Vec::new();
+        let selected = choose_native_session(
+            ManagedHarness::Codex,
+            "café\nforged\u{1b}[2J",
+            &[],
+            &mut std::io::Cursor::new(b"0\n"),
+            &mut output,
+            SystemTime::now(),
+        )
+        .unwrap();
+        assert!(selected.is_none());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("café?forged?[2J"), "{output:?}");
+        assert!(!output.contains('\u{1b}'));
+        assert!(output.contains("Start a new codex session"));
     }
 }

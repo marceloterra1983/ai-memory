@@ -8732,6 +8732,14 @@ pub(crate) mod tests {
             } else {
                 page(ws, proj, &path, "rewritten manual")
             };
+            let live_version = |conn: &Connection| -> Option<(Vec<u8>, String)> {
+                conn.query_row(
+                    "SELECT id, body FROM pages WHERE workspace_id = ?1 AND project_id = ?2 AND path = ?3 AND is_latest = 1",
+                    params![ws.as_bytes(), proj.as_bytes(), &path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional().unwrap()
+            };
+            let latest_before = live_version(&conn);
             let rows_before = count(&conn, "SELECT COUNT(*) FROM pages");
             let result = upsert_page_from_disk(&mut conn, &disk);
             if blocked {
@@ -8743,6 +8751,19 @@ pub(crate) mod tests {
                     count(&conn, "SELECT COUNT(*) FROM pages"),
                     rows_before,
                     "{label}"
+                );
+                assert_eq!(
+                    live_version(&conn),
+                    latest_before,
+                    "{label}: refused reindex must preserve the live version"
+                );
+                assert_eq!(
+                    count(
+                        &conn,
+                        "SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH 'rewritten'"
+                    ),
+                    0,
+                    "{label}: refused body must not enter FTS"
                 );
             } else {
                 assert!(result.is_ok(), "{label}: {result:?}");
@@ -14046,6 +14067,14 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(retained, 1, "purge replay protection must outlive cleanup");
+        let replay = begin_session(
+            &mut conn,
+            &hook_session(session_id, workspace_id, project_id, None),
+        );
+        assert!(
+            matches!(replay, Err(StoreError::SessionPurged(_))),
+            "cleanup must not let a stale event reopen the purged session: {replay:?}"
+        );
 
         // Control: the tombstone is the only thing holding the project. Once
         // it is gone the project is hollow like any other and is swept.

@@ -213,6 +213,65 @@ pub fn upsert_page(conn: &mut Connection, page: &NewPage) -> StoreResult<PageId>
     Ok(result_id)
 }
 
+/// Reindex a disk page without reviving a purged session's summary.
+///
+/// The tombstone and any surviving manual version are checked in the upsert
+/// transaction, so a directory walk's earlier snapshot cannot authorize a
+/// write after a session purge. Explicit page writes/restores use
+/// [`upsert_page`].
+///
+/// # Errors
+/// Returns [`StoreError::SessionPurged`] for a purged session's summary, or
+/// any error from [`upsert_page_in_tx`].
+pub fn upsert_page_from_disk(conn: &mut Connection, page: &NewPage) -> StoreResult<PageId> {
+    let now = Timestamp::now().as_microsecond();
+    let tx = conn.transaction()?;
+    // Only `sessions/<id>.md` can be the file a failed purge cleanup left
+    // behind, so every other path skips the lookup.
+    let session = page
+        .path
+        .as_str()
+        .strip_prefix("sessions/")
+        .and_then(|rest| rest.strip_suffix(".md"))
+        .and_then(|id| id.parse::<SessionId>().ok());
+    if let Some(session) = session {
+        let session_text = session.to_string();
+        let owns_file = page
+            .frontmatter_json
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            == Some(session_text.as_str());
+        // A manual version at this path survives a purge (see `purge_session`)
+        // and may keep changing, but a missing `session_id` alone is not
+        // permission to recreate a deleted page: a legacy summary can lack the
+        // field too. So a non-owned write is allowed only while a live,
+        // non-owned version still exists at the path.
+        let blocked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM purged_sessions \
+                 WHERE workspace_id = ?1 AND project_id = ?2 AND session_id = ?3) \
+               AND (?6 OR NOT EXISTS(SELECT 1 FROM pages \
+                 WHERE workspace_id = ?1 AND project_id = ?2 AND path = ?4 \
+                   AND is_latest = 1 \
+                   AND json_extract(frontmatter_json, '$.session_id') IS NOT ?5))",
+            params![
+                page.workspace_id.as_bytes(),
+                page.project_id.as_bytes(),
+                session.as_bytes(),
+                page.path.as_str(),
+                session_text,
+                owns_file
+            ],
+            |row| row.get(0),
+        )?;
+        if blocked {
+            return Err(StoreError::SessionPurged(session_text));
+        }
+    }
+    let id = upsert_page_in_tx(&tx, page, now)?;
+    tx.commit()?;
+    Ok(id)
+}
+
 /// Upsert `page` only when `guard` matches the live head, in this transaction.
 ///
 /// A refusal returns [`StoreError::PageWriteConflict`] before
@@ -757,7 +816,8 @@ fn insert_project_with_identity(
 
 /// Delete "hollow" project rows: zero pages (any version), zero sessions,
 /// zero observations, zero handoffs, zero managed workstreams, zero
-/// auto-improve runs/proposals/rejections, and older than `min_age_days`.
+/// auto-improve runs/proposals/rejections, zero purge tombstones, and older
+/// than `min_age_days`.
 /// (The per-project scheduler-state row is bookkeeping created for every
 /// project and does not count as data.) These are pure bookkeeping noise left
 /// behind by probes, renames, and failed first events — nothing exists to lose,
@@ -782,6 +842,7 @@ pub fn sweep_hollow_projects(conn: &mut Connection, min_age_days: u32) -> StoreR
                AND NOT EXISTS (SELECT 1 FROM observations WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM handoffs     WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM workstreams  WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM purged_sessions WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM auto_improve_runs      WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM auto_improve_proposals WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM auto_improve_rejections WHERE project_id = projects.id)",
@@ -802,6 +863,7 @@ pub fn sweep_hollow_projects(conn: &mut Connection, min_age_days: u32) -> StoreR
                AND NOT EXISTS (SELECT 1 FROM observations WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM handoffs     WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM workstreams  WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM purged_sessions WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM auto_improve_runs      WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM auto_improve_proposals WHERE project_id = projects.id)
                AND NOT EXISTS (SELECT 1 FROM auto_improve_rejections WHERE project_id = projects.id)",
@@ -8635,6 +8697,94 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn disk_reindex_checks_purge_and_surviving_version_ownership() {
+        for (label, manual_before, manual_after, incoming_owned, blocked) in [
+            ("owned leftover", false, false, true, true),
+            ("legacy leftover", false, false, false, true),
+            ("older manual is not live", true, false, false, true),
+            ("live manual replacement", false, true, false, false),
+            ("summary over live manual", false, true, true, true),
+        ] {
+            let (_tmp, mut conn, ws, proj) = fresh_db();
+            let sid = SessionId::new();
+            let path = format!("sessions/{sid}.md");
+            begin_session(&mut conn, &hook_session(sid, ws, proj, None)).unwrap();
+            if manual_before {
+                upsert_page(&mut conn, &page(ws, proj, &path, "older manual")).unwrap();
+            }
+            let id = upsert_page(&mut conn, &session_page(ws, proj, sid, "summary")).unwrap();
+            end_session(&mut conn, &sid, Some(&id)).unwrap();
+            if manual_after {
+                upsert_page(&mut conn, &page(ws, proj, &path, "manual survivor")).unwrap();
+            }
+            purge_session(
+                &mut conn,
+                ws,
+                proj,
+                sid,
+                None,
+                Compaction::Skip,
+                PurgeMode::Commit,
+            )
+            .unwrap();
+            let disk = if incoming_owned {
+                session_page(ws, proj, sid, "rewritten summary")
+            } else {
+                page(ws, proj, &path, "rewritten manual")
+            };
+            let rows_before = count(&conn, "SELECT COUNT(*) FROM pages");
+            let result = upsert_page_from_disk(&mut conn, &disk);
+            if blocked {
+                assert!(
+                    matches!(result, Err(StoreError::SessionPurged(_))),
+                    "{label}: {result:?}"
+                );
+                assert_eq!(
+                    count(&conn, "SELECT COUNT(*) FROM pages"),
+                    rows_before,
+                    "{label}"
+                );
+            } else {
+                assert!(result.is_ok(), "{label}: {result:?}");
+            }
+            // Tombstones are scoped; the same session id in a sibling project
+            // and another session's path in this project remain writable.
+            let sibling = get_or_create_project(&mut conn, &ws, "sibling", None).unwrap();
+            assert!(
+                upsert_page_from_disk(&mut conn, &session_page(ws, sibling, sid, "sibling"))
+                    .is_ok(),
+                "{label}: sibling project"
+            );
+            assert!(
+                upsert_page_from_disk(
+                    &mut conn,
+                    &session_page(ws, proj, SessionId::new(), "other session")
+                )
+                .is_ok(),
+                "{label}: other session"
+            );
+            let other_ws = get_or_create_workspace(&mut conn, "other-workspace").unwrap();
+            let other_proj = get_or_create_project(&mut conn, &other_ws, "other", None).unwrap();
+            assert!(
+                upsert_page_from_disk(
+                    &mut conn,
+                    &session_page(other_ws, other_proj, sid, "other workspace")
+                )
+                .is_ok(),
+                "{label}: other workspace"
+            );
+            // A session_id on an ordinary content page has never made that
+            // page the reserved session summary targeted by this gate.
+            let mut note = page(ws, proj, "notes/ordinary.md", "ordinary");
+            note.frontmatter_json = serde_json::json!({"session_id": sid.to_string()});
+            assert!(
+                upsert_page_from_disk(&mut conn, &note).is_ok(),
+                "{label}: ordinary page"
+            );
+        }
+    }
+
+    #[test]
     fn purge_session_keeps_later_manual_page_and_its_wiki_path() {
         let (_tmp, mut conn, ws, proj) = fresh_db();
         let sid = SessionId::new();
@@ -13838,6 +13988,72 @@ pub(crate) mod tests {
 
         // Idempotent: a second pass deletes nothing.
         assert!(sweep_hollow_projects(&mut conn, 7).unwrap().is_empty());
+    }
+
+    // `purged_sessions.project_id` cascades from `projects`, so sweeping a
+    // project that only holds a tombstone would delete the replay protection
+    // with it and let a stale spool recreate the purged session.
+    #[test]
+    fn sweep_hollow_projects_preserves_purged_session_tombstones() {
+        let (_tmp, mut conn, workspace_id, _scratch) = fresh_db();
+        let project_id = get_or_create_project(&mut conn, &workspace_id, "purged", None).unwrap();
+        // A tombstone-free hollow sibling. The sweep skips its DELETE when no
+        // candidate matched, so without a project that is really swept the
+        // DELETE's own tombstone guard would never run in this test.
+        let sibling = get_or_create_project(&mut conn, &workspace_id, "hollow", None).unwrap();
+        for id in [&project_id, &sibling] {
+            conn.execute(
+                "UPDATE projects SET created_at = created_at - ?1 WHERE id = ?2",
+                params![8 * 24 * 60 * 60 * 1_000_000_i64, &id.as_bytes()[..]],
+            )
+            .unwrap();
+        }
+        let session_id = SessionId::new();
+        begin_session(
+            &mut conn,
+            &hook_session(session_id, workspace_id, project_id, None),
+        )
+        .unwrap();
+        purge_session(
+            &mut conn,
+            workspace_id,
+            project_id,
+            session_id,
+            None,
+            Compaction::Skip,
+            PurgeMode::Commit,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sweep_hollow_projects(&mut conn, 7).unwrap(),
+            vec!["hollow".to_string()],
+            "only the tombstone-free sibling is swept"
+        );
+        let project_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE id = ?1",
+                params![&project_id.as_bytes()[..]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(project_rows, 1, "the tombstoned project must survive");
+        let retained: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM purged_sessions WHERE session_id = ?1 AND project_id = ?2",
+                params![&session_id.as_bytes()[..], &project_id.as_bytes()[..]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, 1, "purge replay protection must outlive cleanup");
+
+        // Control: the tombstone is the only thing holding the project. Once
+        // it is gone the project is hollow like any other and is swept.
+        conn.execute("DELETE FROM purged_sessions", []).unwrap();
+        assert_eq!(
+            sweep_hollow_projects(&mut conn, 7).unwrap(),
+            vec!["purged".to_string()]
+        );
     }
 
     /// Insert a `sessions` row using only the columns that have existed since

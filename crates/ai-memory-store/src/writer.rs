@@ -133,6 +133,10 @@ pub(crate) enum WriteCmd {
         page: NewPage,
         reply: oneshot::Sender<StoreResult<PageId>>,
     },
+    UpsertPageFromDisk {
+        page: NewPage,
+        reply: oneshot::Sender<StoreResult<PageId>>,
+    },
     UpsertPageIf {
         page: NewPage,
         guard: PageWriteGuard,
@@ -2472,6 +2476,20 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Reindex a disk page, checking session-purge tombstones in the write
+    /// transaction. A live manual replacement at a purged session's path is
+    /// preserved; a leftover session summary cannot recreate deleted rows.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::SessionPurged`] for a purged summary, or the
+    /// writer/SQL errors from [`Self::upsert_page`].
+    pub async fn upsert_page_from_disk(&self, page: NewPage) -> StoreResult<PageId> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::UpsertPageFromDisk { page, reply: tx })
+            .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Upsert a page only when `guard` matches the live head in the same
     /// writer transaction as the mutation.
     ///
@@ -3488,6 +3506,10 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::UpsertPage { page, reply } => {
                 let result = ops::upsert_page(&mut conn, &page);
                 send_or_warn(reply, result, "upsert_page");
+            }
+            WriteCmd::UpsertPageFromDisk { page, reply } => {
+                let result = ops::upsert_page_from_disk(&mut conn, &page);
+                send_or_warn(reply, result, "upsert_page_from_disk");
             }
             WriteCmd::UpsertPageIf { page, guard, reply } => {
                 let result = ops::upsert_page_if(&mut conn, &page, guard);

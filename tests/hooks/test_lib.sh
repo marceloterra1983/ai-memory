@@ -157,6 +157,12 @@ printf '%s\n' "$*" >>"$AI_MEMORY_CURL_LOG"
 case "$*" in
     *'/handoff?'*) printf 'next-session-context' ;;
 esac
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -w) shift; case "$1" in '\n%{http_code}') printf '\n200' ;; '%{http_code}') printf '200' ;; esac ;;
+    esac
+    shift
+done
 EOF
 chmod +x "$FAKE_CURL_BIN/curl"
 
@@ -526,9 +532,11 @@ curl() {
     _tm=GET
     _tu=""
     _tdata=""
+    _twrite=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -X) shift; [ "$#" -gt 0 ] || break; _tm="$1" ;;
+            -w) shift; [ "$#" -gt 0 ] || break; _twrite="$1" ;;
             --data-binary) shift; [ "$#" -gt 0 ] || break; _tdata="$1" ;;
             --data-binary=*) _tdata="${1#--data-binary=}" ;;
             http://* | https://*) _tu="$1" ;;
@@ -540,11 +548,11 @@ curl() {
     fi
     if [ "$_tm" = POST ]; then
         printf 'POST %s\n' "$_tu" >>"$CURL_LOG"
-        printf '200'
     else
         printf 'GET %s\n' "$_tu" >>"$CURL_LOG"
         printf 'HANDOFF BODY'
     fi
+    case "$_twrite" in '\n%{http_code}') printf '\n200' ;; '%{http_code}') printf '200' ;; esac
     return 0
 }
 
@@ -631,15 +639,18 @@ cat >"$TMP/bin/curl" <<'EOF'
 # Fake curl: log "METHOD URL"; answer 200 to a POST, HANDOFF BODY to a GET.
 _gm=GET
 _gu=""
+_gwrite=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -X) shift; [ $# -gt 0 ] || break; _gm=$1 ;;
+        -w) shift; [ $# -gt 0 ] || break; _gwrite=$1 ;;
         http://* | https://*) _gu=$1 ;;
     esac
     shift
 done
 printf '%s %s\n' "$_gm" "$_gu" >>"$GROK_LOG"
-if [ "$_gm" = POST ]; then printf '200'; else printf 'HANDOFF BODY'; fi
+if [ "$_gm" != POST ]; then printf 'HANDOFF BODY'; fi
+case "$_gwrite" in '\n%{http_code}') printf '\n200' ;; '%{http_code}') printf '200' ;; esac
 EOF
 chmod +x "$TMP/bin/curl"
 PATH="$TMP/bin:$PATH"

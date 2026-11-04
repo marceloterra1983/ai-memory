@@ -37,6 +37,7 @@ $ErrorActionPreference = 'Stop'
 function Invoke-WebRequest {
     param(
         [switch] $UseBasicParsing,
+        [int] $MaximumRedirection,
         [int] $TimeoutSec,
         [string] $Method = 'Get',
         [string] $Uri,
@@ -45,8 +46,8 @@ function Invoke-WebRequest {
         $Body
     )
     Add-Content -LiteralPath $env:AI_MEMORY_TEST_LOG -Value ('{0} {1}' -f $Method.ToUpperInvariant(), $Uri)
-    if ($Method -eq 'Post') { return $null }
-    return [pscustomobject]@{ Content = 'HANDOFF FROM SERVER' }
+    if ($Method -eq 'Post') { return [pscustomobject]@{ StatusCode = 202 } }
+    return [pscustomobject]@{ StatusCode = 200; Content = 'HANDOFF FROM SERVER' }
 }
 
 Invoke-AiMemoryHook -Event 'session-start' -Agent 'claude-code' -FetchHandoff

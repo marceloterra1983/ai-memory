@@ -525,14 +525,21 @@ function Invoke-AiMemoryHook {
     if (-not (Test-AiMemoryCaptureOwnedExternally)) {
         $BodyBytes = [Text.Encoding]::UTF8.GetBytes($Payload)
         try {
-            Invoke-WebRequest `
+            $PostResponse = Invoke-WebRequest `
                 -UseBasicParsing `
+                -MaximumRedirection 0 `
+                -ErrorAction Stop `
                 -TimeoutSec 3 `
                 -Method Post `
                 -Uri "$Server/hook?event=$Event&agent=$Agent$QS$SessionQS" `
                 -Headers $Headers `
                 -ContentType "application/json; charset=utf-8" `
-                -Body $BodyBytes | Out-Null
+                -Body $BodyBytes
+            # Windows PowerShell can return a 3xx object; PowerShell 7 may
+            # throw instead. Neither result confirms delivery.
+            if ($null -eq $PostResponse -or [int]$PostResponse.StatusCode -lt 200 -or [int]$PostResponse.StatusCode -ge 300) {
+                throw "Hook endpoint did not accept the event"
+            }
         } catch {
         }
     }
@@ -614,10 +621,12 @@ function Invoke-AiMemoryHook {
         try {
             $Response = Invoke-WebRequest `
                 -UseBasicParsing `
+                -MaximumRedirection 0 `
+                -ErrorAction Stop `
                 -TimeoutSec 2 `
                 -Uri "$Server/handoff?agent=$Agent$QS$NativeSessionQS$BriefQS" `
                 -Headers $Headers
-            if ($null -ne $Response -and $Response.Content) {
+            if ($null -ne $Response -and [int]$Response.StatusCode -ge 200 -and [int]$Response.StatusCode -lt 300 -and $Response.Content) {
                 if ($GrokPostTool) {
                     $Wrapped = @{
                         hookSpecificOutput = @{

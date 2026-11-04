@@ -690,13 +690,22 @@ ai_memory_get_handoff() {
     case "$1" in *"$AI_MEMORY_SERVER_ROUTED_QS"*) return 0 ;; esac
     _amhdr=$(ai_memory_auth_header_file)
     if [ -n "${AI_MEMORY_AUTH_TOKEN:-}" ]; then
-        curl -s --max-time 1.0 "$1" \
-            -H "Authorization: Bearer $AI_MEMORY_AUTH_TOKEN"
+        _amhandoff=$(curl -s --max-time 1.0 --max-redirs 0 -w '\n%{http_code}' "$1" \
+            -H "Authorization: Bearer $AI_MEMORY_AUTH_TOKEN") || return 0
     elif [ -n "$_amhdr" ]; then
-        curl -s --max-time 1.0 "$1" -H @"$_amhdr"
+        _amhandoff=$(curl -s --max-time 1.0 --max-redirs 0 -w '\n%{http_code}' "$1" -H @"$_amhdr") || return 0
     else
-        curl -s --max-time 1.0 "$1"
+        _amhandoff=$(curl -s --max-time 1.0 --max-redirs 0 -w '\n%{http_code}' "$1") || return 0
     fi
+    # Keep the status after the body so command substitution preserves the
+    # handoff's trailing newlines. A redirect/error body is never context.
+    _amhandoff_code=${_amhandoff##*'
+'}
+    case "$_amhandoff_code" in
+        2??) printf '%s' "${_amhandoff%'
+'*}" ;;
+    esac
+    return 0
 }
 
 # Encode stdin as a JSON string (with surrounding quotes). Used by hooks

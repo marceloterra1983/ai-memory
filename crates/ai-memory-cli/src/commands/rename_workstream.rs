@@ -4,6 +4,7 @@ use ai_memory_core::{RenameManagedWorkstreamRequest, RenamedManagedWorkstream};
 use ai_memory_workstream::inspect_repository;
 use anyhow::{Context as _, Result, bail};
 
+use super::show::terminal_text;
 use crate::cli::RenameWorkstreamArgs;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, post_json};
@@ -47,11 +48,16 @@ fn render_human(renamed: &RenamedManagedWorkstream) -> String {
     if renamed.from == renamed.to {
         // A repeated rename is not a failure, but reporting it as a change
         // would be a lie: nothing was written.
-        return format!("Workstream '{}' already has that name.\n", renamed.to);
+        return format!(
+            "Workstream '{}' already has that name.\n",
+            terminal_text(&renamed.to)
+        );
     }
     format!(
         "Renamed workstream '{}' to '{}'.\n    id: {}\n",
-        renamed.from, renamed.to, renamed.workstream_id
+        terminal_text(&renamed.from),
+        terminal_text(&renamed.to),
+        terminal_text(&renamed.workstream_id.to_string())
     )
 }
 

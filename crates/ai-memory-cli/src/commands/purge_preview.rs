@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use super::show::terminal_text;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, ServerResponseError, post_json};
 
@@ -93,11 +94,11 @@ pub async fn run_preview<Req: Serialize>(
 /// Format a `PreviewOutcome::Refused` body as the one line every caller
 /// prints before its refusal: `Preview refused (<status>): <message>`. The
 /// message is the server's own `{"error": ...}` string when the body parses
-/// that way, and the raw body verbatim otherwise.
+/// that way, and the body otherwise, with terminal controls neutralized.
 pub fn refused_message(status: u16, body: &str) -> String {
     let message = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
         .unwrap_or_else(|| body.to_string());
-    format!("Preview refused ({status}): {message}")
+    format!("Preview refused ({status}): {}", terminal_text(&message))
 }

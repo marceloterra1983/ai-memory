@@ -222,7 +222,7 @@ async fn post_session_end_batch(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        bail!("server returned {status}: {body}");
+        bail!("server returned {status}: {}", terminal_text(&body));
     }
     let ack: HookBatchAck = response
         .json()

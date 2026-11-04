@@ -624,7 +624,7 @@ pub async fn get_handoff(
         eprintln!(
             "ai-memory hook warning: not authorized for this project's memory ({}); \
              nothing was injected",
-            reason.trim()
+            super::show::terminal_text(reason.trim())
         );
         return None;
     }

@@ -13,8 +13,6 @@ struct ApiFixture {
 
 impl ApiFixture {
     async fn start(path: &str, body: Value) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route(
             path,
             any(move || {
@@ -22,6 +20,12 @@ impl ApiFixture {
                 async move { Json(body) }
             }),
         );
+        Self::start_app(app).await
+    }
+
+    async fn start_app(app: Router) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -50,7 +54,24 @@ async fn cli_output(root: &Path, url: &str, args: &[&str]) -> std::process::Outp
         .arg(root.join("config.toml"))
         .args(args)
         .kill_on_drop(true);
-    tokio::time::timeout(Duration::from_secs(10), command.output())
+    if args.first() == Some(&"hook") {
+        // Exercise native context delivery without capture or detached backfill.
+        command
+            .env("AI_MEMORY_CAPTURE_OWNER", "fixture")
+            .stdin(std::process::Stdio::piped());
+    }
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = async {
+        let mut child = command.spawn()?;
+        if args.first() == Some(&"hook") {
+            use tokio::io::AsyncWriteExt;
+            child.stdin.take().unwrap().write_all(b"{}").await?;
+        }
+        child.wait_with_output().await
+    };
+    tokio::time::timeout(Duration::from_secs(10), output)
         .await
         .unwrap()
         .unwrap()
@@ -768,4 +789,184 @@ async fn terminal_oidc_provider_errors_cannot_forge_stderr() {
         !stderr.contains('\u{1b}') && !stderr.lines().any(|line| line.starts_with("FORGED")),
         "{stderr:?}"
     );
+}
+
+#[tokio::test]
+async fn terminal_finalize_batch_error_cannot_forge_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Router::new()
+        .route("/admin/open-sessions", any(|| async {
+            Json(json!({"sessions":[{"session_id":"0192b6a1-4c2e-7d3f-8a5b-1234567890ab","cwd":null}]}))
+        }))
+        .route("/hook/batch", any(|| async {
+            (axum::http::StatusCode::BAD_GATEWAY, "café\nFORGED\u{1b}]52;c;dummy\u{7}")
+        }));
+    let server = ApiFixture::start_app(app).await;
+    let output = cli_output(
+        root.path(),
+        &server.url,
+        &["finalize-session", "--workspace", "ws", "--project", "p"],
+    )
+    .await;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("502") && stderr.contains("café?FORGED?]52;c;dummy?"),
+        "{stderr:?}"
+    );
+    assert!(
+        !stderr.chars().any(|c| c != '\n' && c.is_control()),
+        "{stderr:?}"
+    );
+    assert!(
+        !stderr.lines().any(|line| line.starts_with("FORGED")),
+        "{stderr:?}"
+    );
+}
+
+async fn assert_terminal_purge_refusal(command: &str, body: String) {
+    let root = tempfile::tempdir().unwrap();
+    let path = format!("/admin/{command}");
+    let app = Router::new().route(
+        &path,
+        any(move || {
+            let body = body.clone();
+            async move { (axum::http::StatusCode::FORBIDDEN, body) }
+        }),
+    );
+    let server = ApiFixture::start_app(app).await;
+    let mut args = vec![command, "--workspace", "ws", "--project", "p"];
+    if command == "purge-session" {
+        args.extend(["--session-id", "0192b6a1-4c2e-7d3f-8a5b-1234567890ab"]);
+    }
+    let output = cli_output(root.path(), &server.url, &args).await;
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "{args:?}: {stdout:?}");
+    assert!(
+        stdout.contains("Preview refused (403): café?FORGED?]52;c;dummy?"),
+        "{args:?}: {stdout:?}"
+    );
+    assert!(
+        stdout.chars().all(|c| c == '\n' || !c.is_control()),
+        "{args:?}: {stdout:?}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--confirm"));
+}
+
+#[tokio::test]
+async fn terminal_purge_project_preview_raw_body_cannot_forge_stdout() {
+    assert_terminal_purge_refusal("purge-project", "café\nFORGED\u{1b}]52;c;dummy\u{7}".into())
+        .await;
+}
+
+#[tokio::test]
+async fn terminal_purge_project_preview_json_error_cannot_forge_stdout() {
+    assert_terminal_purge_refusal(
+        "purge-project",
+        json!({"error":"café\nFORGED\u{1b}]52;c;dummy\u{7}"}).to_string(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_purge_session_preview_raw_body_cannot_forge_stdout() {
+    assert_terminal_purge_refusal("purge-session", "café\nFORGED\u{1b}]52;c;dummy\u{7}".into())
+        .await;
+}
+
+#[tokio::test]
+async fn terminal_purge_session_preview_json_error_cannot_forge_stdout() {
+    assert_terminal_purge_refusal(
+        "purge-session",
+        json!({"error":"café\nFORGED\u{1b}]52;c;dummy\u{7}"}).to_string(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_handoff_forbidden_reason_cannot_forge_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Router::new().route(
+        "/handoff",
+        any(|| async {
+            (
+                axum::http::StatusCode::FORBIDDEN,
+                "  café\nFORGED\u{1b}]52;c;dummy\u{7}  ",
+            )
+        }),
+    );
+    let server = ApiFixture::start_app(app).await;
+    let output = cli_output(
+        root.path(),
+        &server.url,
+        &[
+            "hook",
+            "--agent",
+            "claude-code",
+            "--event",
+            "session-start",
+            "--server-url",
+            &server.url,
+        ],
+    )
+    .await;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout, b"{}\n",
+        "a refusal must not enter agent context"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("not authorized") && stderr.contains("(café?FORGED?]52;c;dummy?)"),
+        "{stderr:?}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+    assert!(
+        stderr.chars().all(|c| c == '\n' || !c.is_control()),
+        "{stderr:?}"
+    );
+}
+
+#[tokio::test]
+async fn terminal_rename_workstream_neutralizes_both_branches_and_preserves_json() {
+    let root = tempfile::tempdir().unwrap();
+    let bad = "café\nFORGED\u{1b}]52;c;dummy\u{7}";
+    for from in ["old\nFORGED\u{1b}]52;c;dummy\u{7}", bad] {
+        let response =
+            json!({"workstream_id":"0192b6a1-4c2e-7d3f-8a5b-1234567890ab", "from":from, "to":bad});
+        let server = ApiFixture::start("/workstream/rename", response.clone()).await;
+        let args = [
+            "rename-workstream",
+            "--workspace",
+            "ws",
+            "--project",
+            "p",
+            "--from",
+            "old",
+            "--to",
+            "new",
+        ];
+        let output = cli(root.path(), &server.url, &args).await;
+        assert!(output.contains("café?FORGED?]52;c;dummy?"), "{output:?}");
+        assert!(
+            output.chars().all(|c| c == '\n' || !c.is_control()),
+            "{output:?}"
+        );
+        assert_eq!(
+            output.lines().count(),
+            if from == bad { 1 } else { 2 },
+            "{output:?}"
+        );
+        if from != bad {
+            assert!(output.contains("old?FORGED?]52;c;dummy?"), "{output:?}");
+            assert!(output.contains("    id: 0192b6a1-4c2e-7d3f-8a5b-1234567890ab"));
+        }
+        let mut args = args.to_vec();
+        args.push("--json");
+        assert_eq!(
+            serde_json::from_str::<Value>(&cli(root.path(), &server.url, &args).await).unwrap(),
+            response
+        );
+    }
 }

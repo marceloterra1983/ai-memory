@@ -3632,7 +3632,9 @@ fn build_auto_handoff(
         match obs.kind {
             ObservationKind::UserPrompt => {
                 let text = pick_text(obs);
-                if !text.is_empty() {
+                // A harness block delivered as a user turn (`<task-notification>`)
+                // is not a request to continue from.
+                if !text.is_empty() && !ai_memory_core::looks_like_markup_block(text) {
                     prompts.push(text.to_string());
                 }
             }
@@ -3740,7 +3742,11 @@ fn derive_open_questions(
         observations.iter().rev().find(|o| o.kind == kind)
     };
 
-    let last_prompt_obs = last_of_kind(ObservationKind::UserPrompt);
+    // Harness blocks delivered as a user turn are not the user's question.
+    let last_prompt_obs = observations.iter().rev().find(|o| {
+        let text = if o.body.is_empty() { &o.title } else { &o.body };
+        o.kind == ObservationKind::UserPrompt && !ai_memory_core::looks_like_markup_block(text)
+    });
     let last_tool = last_of_kind(ObservationKind::PostToolUse);
     let last_stop = last_of_kind(ObservationKind::Stop);
     let has_session_end = observations

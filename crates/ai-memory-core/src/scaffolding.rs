@@ -52,9 +52,30 @@ pub fn looks_like_scaffolding(candidate: &str) -> bool {
         return true;
     }
 
-    // A markup/context block: `<ide_opened_file>…`, `<system-reminder>…`,
-    // `<user_info>…`. Requires a closing bracket so a bare comparison like
-    // "< 5ms is fine" stays prose.
+    if looks_like_markup_block(trimmed) {
+        return true;
+    }
+
+    // A decorated shell prompt echoed into the paste.
+    if trimmed.starts_with(PROMPT_DECORATION) {
+        return true;
+    }
+
+    false
+}
+
+/// `true` when `candidate` opens with a markup/context block:
+/// `<ide_opened_file>…`, `<system-reminder>…`, `<user_info>…`,
+/// `<task-notification>…`. Requires a closing bracket so a bare comparison
+/// like "< 5ms is fine" stays prose, and a bare tag name so an opening tag
+/// with attributes (`<pasted_content id="87e5">`, a user paste) stays prose.
+///
+/// Split out of [`looks_like_scaffolding`] for callers that must apply only
+/// the markup rule: a prompt that starts with a shell prompt decoration is
+/// still something the user wrote.
+#[must_use]
+pub fn looks_like_markup_block(candidate: &str) -> bool {
+    let trimmed = candidate.trim();
     if let Some(rest) = trimmed.strip_prefix('<')
         && let Some(tag) = rest.split('>').next()
         && !tag.is_empty()
@@ -66,12 +87,6 @@ pub fn looks_like_scaffolding(candidate: &str) -> bool {
     {
         return true;
     }
-
-    // A decorated shell prompt echoed into the paste.
-    if trimmed.starts_with(PROMPT_DECORATION) {
-        return true;
-    }
-
     false
 }
 
@@ -152,5 +167,43 @@ mod tests {
     fn empty_or_blank_is_scaffolding() {
         assert!(looks_like_scaffolding(""));
         assert!(looks_like_scaffolding("   "));
+    }
+
+    #[test]
+    fn a_harness_markup_block_is_recognised() {
+        for block in [
+            "<task-notification>\n<task-id>abc</task-id>\n</task-notification>",
+            "  <ide_opened_file>The user opened main.rs",
+            "<system-reminder>Do not mention…",
+            "<user_info>cwd=/home/x",
+        ] {
+            assert!(looks_like_markup_block(block), "{block:?}");
+            assert!(looks_like_scaffolding(block), "{block:?}");
+        }
+    }
+
+    #[test]
+    fn markup_block_leaves_user_text_alone() {
+        // An opening tag with attributes is a user paste, a bare `<` is a
+        // comparison, a shell prompt decoration is not markup, and markup
+        // later in the text does not make the prompt scaffolding.
+        for prompt in [
+            "<pasted_content id=\"87e5\">\nEu quero inicializar um harness",
+            "< 5ms is fine for this path",
+            "<unterminated",
+            "fix <div> alignment",
+            "\u{276f} rode o workflow de arquitetura",
+            "",
+            "   ",
+        ] {
+            assert!(!looks_like_markup_block(prompt), "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn scaffolding_still_catches_a_prompt_decoration_the_markup_rule_ignores() {
+        let decorated = "\u{276f} rode o workflow de arquitetura";
+        assert!(looks_like_scaffolding(decorated));
+        assert!(!looks_like_markup_block(decorated));
     }
 }

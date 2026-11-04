@@ -48,6 +48,17 @@ fn print_grants(grants: &[GrantRow], json: bool) -> Result<()> {
         );
         return Ok(());
     }
+    // Names and levels are server data. Normalize only the terminal copy;
+    // the JSON branch above retains the original structured values.
+    let grants: Vec<_> = grants
+        .iter()
+        .map(|g| GrantRow {
+            username: super::show::terminal_text(&g.username),
+            workspace: super::show::terminal_text(&g.workspace),
+            project: super::show::terminal_text(&g.project),
+            level: super::show::terminal_text(&g.level),
+        })
+        .collect();
     let project_w = grants
         .iter()
         .map(|g| g.workspace.len() + 1 + g.project.len())

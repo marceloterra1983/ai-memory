@@ -16485,6 +16485,120 @@ mod tests {
         }
     }
 
+    fn markup_test_handoff(
+        observations: &[ai_memory_core::Observation],
+        checkpoint: bool,
+    ) -> Option<NewHandoff> {
+        build_auto_handoff(
+            WorkspaceId::new(),
+            ProjectId::new(),
+            AgentKind::ClaudeCode,
+            SessionId::new(),
+            None,
+            observations,
+            None,
+            checkpoint,
+        )
+    }
+
+    #[test]
+    fn markup_checkpoint_ignores_harness_blocks_and_keeps_user_requests() {
+        for block in [
+            "<task-notification>Agent completed</task-notification>",
+            "  <system-reminder>Harness context</system-reminder>",
+            "<ide_opened_file>main.rs</ide_opened_file>",
+            "<user_info>cwd=/dummy</user_info>",
+        ] {
+            for prompt in [
+                "fix the pinned-page sweep",
+                "❯ rode o workflow de arquitetura",
+                "<pasted_content id=\"87e5\">User request",
+                "fix <div> alignment",
+            ] {
+                let observations = vec![
+                    mk_obs(ObservationKind::UserPrompt, "start", "map the sweep code"),
+                    mk_obs(ObservationKind::UserPrompt, "request", prompt),
+                    mk_obs(ObservationKind::UserPrompt, "harness", block),
+                ];
+                let handoff = markup_test_handoff(&observations, true).unwrap();
+                assert_eq!(
+                    handoff.summary,
+                    format!("Started: map the sweep code\n\nLast: {prompt}"),
+                    "block {block:?}"
+                );
+                assert_eq!(
+                    handoff.open_questions,
+                    vec![format!("Continue from last request: {prompt}")]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn markup_only_harness_turns_have_no_pending_user_request() {
+        // Empty bodies exercise the title fallback as well as the full body.
+        for body in ["", "<task-notification>Should the logs be uploaded?"] {
+            let observations = vec![mk_obs(
+                ObservationKind::UserPrompt,
+                "<task-notification>Should the logs be uploaded?",
+                body,
+            )];
+            assert!(
+                markup_test_handoff(&observations, false).is_none(),
+                "a harness question must not open a pending handoff"
+            );
+            let checkpoint = markup_test_handoff(&observations, true).unwrap();
+            assert_eq!(
+                checkpoint.summary,
+                "Turn checkpoint; 1 observations recorded."
+            );
+            assert!(checkpoint.open_questions.is_empty());
+        }
+    }
+
+    #[test]
+    fn markup_notification_question_does_not_replace_the_real_question() {
+        let prompt = "Should the manual page remain editable?";
+        let observations = vec![
+            mk_obs(ObservationKind::UserPrompt, "request", prompt),
+            mk_obs(
+                ObservationKind::UserPrompt,
+                "harness",
+                "<task-notification>Should the logs be uploaded?",
+            ),
+        ];
+        let handoff = markup_test_handoff(&observations, false).unwrap();
+        assert_eq!(handoff.summary, format!("Session focused on: {prompt}"));
+        assert_eq!(
+            handoff.open_questions,
+            vec![format!("Unresolved question: {prompt}")]
+        );
+    }
+
+    #[test]
+    fn markup_notification_does_not_invent_pending_work_after_an_answer() {
+        let observations = vec![
+            mk_obs(ObservationKind::UserPrompt, "request", "fix the sweep"),
+            mk_obs(ObservationKind::Stop, "stop", ""),
+            mk_obs(ObservationKind::SessionEnd, "end", ""),
+            mk_obs(
+                ObservationKind::UserPrompt,
+                "harness",
+                "<task-notification>Should the logs be uploaded?",
+            ),
+        ];
+        assert!(markup_test_handoff(&observations, false).is_none());
+        let control = vec![mk_obs(
+            ObservationKind::UserPrompt,
+            "request",
+            "Should the manual page remain editable?",
+        )];
+        assert!(
+            markup_test_handoff(&control, false).is_some(),
+            "a real question still opens a handoff"
+        );
+    }
+
     /// An automatic handoff built only from closed-tool observations (whose
     /// titles are `safe_tool_title`'s `"tool file"` / `"tool non-file"` family
     /// labels) must NOT emit a `Tools used:` line: a family is a partition of

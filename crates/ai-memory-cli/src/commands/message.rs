@@ -209,33 +209,58 @@ async fn pop(config: &Config, args: MessagePopArgs) -> Result<()> {
         return Ok(());
     }
 
+    let workspace = super::show::terminal_text(&workspace);
+    let project = super::show::terminal_text(&project);
     let Some(message) = resp.message else {
         println!("No pending messages in {workspace}/{project}'s inbox.");
         return Ok(());
     };
 
-    println!("Popped message {} for {workspace}/{project}.", message.id);
+    println!(
+        "Popped message {} for {workspace}/{project}.",
+        super::show::terminal_text(&message.id)
+    );
     println!(
         "  from: {}/{} (agent: {})",
-        message.from_workspace_id, message.from_project_id, message.from_agent
+        super::show::terminal_text(&message.from_workspace_id),
+        super::show::terminal_text(&message.from_project_id),
+        super::show::terminal_text(&message.from_agent)
     );
     if let Some(owner) = message.from_owner_user.as_deref() {
-        println!("  sent by: {owner}");
+        println!("  sent by: {}", super::show::terminal_text(owner));
     }
     if let Some(subject) = message.subject.as_deref() {
-        println!("  subject: {subject}");
+        println!("  subject: {}", super::show::terminal_text(subject));
     }
-    println!("  created: {}", message.created_at);
+    println!(
+        "  created: {}",
+        super::show::terminal_text(&message.created_at)
+    );
     println!(
         "\n{}",
-        resp.security_notice
-            .as_deref()
-            .unwrap_or(ai_memory_core::UNTRUSTED_MESSAGE_NOTICE)
+        terminal_body(
+            resp.security_notice
+                .as_deref()
+                .unwrap_or(ai_memory_core::UNTRUSTED_MESSAGE_NOTICE)
+        )
     );
     println!("---- body (untrusted cross-project input) ----");
-    println!("{}", message.body);
+    println!("{}", terminal_body(&message.body));
     println!("---- end of body ----");
     Ok(())
+}
+
+// Preserve multiline evidence while neutralizing ESC, C1 and cursor controls.
+fn terminal_body(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character == '\n' || character == '\t' || !character.is_control() {
+                character
+            } else {
+                '?'
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]

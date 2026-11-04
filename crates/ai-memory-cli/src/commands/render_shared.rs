@@ -2221,6 +2221,57 @@ pub(crate) fn assert_shared_ts_delivery_runtime(name: &str, source: &str) {
     );
 }
 
+/// Execute the generated integration against a local redirecting gateway.
+#[cfg(test)]
+pub(crate) fn assert_ts_redirect_runtime(source: String, openclaw: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let module = temp.path().join("hooks.ts");
+    let fixture = temp.path().join("redirects.mjs");
+    // Only the host SDK entrypoint is stubbed; delivery, auth, spool and fetch
+    // are the actual generated functions and Node's real HTTP implementation.
+    let mut source = source.replace(
+        "import { definePluginEntry } from \"openclaw/plugin-sdk/plugin-entry\";",
+        "const definePluginEntry = (entry: any) => entry;",
+    );
+    if source.contains("const AiMemoryOpencode2: Plugin.Plugin") {
+        // V2 keeps one copy of the prelude per setup/location. Return that
+        // copy's delivery helpers before registering with the host SDK.
+        source = source.replace("    const directory = ctx.location.directory;", "    return { postHook, drainHookQueueForDispose, drainHookSpool, testHandoff: (root: string) => fetchHandoff(root, \"dummy-session\") };\n    const directory = ctx.location.directory;");
+        source.push_str("\nexport async function initTest(root: string) { return AiMemoryOpencode2.setup({ location: { directory: root } } as any); }\n");
+    } else {
+        source.push_str("\nexport { postHook, drainHookQueueForDispose, drainHookSpool };\n");
+        source.push_str(if openclaw {
+        "export async function testHandoff(root: string) { return fetchHandoff({ cwd: root }, { cwd: root }); }\n"
+    } else {
+        "export async function testHandoff(root: string) { return fetchHandoff(root, \"dummy-session\"); }\n"
+    });
+        if source.contains("async function mcpRpc(") {
+            source.push_str("export async function testMcp() { return mcpRpc(\"tools/list\"); }\n");
+        }
+    }
+    std::fs::write(&module, source).unwrap();
+    std::fs::write(&fixture, include_str!("../../tests/fixtures/redirects.mjs")).unwrap();
+    let output = std::process::Command::new("node")
+        .arg("--experimental-strip-types")
+        .arg(&fixture)
+        .arg(&module)
+        .arg(temp.path())
+        .env("HOME", temp.path())
+        .env("USERPROFILE", temp.path())
+        .env("AI_MEMORY_DATA_DIR", temp.path().join("data"))
+        .env_remove("AI_MEMORY_AUTH_TOKEN")
+        .env_remove("AI_MEMORY_RUN_ID")
+        .output()
+        .expect("Node is required for redirect runtime evidence");
+    assert!(
+        output.status.success(),
+        "generated redirect runtime failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("PASS:"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

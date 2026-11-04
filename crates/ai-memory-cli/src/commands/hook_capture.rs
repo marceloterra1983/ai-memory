@@ -656,6 +656,42 @@ mod tests {
         format!("http://{addr}/handoff")
     }
 
+    #[tokio::test]
+    async fn native_hook_refuses_307_for_posts_batches_and_handoffs() {
+        let server = crate::http_client::tests::RedirectServer::start().await;
+        let url = format!("{}/redirect", server.url);
+        let client = build_client();
+        let timeout = Duration::from_secs(2);
+        let single = post_hook(
+            &client,
+            &url,
+            "{\"event\":\"private\"}",
+            Some("test-bearer"),
+            timeout,
+        )
+        .await;
+        let batch = post_batch(&client, &url, "[]", Some("test-bearer"), timeout).await;
+        let handoff = get_handoff(&client, &url, Some("test-bearer"), timeout).await;
+        server.assert_no_replay();
+        assert_eq!(single, PostOutcome::Failed);
+        assert_eq!(batch, BatchOutcome::Failed);
+        assert_eq!(handoff, None);
+        let direct = format!("{}/target", server.url);
+        assert_eq!(
+            post_hook(&client, &direct, "{}", Some("test-bearer"), timeout).await,
+            PostOutcome::Delivered
+        );
+        assert_eq!(
+            post_batch(&client, &direct, "[]", Some("test-bearer"), timeout).await,
+            BatchOutcome::Accepted(1)
+        );
+        assert!(
+            get_handoff(&client, &direct, Some("test-bearer"), timeout)
+                .await
+                .is_some()
+        );
+    }
+
     #[test]
     fn extracts_top_level_cwd() {
         let p: serde_json::Value =

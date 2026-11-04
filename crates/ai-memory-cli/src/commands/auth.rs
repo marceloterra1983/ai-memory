@@ -311,7 +311,7 @@ async fn run_copilot_device_flow(client_id: &str, timeout_secs: u64) -> Result<S
 }
 
 fn auth_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::http_client::http_client_builder()
         .timeout(Duration::from_secs(60))
         .user_agent(format!("ai-memory/{}", env!("CARGO_PKG_VERSION")))
         .build()
@@ -549,6 +549,27 @@ struct GitHubDeviceAccessToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn auth_client_refuses_307_without_replaying_credentials() {
+        let server = crate::http_client::tests::RedirectServer::start().await;
+        let client = auth_http_client().unwrap();
+        let response = client
+            .post(format!("{}/redirect", server.url))
+            .bearer_auth("test-bearer")
+            .form(&[("code", "test-device-code")])
+            .send()
+            .await
+            .unwrap();
+        server.assert_no_replay();
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        let direct = client
+            .post(format!("{}/target", server.url))
+            .send()
+            .await
+            .unwrap();
+        assert!(direct.status().is_success());
+    }
 
     #[test]
     fn expiry_status_does_not_print_exact_token_time() {

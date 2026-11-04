@@ -4148,6 +4148,7 @@ async function fetchHandoff(cwd: string, id: string | undefined): Promise<string
   applyMarkerParams(url, cwd);
   try {{
     const response = await fetch(url, {{
+      redirect: "error",
       headers: authHeaders(),
       signal: timeoutSignal(1000),
     }});
@@ -4588,6 +4589,7 @@ async function mcpRpc(method: string, params?: unknown, ctx?: any, signal?: Abor
     headers["Mcp-Session-Id"] = session;
   }
   const response = await fetch(MCP_SERVER, {
+    redirect: "error",
     method: "POST",
     headers,
     body: JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }),
@@ -4888,6 +4890,7 @@ async function fetchHandoff(cwd: string, id: string | undefined): Promise<string
   applyMarkerParams(url, cwd);
   try {{
     const response = await fetch(url, {{
+      redirect: "error",
       headers: authHeaders(),
       signal: timeoutSignal(1000),
     }});
@@ -6266,6 +6269,60 @@ mod tests {
     /// #446's binding requirement: "a protection that disappears on upgrade
     /// without saying so is worse than no protection". A bare `--apply` — what
     /// `ai-memory upgrade` runs — must leave an existing opt-in alone.
+    #[test]
+    fn opencode_refuses_307_and_keeps_spool() {
+        crate::commands::render_shared::assert_ts_redirect_runtime(
+            build_opencode_plugin(
+                "http://redirect-fixture.invalid",
+                Some("test-bearer"),
+                None,
+                "denylist",
+            ),
+            false,
+        );
+    }
+
+    #[test]
+    fn opencode2_refuses_307_and_keeps_spool() {
+        crate::commands::render_shared::assert_ts_redirect_runtime(
+            build_opencode2_plugin(
+                "http://redirect-fixture.invalid",
+                Some("test-bearer"),
+                None,
+                "denylist",
+                false,
+            )
+            .unwrap(),
+            false,
+        );
+    }
+
+    #[test]
+    fn omp_refuses_307_and_keeps_spool() {
+        crate::commands::render_shared::assert_ts_redirect_runtime(
+            build_omp_extension(
+                "http://redirect-fixture.invalid",
+                Some("test-bearer"),
+                None,
+                "denylist",
+            ),
+            false,
+        );
+    }
+
+    #[test]
+    fn pi_refuses_307_and_keeps_spool() {
+        crate::commands::render_shared::assert_ts_redirect_runtime(
+            build_pi_extension(
+                "http://redirect-fixture.invalid",
+                Some("test-bearer"),
+                None,
+                "denylist",
+            ),
+            false,
+        );
+    }
+
     #[test]
     fn bare_apply_preserves_an_existing_allowlist_optin() {
         let tmp = tempfile::tempdir().unwrap();

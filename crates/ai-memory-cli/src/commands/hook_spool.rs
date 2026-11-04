@@ -1344,6 +1344,59 @@ fn list_entries(spool: &Path) -> std::io::Result<(Vec<PathBuf>, usize)> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn hook_spool_keeps_event_after_307() {
+        let server = crate::http_client::tests::RedirectServer::start().await;
+        let temp = tempfile::tempdir().unwrap();
+        let spool = spool_dir(temp.path());
+        let entry = entry_for(
+            format!("{}/hook", server.url),
+            "{\"event\":\"private\"}".to_owned(),
+            Some("test-bearer"),
+            false,
+        );
+        enqueue(&spool, &entry).unwrap();
+        let result = drain_with_live_token(
+            &spool,
+            temp.path(),
+            Duration::from_secs(3),
+            Duration::from_secs(2),
+            Some("test-bearer"),
+        )
+        .await;
+        server.assert_no_replay();
+        assert_eq!(result.sent, 0);
+        assert_eq!(
+            spool_len(&spool),
+            1,
+            "redirect is a failed delivery, not permission to delete the event"
+        );
+        let (entries, _) = list_entries(&spool).unwrap();
+        let saved: SpoolEntry =
+            serde_json::from_slice(&std::fs::read(&entries[0]).unwrap()).unwrap();
+        assert_eq!(saved.body, entry.body);
+        let direct = entry_for(
+            format!("{}/target", server.url),
+            "{}".to_owned(),
+            Some("test-bearer"),
+            false,
+        );
+        let control = tempfile::tempdir().unwrap();
+        let control_spool = spool_dir(control.path());
+        enqueue(&control_spool, &direct).unwrap();
+        let result = drain_with_live_token(
+            &control_spool,
+            control.path(),
+            Duration::from_secs(3),
+            Duration::from_secs(2),
+            Some("test-bearer"),
+        )
+        .await;
+        assert_eq!(result.sent, 1, "direct legitimate delivery still drains");
+        assert_eq!(spool_len(&control_spool), 0);
+        assert_eq!(spool_len(&spool), 1);
+    }
+
     #[test]
     fn entry_for_picks_auth_mode() {
         let s = entry_for("u".into(), "{}".into(), Some("tok"), false);

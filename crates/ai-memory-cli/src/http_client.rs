@@ -546,8 +546,117 @@ fn staged_output_file(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    type RecordedRequests =
+        std::sync::Arc<std::sync::Mutex<Vec<(String, axum::http::HeaderMap, axum::body::Bytes)>>>;
+
+    pub(crate) struct RedirectServer {
+        pub(crate) url: String,
+        pub(crate) requests: RecordedRequests,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl RedirectServer {
+        pub(crate) async fn start() -> Self {
+            use axum::{
+                body::Bytes,
+                extract::{OriginalUri, State},
+                http::{HeaderMap, StatusCode},
+                response::IntoResponse,
+                routing::any,
+            };
+            type Requests = std::sync::Arc<std::sync::Mutex<Vec<(String, HeaderMap, Bytes)>>>;
+            async fn handler(
+                State(requests): State<Requests>,
+                OriginalUri(uri): OriginalUri,
+                headers: HeaderMap,
+                body: Bytes,
+            ) -> axum::response::Response {
+                let target = uri.path().starts_with("/target");
+                requests
+                    .lock()
+                    .unwrap()
+                    .push((uri.path().to_owned(), headers, body));
+                if target {
+                    (StatusCode::OK, "{\"accepted\":1}").into_response()
+                } else {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [("location", "/target")],
+                        "login",
+                    )
+                        .into_response()
+                }
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Requests::default();
+            let app = axum::Router::new()
+                .fallback(any(handler))
+                .with_state(requests.clone());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            Self {
+                url,
+                requests,
+                task,
+            }
+        }
+
+        pub(crate) fn assert_no_replay(&self) {
+            let requests = self.requests.lock().unwrap();
+            let targets: Vec<_> = requests
+                .iter()
+                .filter(|(path, _, _)| path.starts_with("/target"))
+                .collect();
+            assert!(
+                targets.is_empty(),
+                "redirect target received {} request(s), including Authorization: {}",
+                targets.len(),
+                targets
+                    .iter()
+                    .any(|(_, headers, _)| headers.contains_key("authorization"))
+            );
+            assert!(
+                !requests.is_empty(),
+                "the redirecting route must receive the original request"
+            );
+        }
+    }
+
+    impl Drop for RedirectServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn thin_client_refuses_307_without_replaying_body_or_bearer() {
+        let server = RedirectServer::start().await;
+        let endpoint =
+            ServerEndpoint::from_pair(Some(server.url.clone()), Some("test-bearer".to_owned()));
+        let body = serde_json::json!({"event": "private-event"});
+        let result = post_json_no_content(&endpoint, "/redirect", &body).await;
+        server.assert_no_replay();
+        assert!(result.is_err(), "307 is not a successful server response");
+        {
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests[0].1["authorization"], "Bearer test-bearer");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&requests[0].2).unwrap(),
+                body
+            );
+        }
+        post_json_no_content(&endpoint, "/target", &body)
+            .await
+            .unwrap();
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "direct legitimate delivery still works");
+        assert_eq!(requests[1].1["authorization"], "Bearer test-bearer");
+    }
 
     #[test]
     fn response_errors_include_method_and_credential_free_path() {

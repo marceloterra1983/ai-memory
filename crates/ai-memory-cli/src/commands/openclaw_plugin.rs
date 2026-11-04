@@ -480,6 +480,7 @@ function postPreCompact(event: any, ctx: any): void {{
     // Tracked in pendingHookRequests so session_end can await a bounded
     // flush instead of letting teardown kill the in-flight fetch (#676).
     const request = fetch(url, {{
+      redirect: "error",
       method: "POST",
       headers: {{ "Content-Type": "application/json", ...authHeaders() }},
       body: JSON.stringify(policy.payload),
@@ -506,6 +507,7 @@ async function fetchHandoff(event: any, ctx: any): Promise<string | undefined> {
   applyMarkerParams(url, currentCwd);
   try {{
     const response = await fetch(url, {{
+      redirect: "error",
       headers: authHeaders(),
       signal: timeoutSignal(1000),
     }});
@@ -591,6 +593,19 @@ export default definePluginEntry({{
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn openclaw_refuses_307_and_keeps_spool() {
+        crate::commands::render_shared::assert_ts_redirect_runtime(
+            build_plugin(
+                "http://redirect-fixture.invalid",
+                Some("test-bearer"),
+                None,
+                "denylist",
+            ),
+            true,
+        );
+    }
 
     #[test]
     fn openclaw_plugin_spools_failed_deliveries() {

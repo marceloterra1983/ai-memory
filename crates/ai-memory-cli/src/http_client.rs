@@ -338,7 +338,7 @@ pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .expect("building the no-redirect HTTP client")
 }
 
 /// GET `<endpoint>{path}` with optional query params, deserialise JSON.
@@ -606,6 +606,8 @@ pub async fn post_to_file(endpoint: &ServerEndpoint, path: &str, dest: &Path) ->
         .await
         .map_err(|e| augment_connect_error(e, endpoint, &url))?;
     let mut resp = require_success(&endpoint.i18n, reqwest::Method::POST, resp).await?;
+    let resolved = resolve_output_path(dest)?;
+    let dest = resolved.as_path();
     let permissions = checked_output_permissions(dest)?;
     let mut temporary = private_output_file(dest)
         .with_context(|| format!("creating temporary output beside {}", dest.display()))?;
@@ -648,6 +650,27 @@ pub async fn post_to_file(endpoint: &ServerEndpoint, path: &str, dest: &Path) ->
         let _ = directory.sync_all();
     }
     Ok(written)
+}
+
+/// Resolve the output once so an atomic rename preserves a symlink and
+/// replaces its target. Refuse multiply-linked inodes rather than splitting
+/// the aliases into different archives.
+fn resolve_output_path(dest: &Path) -> Result<std::path::PathBuf> {
+    let path = match std::fs::symlink_metadata(dest) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(dest)
+            .with_context(|| format!("resolving output symlink {}", dest.display()))?,
+        Ok(_) => dest.to_path_buf(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(dest.to_path_buf()),
+        Err(e) => return Err(e).context("reading output metadata"),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if std::fs::metadata(&path)?.nlink() > 1 {
+            anyhow::bail!("refusing multiply-linked output file: {}", dest.display());
+        }
+    }
+    Ok(path)
 }
 
 /// Atomic replacement still requires permission to write an existing regular
@@ -700,6 +723,36 @@ mod tests {
 
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_output_preserves_symlink_target_and_refuses_hardlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        let link = tmp.path().join("link");
+        std::fs::write(&target, b"previous").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            resolve_output_path(&link).unwrap(),
+            target.canonicalize().unwrap()
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let alias = tmp.path().join("hardlink");
+        std::fs::hard_link(&target, &alias).unwrap();
+        assert!(
+            resolve_output_path(&alias)
+                .unwrap_err()
+                .to_string()
+                .contains("multiply-linked")
+        );
+        assert!(resolve_output_path(&link).is_err());
+        assert_eq!(std::fs::read(target).unwrap(), b"previous");
+    }
 
     /// The host checked must be the host a request reaches: user
     /// information before an `@` is refused, never read as the host.

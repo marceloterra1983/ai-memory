@@ -770,12 +770,8 @@ async fn cross_origin_redirect_is_refused_without_forwarding_payload_or_mutating
         .expect_err("cross-origin redirect must fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("refused a redirect to another origin"),
+        msg.contains("307"),
         "expected cross-origin refusal in error: {msg}"
-    );
-    assert!(
-        msg.contains(&foreign_base),
-        "expected refused target origin in error: {msg}"
     );
     assert!(
         !seen.load(Ordering::SeqCst),
@@ -793,12 +789,8 @@ async fn cross_origin_redirect_is_refused_without_forwarding_payload_or_mutating
         .expect_err("cross-origin redirect must fail notify");
     let notify_msg = notify_err.to_string();
     assert!(
-        notify_msg.contains("refused a redirect to another origin"),
+        notify_msg.contains("307"),
         "expected cross-origin refusal in notify error: {notify_msg}"
-    );
-    assert!(
-        notify_msg.contains(&foreign_base),
-        "expected refused target origin in notify error: {notify_msg}"
     );
     assert!(
         !seen.load(Ordering::SeqCst),
@@ -828,7 +820,7 @@ async fn cross_origin_redirect_is_refused_without_forwarding_payload_or_mutating
 }
 
 #[tokio::test]
-async fn same_origin_redirect_still_reaches_the_webhook() {
+async fn same_origin_redirect_never_replays_the_webhook() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let absolute_hop = format!("{base}/v2");
@@ -865,11 +857,26 @@ async fn same_origin_redirect_still_reaches_the_webhook() {
     .unwrap();
 
     let (path, mut md) = page();
-    chain
+    let error = chain
+        .run(&path, &mut md, &AdmissionContext::default())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("307"));
+    assert!(md.frontmatter.get("reviewed").is_none());
+    assert_eq!(md.body, "body content\n");
+    // A direct endpoint remains a legitimate admission call.
+    let direct = AdmissionChain::new(vec![WebhookConfig {
+        name: "direct".into(),
+        url: format!("{base}/enrich"),
+        timeout_ms: 2_000,
+        failure_policy: FailurePolicy::Reject,
+        events: vec![AdmissionOp::WritePage],
+        blocking: true,
+    }])
+    .unwrap();
+    direct
         .run(&path, &mut md, &AdmissionContext::default())
         .await
         .unwrap();
-
     assert_eq!(md.frontmatter["reviewed"], json!(true));
-    assert_eq!(md.body, "body content\n");
 }

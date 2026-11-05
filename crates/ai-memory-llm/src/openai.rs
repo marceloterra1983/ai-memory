@@ -140,7 +140,7 @@ impl OpenAiProvider {
     /// Returns a `reqwest::Error` if the HTTP client cannot be built.
     pub fn new(api_key: SecretString, model: impl Into<String>) -> LlmResult<Self> {
         let client = reqwest::Client::builder()
-            .redirect(crate::redirect::same_origin_redirects())
+            .redirect(crate::redirect::no_redirects())
             .build()?;
         Ok(Self {
             client,

@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Refused every provider/admission/CLI redirect, including builder failure paths, and preserved output symlinks while refusing multiply-linked archive targets (`21b7879c`, `d0d13651`, `404fa8a0`, `d6a28c77`).
+
 - Restored the bounded per-instance query-vector cache with TTL; document inference and query results remain uncached (`0511bba4`).
 
 - Excluded the normalized scoped project name from entity votes, retaining other matching entities and the installer’s exact fixbrainrank guard (`c4ea6bb3`).

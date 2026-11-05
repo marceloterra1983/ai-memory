@@ -376,7 +376,7 @@ impl AdmissionChain {
         }
 
         let client = reqwest::Client::builder()
-            .redirect(same_origin_redirects())
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| {
                 WikiError::Io(std::io::Error::other(format!("admission http client: {e}")))
@@ -787,30 +787,6 @@ fn is_supported_webhook_url(url: &str) -> bool {
     }
     let lower = trimmed.to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
-}
-
-/// Same redirect hop limit as `reqwest`'s default policy.
-const MAX_WEBHOOK_REDIRECTS: usize = 10;
-
-/// Follow a redirect only when it stays on the scheme, host, and port of the
-/// previous request.
-fn same_origin_redirects() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        let same_origin = attempt
-            .previous()
-            .last()
-            .is_some_and(|previous| previous.origin() == attempt.url().origin());
-        if !same_origin {
-            let target = attempt.url().origin().ascii_serialization();
-            attempt.error(format!(
-                "refused a redirect to another origin ({target}); set the endpoint to its final URL"
-            ))
-        } else if attempt.previous().len() > MAX_WEBHOOK_REDIRECTS {
-            attempt.error("too many redirects")
-        } else {
-            attempt.follow()
-        }
-    })
 }
 
 /// Format a `reqwest::Error` together with its `Error::source` chain so

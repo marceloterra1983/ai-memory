@@ -935,7 +935,7 @@ pub fn build_client() -> reqwest::Client {
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .expect("building the no-redirect native hook client")
 }
 
 /// Outcome of one spooled-event POST — enough for the drain loop to decide

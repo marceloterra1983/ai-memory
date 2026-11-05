@@ -181,7 +181,7 @@ impl OpenAiEmbedder {
         // sub-second. When the embedder still fails, memory_query
         // degrades gracefully to FTS5 + entity + graph (see server.rs).
         let client = reqwest::Client::builder()
-            .redirect(crate::redirect::same_origin_redirects())
+            .redirect(crate::redirect::no_redirects())
             .timeout(Duration::from_secs(120))
             .build()?;
         Ok(Self {
@@ -538,7 +538,7 @@ impl OpenAiCompatEmbedder {
         // Same cold-load tolerance as OpenAiEmbedder: first request
         // after an Ollama model unload can take ~30s.
         let client = reqwest::Client::builder()
-            .redirect(crate::redirect::same_origin_redirects())
+            .redirect(crate::redirect::no_redirects())
             .timeout(Duration::from_secs(120))
             .build()?;
         Ok(Self {
@@ -895,7 +895,7 @@ impl VoyageEmbedder {
         // sub-second. When the embedder still fails, memory_query
         // degrades gracefully to FTS5 + entity + graph (see server.rs).
         let client = reqwest::Client::builder()
-            .redirect(crate::redirect::same_origin_redirects())
+            .redirect(crate::redirect::no_redirects())
             .timeout(Duration::from_secs(120))
             .build()?;
         Ok(Self {

@@ -156,7 +156,7 @@ impl OpenAiOAuthProvider {
             ))
         })?;
         let client = reqwest::Client::builder()
-            .redirect(crate::redirect::same_origin_redirects())
+            .redirect(crate::redirect::no_redirects())
             .build()
             .map_err(LlmError::from)?;
         Ok(Self {

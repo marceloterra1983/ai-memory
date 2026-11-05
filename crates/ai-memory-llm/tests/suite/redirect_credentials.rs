@@ -5,8 +5,8 @@
 //!
 //! reqwest strips `Authorization` (and cookies) on a cross-host redirect, but
 //! nothing else, so a credential in a header of its own would reach whatever
-//! host the redirect names. Provider clients therefore follow a redirect only
-//! inside one origin.
+//! host the redirect names. Provider clients therefore refuse every redirect,
+//! including a same-origin path change.
 
 use ai_memory_llm::types::ChatRequest;
 use ai_memory_llm::{
@@ -152,10 +152,10 @@ async fn operator_headers_do_not_follow_a_cross_origin_redirect() {
     );
 }
 
-/// Control: a redirect inside the same origin keeps working, so a fix that
-/// only refuses origin changes does not break a gateway that rewrites paths.
+/// Same-origin rewrites must also be refused: credentials may only reach the
+/// exact endpoint the operator configured.
 #[tokio::test]
-async fn a_same_origin_redirect_still_reaches_the_provider() {
+async fn a_same_origin_redirect_is_refused_before_the_landing_endpoint() {
     let server = MockServer::start().await;
     Mock::given(wiremock::matchers::path("/landing"))
         .respond_with(ResponseTemplate::new(500))
@@ -188,12 +188,8 @@ async fn a_same_origin_redirect_still_reaches_the_provider() {
         .filter(|r| r.url.path() == "/landing")
         .collect();
     assert!(
-        !landed.is_empty(),
-        "the same-origin redirect was not followed"
-    );
-    assert!(
-        landed.iter().all(|r| has_header(r, "x-goog-api-key")),
-        "a same-origin redirect keeps the key"
+        landed.is_empty(),
+        "same-origin redirect exposed credentials at the landing endpoint"
     );
 }
 
@@ -224,8 +220,8 @@ async fn google_embedder_key_does_not_follow_a_cross_origin_redirect() {
     );
 }
 
-/// The refusal names the origin it would have gone to, so an operator can
-/// point the endpoint at its final URL.
+/// The refusal names the destination origin so the operator can configure the
+/// final endpoint explicitly.
 #[tokio::test]
 async fn a_refused_redirect_says_where_it_pointed() {
     let second = recording().await;
@@ -256,7 +252,7 @@ async fn a_refused_redirect_says_where_it_pointed() {
         source = cause.source();
     }
     assert!(
-        message.contains("another origin") && message.contains(&second.uri()),
+        message.contains("refused a redirect") && message.contains(&second.uri()),
         "the error explains the refusal: {message}"
     );
 }

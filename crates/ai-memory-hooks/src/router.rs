@@ -5596,18 +5596,20 @@ async fn process_authorized(
             && !child_session
             && !env.auto_handoff_off
             && state.create_handoff_on_session_end;
-        let handoff = should_create_handoff.then(|| {
-            build_auto_handoff(
-                page_ws,
-                page_proj,
-                env.agent,
-                session_id,
-                env.cwd.clone(),
-                &digest,
-                handoff_owner,
-                turn_checkpoint,
-            )
-        });
+        let handoff = should_create_handoff
+            .then(|| {
+                build_auto_handoff(
+                    page_ws,
+                    page_proj,
+                    env.agent,
+                    session_id,
+                    env.cwd.clone(),
+                    &digest,
+                    handoff_owner,
+                    turn_checkpoint,
+                )
+            })
+            .flatten();
         // Automatic SessionEnd handoffs are the bulk of handoff traffic;
         // skipping admission here would leave a webhook seeing only the
         // MCP-initiated minority and silently not enforcing its policy.
@@ -5902,6 +5904,34 @@ fn build_auto_handoff(
     digest: &SessionDigest,
     owner_user: Option<String>,
     turn_checkpoint: bool,
+) -> Option<NewHandoff> {
+    let facts = digest.handoff_facts();
+    let continuation = derive_continuation(facts, &facts.last_prompt);
+    if !turn_checkpoint && !continuation.has_pending_work() {
+        return None;
+    }
+    Some(render_auto_handoff(
+        workspace_id,
+        project_id,
+        from_agent,
+        session_id,
+        cwd,
+        digest,
+        owner_user,
+        turn_checkpoint,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_auto_handoff(
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+    from_agent: AgentKind,
+    session_id: SessionId,
+    cwd: Option<String>,
+    digest: &SessionDigest,
+    owner_user: Option<String>,
+    turn_checkpoint: bool,
 ) -> NewHandoff {
     let facts = digest.handoff_facts();
     /// Cap so a single 10-page prompt doesn't blow up the handoff.
@@ -5934,7 +5964,7 @@ fn build_auto_handoff(
             .into_iter()
             .collect()
     } else {
-        derive_open_questions(facts, &last_prompt)
+        derive_continuation(facts, &last_prompt).into_items()
     };
     // A heuristic that quotes the last prompt already carries it; the summary
     // must not repeat it.
@@ -5999,6 +6029,46 @@ fn build_auto_handoff(
     }
 }
 
+/// The continuation decision is typed so prompt text cannot impersonate a
+/// presentation prefix such as "Tools used:" or "Continue from:".
+enum AutoHandoffItems {
+    UnresolvedQuestion(String),
+    InterruptedFileWork,
+    MidTaskExit(String),
+    PromptEcho(String),
+    None,
+}
+
+impl AutoHandoffItems {
+    fn has_pending_work(&self) -> bool {
+        matches!(
+            self,
+            Self::UnresolvedQuestion(_) | Self::InterruptedFileWork | Self::MidTaskExit(_)
+        )
+    }
+
+    fn into_items(self) -> Vec<String> {
+        match self {
+            Self::UnresolvedQuestion(prompt) => vec![format!(
+                "Unresolved question: {}",
+                cap_handoff_text(&prompt)
+            )],
+            Self::InterruptedFileWork => vec![
+                "Session ended without a normal stop while working with files".into(),
+                "Check the working tree for uncommitted or unverified changes".into(),
+            ],
+            Self::MidTaskExit(prompt) => vec![format!(
+                "Continue from (mid-task exit): {}",
+                cap_handoff_text(&prompt)
+            )],
+            Self::PromptEcho(prompt) => {
+                vec![format!("Continue from: {}", cap_handoff_text(&prompt))]
+            }
+            Self::None => Vec::new(),
+        }
+    }
+}
+
 /// Derive the `open_questions` field for an automatic SessionEnd handoff
 /// using multi-signal heuristics, instead of blindly copying the last user
 /// prompt.
@@ -6015,9 +6085,9 @@ fn build_auto_handoff(
 ///    session ended before verification; advise the receiver to run tests.
 /// 3. Has Stop but no SessionEnd → mid-task exit; use the last
 ///    *substantive* prompt (filtering acknowledgments).
-/// 4. Normal end → last substantive prompt as "Continue from: …".
-/// 5. Fallback → empty Vec (same as the old behaviour when no prompts).
-fn derive_open_questions(facts: &HandoffFacts, last_prompt: &Option<String>) -> Vec<String> {
+/// 4. Normal end → a non-pending prompt echo.
+/// 5. Fallback → no continuation item.
+fn derive_continuation(facts: &HandoffFacts, last_prompt: &Option<String>) -> AutoHandoffItems {
     // Harness blocks delivered as a user turn are not the user's question, so
     // `question_prompt` is the last prompt that is not one.
     let last_prompt_obs = facts.question_prompt.as_ref();
@@ -6029,7 +6099,7 @@ fn derive_open_questions(facts: &HandoffFacts, last_prompt: &Option<String>) -> 
     if let Some(p) = last_prompt_obs {
         let body = p.body.trim();
         if body.ends_with('?') || body.ends_with('？') {
-            return vec![format!("Unresolved question: {}", cap_handoff_text(body))];
+            return AutoHandoffItems::UnresolvedQuestion(body.to_owned());
         }
     }
 
@@ -6052,10 +6122,7 @@ fn derive_open_questions(facts: &HandoffFacts, last_prompt: &Option<String>) -> 
     if let Some(tool) = last_tool {
         let touched_files = crate::payload::tool_family_from_title(tool) == Some(ToolFamily::File);
         if touched_files && !has_stop {
-            return vec![
-                "Session ended without a normal stop while working with files".into(),
-                "Check the working tree for uncommitted or unverified changes".into(),
-            ];
+            return AutoHandoffItems::InterruptedFileWork;
         }
     }
 
@@ -6065,22 +6132,19 @@ fn derive_open_questions(facts: &HandoffFacts, last_prompt: &Option<String>) -> 
         if !body.is_empty() && !is_acknowledgment(body) {
             // Heuristic 3 signal: no SessionEnd → flag as mid-task.
             if !has_session_end && has_stop {
-                return vec![format!(
-                    "Continue from (mid-task exit): {}",
-                    cap_handoff_text(body)
-                )];
+                return AutoHandoffItems::MidTaskExit(body.to_owned());
             }
             // Heuristic 4: normal end.
-            return vec![format!("Continue from: {}", cap_handoff_text(body))];
+            return AutoHandoffItems::PromptEcho(body.to_owned());
         }
     }
 
     // Fallback: no substantive prompt → empty (same as old behaviour).
-    Vec::new()
+    AutoHandoffItems::None
 }
 
 /// Whether a prompt is a pure acknowledgment with no substantive content.
-/// Used by [`derive_open_questions`] to skip "ok" / "thanks" / "好的" so
+/// Used by [`derive_continuation`] to skip "ok" / "thanks" / "好的" so
 /// the handoff does not carry a useless `Continue from: 好的` line.
 ///
 /// Intentionally conservative: only short, well-known phrases are caught.
@@ -6384,7 +6448,7 @@ pub(crate) mod tests {
         owner_user: Option<String>,
         turn_checkpoint: bool,
     ) -> NewHandoff {
-        super::build_auto_handoff(
+        super::render_auto_handoff(
             workspace_id,
             project_id,
             from_agent,
@@ -6400,7 +6464,8 @@ pub(crate) mod tests {
         observations: &[ai_memory_core::Observation],
         last_prompt: &Option<String>,
     ) -> Vec<String> {
-        super::derive_open_questions(&HandoffFacts::from_observations(observations), last_prompt)
+        super::derive_continuation(&HandoffFacts::from_observations(observations), last_prompt)
+            .into_items()
     }
 
     #[test]
@@ -6974,7 +7039,7 @@ pub(crate) mod tests {
                         agent: Some("claude-code".into()),
                         ..Default::default()
                     },
-                    serde_json::json!({ "session_id": resumed, "prompt": "pair the controller" }),
+                    serde_json::json!({ "session_id": resumed, "prompt": "How should we pair the controller?" }),
                 ),
                 None,
                 Vec::new(),
@@ -7147,7 +7212,12 @@ pub(crate) mod tests {
         for event in ["session-start", "user-prompt", "session-end"] {
             process(
                 &state,
-                lifecycle_event("claude-code", event, resumed, "pair the controller"),
+                lifecycle_event(
+                    "claude-code",
+                    event,
+                    resumed,
+                    "How should we pair the controller?",
+                ),
                 None,
                 Vec::new(),
             )
@@ -7431,7 +7501,7 @@ pub(crate) mod tests {
                     },
                     serde_json::json!({
                         "session_id": session.to_string(),
-                        "prompt": "preserve completed fixture work",
+                        "prompt": "preserve completed fixture work?",
                         "turn_checkpoint": name == "stop",
                     }),
                 )
@@ -11220,7 +11290,7 @@ pub(crate) mod tests {
                 serde_json::json!({
                     "session_id": sid,
                     "cwd": cwd.to_string_lossy(),
-                    "prompt": "finish cleanly",
+                    "prompt": "finish cleanly?",
                 }),
             )
         };
@@ -12758,7 +12828,7 @@ pub(crate) mod tests {
             ] {
                 let mut body = serde_json::json!({
                     "session_id": session.to_string(),
-                    "prompt": "Review the patch for the main agent",
+                    "prompt": "Review the patch for the main agent?",
                     "tool_name": "Bash",
                     "tool_response": "Review complete",
                 });
@@ -12867,7 +12937,7 @@ pub(crate) mod tests {
             url: format!("http://h/hook?event={event}&agent=claude-code&drop_subagent=1"),
             body: serde_json::json!({
                 "session_id": session.to_string(),
-                "prompt": "Ship the parent change",
+                "prompt": "Ship the parent change?",
                 "tool_name": "Bash",
                 "tool_response": "done",
             }),
@@ -17057,6 +17127,172 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn session_end_without_actionable_content_does_not_open_handoff() {
+        for (prompt, tool, stop) in [
+            (Some("responda ok"), None, true),
+            (Some("Canary word"), Some("Bash"), true),
+            (Some("tipo: revisar\nesforço: 2"), Some("Read"), true),
+            (Some("ok"), None, true),
+            (None, Some("Bash"), true),
+            (None, Some("Bash"), false),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let state = make_state(&tmp).await;
+            let session = SessionId::new().to_string();
+            for event in ["user-prompt", "post-tool-use", "stop", "session-end"] {
+                if (event == "user-prompt" && prompt.is_none())
+                    || (event == "post-tool-use" && tool.is_none())
+                    || (event == "stop" && !stop)
+                {
+                    continue;
+                }
+                let env = HookEnvelope::from_query_and_body(
+                    HookQuery {
+                        event: event.into(),
+                        agent: Some("claude-code".into()),
+                        ..Default::default()
+                    },
+                    serde_json::json!({
+                        "session_id": session,
+                        "prompt": prompt,
+                        "tool_name": tool,
+                    }),
+                );
+                process(&state, env, None, Vec::new()).await.unwrap();
+            }
+            assert!(
+                !open_handoff_exists(&state).await,
+                "a completed session with prompt {prompt:?} and tool {tool:?} has no actionable continuation",
+            );
+            assert!(!session_pages(&state).await.is_empty());
+            assert_eq!(
+                state
+                    .reader
+                    .latest_completed_session_for_project(state.workspace_id, state.project_id)
+                    .await
+                    .unwrap(),
+                Some(SessionId::from_native(&session)),
+                "skipping the baton must still close and summarize the session",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_end_imperative_with_edit_and_normal_stop_does_not_open_handoff() {
+        for tool in ["Edit", "Write"] {
+            let tmp = TempDir::new().unwrap();
+            let state = make_state(&tmp).await;
+            let session = SessionId::new().to_string();
+            for event in ["user-prompt", "post-tool-use", "stop", "session-end"] {
+                let env = HookEnvelope::from_query_and_body(
+                    HookQuery {
+                        event: event.into(),
+                        agent: Some("claude-code".into()),
+                        ..Default::default()
+                    },
+                    serde_json::json!({
+                        "session_id": session,
+                        "prompt": "Apply the migration",
+                        "tool_name": tool,
+                    }),
+                );
+                process(&state, env, None, Vec::new()).await.unwrap();
+            }
+            assert!(
+                !open_handoff_exists(&state).await,
+                "an imperative followed by {tool} and a normal Stop is completed work",
+            );
+            assert!(!session_pages(&state).await.is_empty());
+            assert_eq!(
+                state
+                    .reader
+                    .latest_completed_session_for_project(state.workspace_id, state.project_id)
+                    .await
+                    .unwrap(),
+                Some(SessionId::from_native(&session)),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_end_actionable_handoffs_remain_scoped() {
+        for (prompt, tool, stop) in [
+            ("Which migration remains?", None, true),
+            ("Apply the migration", Some("Edit"), false),
+            ("Apply the migration", Some("Write"), false),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let state = make_state(&tmp).await;
+            let session = SessionId::new().to_string();
+            for event in ["user-prompt", "post-tool-use", "stop", "session-end"] {
+                if (event == "post-tool-use" && tool.is_none()) || (event == "stop" && !stop) {
+                    continue;
+                }
+                let env = HookEnvelope::from_query_and_body(
+                    HookQuery {
+                        event: event.into(),
+                        agent: Some("claude-code".into()),
+                        ..Default::default()
+                    },
+                    serde_json::json!({
+                        "session_id": session,
+                        "prompt": prompt,
+                        "tool_name": tool,
+                    }),
+                );
+                process(&state, env, None, Vec::new()).await.unwrap();
+            }
+            let foreign_ws = state
+                .writer
+                .get_or_create_workspace("foreign")
+                .await
+                .unwrap();
+            let foreign_proj = state
+                .writer
+                .get_or_create_project(state.workspace_id, "foreign", None)
+                .await
+                .unwrap();
+            for (ws, proj) in [
+                (state.workspace_id, foreign_proj),
+                (foreign_ws, state.project_id),
+            ] {
+                assert!(
+                    state
+                        .reader
+                        .startup_handoff(
+                            ws,
+                            proj,
+                            None,
+                            ai_memory_core::OwnerFilter::Any,
+                            Timestamp::now()
+                        )
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "an actionable baton must not be readable from another project or workspace",
+                );
+            }
+            let handoff = state
+                .reader
+                .startup_handoff(
+                    state.workspace_id,
+                    state.project_id,
+                    None,
+                    ai_memory_core::OwnerFilter::Any,
+                    Timestamp::now(),
+                )
+                .await
+                .unwrap()
+                .expect("a concrete question or file work interrupted before Stop keeps a baton");
+            assert_eq!(
+                handoff.origin.from_session_id,
+                Some(SessionId::from_native(&session))
+            );
+            assert!(!handoff.content.open_questions.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn lifecycle_only_session_ends_without_page_handoff_or_consolidation() {
         let tmp = TempDir::new().unwrap();
         let mut state = make_state(&tmp).await;
@@ -17162,7 +17398,7 @@ pub(crate) mod tests {
         let tmp = TempDir::new().unwrap();
         let state = make_state(&tmp).await;
         let sid = "13131313-1313-1313-1313-131313131313";
-        for event in ["session-start", "pre-tool-use", "session-end"] {
+        for event in ["session-start", "post-tool-use", "session-end"] {
             let env = HookEnvelope::from_query_and_body(
                 HookQuery {
                     event: event.into(),
@@ -17200,7 +17436,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
                 .is_some(),
-            "tool activity is substantive even without a user prompt"
+            "interrupted file work remains actionable even without a user prompt"
         );
     }
 
@@ -17534,7 +17770,7 @@ pub(crate) mod tests {
         let omp_event = |session: SessionId, event: &str, agent_id: Option<&str>| {
             let mut body = serde_json::json!({
                 "sessionID": session.to_string(),
-                "prompt": "Find where the config is loaded",
+                "prompt": "Find where the config is loaded?",
             });
             if let Some(agent_id) = agent_id {
                 body["agent_id"] = serde_json::json!(agent_id);
@@ -17599,7 +17835,7 @@ pub(crate) mod tests {
                 "sessionId": session.to_string(),
                 "session_id": session.to_string(),
                 "hook_event_name": hook_event_name,
-                "prompt": "Find where the config is loaded",
+                "prompt": "Find where the config is loaded?",
                 "reason": "completed",
             });
             if let Some(subagent) = subagent {
@@ -17664,7 +17900,7 @@ pub(crate) mod tests {
                 serde_json::json!({
                     "session_id": session,
                     "agent_type": "reviewer",
-                    "prompt": "Review the patch",
+                    "prompt": "Review the patch?",
                     "_ai_memory_assistant": { "version": 1, "excerpt": "Found two bugs" },
                 }),
             );
@@ -19302,7 +19538,7 @@ pub(crate) mod tests {
                 },
                 serde_json::json!({
                     "session_id": managed_session.to_string(),
-                    "cwd": tmp.path(),
+                    "cwd": tmp.path(), "prompt": "Which fixture checks remain?",
                 }),
             );
             process(&state, envelope, None, Vec::new()).await.unwrap();
@@ -19335,7 +19571,7 @@ pub(crate) mod tests {
                 },
                 serde_json::json!({
                     "session_id": direct_session.to_string(),
-                    "cwd": tmp.path(),
+                    "cwd": tmp.path(), "prompt": "Which fixture checks remain?",
                 }),
             );
             process(&state, envelope, None, Vec::new()).await.unwrap();
@@ -19613,7 +19849,7 @@ pub(crate) mod tests {
                 serde_json::json!({
                     "session_id": session.to_string(),
                     "cwd": tmp.path(),
-                    "prompt": "Review the parser change",
+                    "prompt": "Which parser checks remain?",
                 }),
             );
             process(state, envelope, None, Vec::new()).await.unwrap();
@@ -19717,7 +19953,7 @@ pub(crate) mod tests {
                 },
                 serde_json::json!({
                     "session_id": session.to_string(),
-                    "cwd": tmp.path(),
+                    "cwd": tmp.path(), "prompt": "Which fixture checks remain?",
                 }),
             );
             process(&state, envelope, None, Vec::new()).await.unwrap();
@@ -20107,7 +20343,7 @@ pub(crate) mod tests {
                 project: Some("scratch".into()),
                 ..Default::default()
             },
-            serde_json::json!({ "session_id": session, "cwd": cwd }),
+            serde_json::json!({ "session_id": session, "cwd": cwd, "prompt": "Which fixture checks remain?" }),
         )
     }
 
@@ -20293,7 +20529,7 @@ pub(crate) mod tests {
                     url: format!(
                         "http://h/hook?event={event}&agent=claude-code&workspace=default&project=scratch"
                     ),
-                    body: serde_json::json!({ "session_id": session, "cwd": cwd }),
+                    body: serde_json::json!({ "session_id": session, "cwd": cwd, "prompt": "Which fixture checks remain?" }),
                 })
                 .collect::<Vec<_>>();
             let mut headers = HeaderMap::new();
@@ -21250,7 +21486,7 @@ pub(crate) mod tests {
                     agent: Some("codex".into()),
                     ..Default::default()
                 },
-                serde_json::json!({ "session_id": sid, "prompt": "ship the bounded read" }),
+                serde_json::json!({ "session_id": sid, "prompt": "Which bounded read checks remain?" }),
             )
         };
         process(&state, fire("user-prompt-submit"), None, Vec::new())
@@ -21351,7 +21587,7 @@ pub(crate) mod tests {
                     ingest_key: key.map(str::to_owned),
                     ..Default::default()
                 },
-                serde_json::json!({"session_id": sid.to_string(), "prompt": "finish work"}),
+                serde_json::json!({"session_id": sid.to_string(), "prompt": "finish work?"}),
             )
         };
         process(&state, fire("user-prompt-submit", None), None, Vec::new())
@@ -25080,7 +25316,7 @@ pub(crate) mod tests {
                     .latest_open_handoff(ws, proj, None, ai_memory_core::OwnerFilter::Any)
                     .await
                     .unwrap()
-                    .is_some()
+                    .is_none()
             );
         }
     }
@@ -26027,7 +26263,7 @@ pub(crate) mod tests {
             ),
             (
                 "user-prompt-submit",
-                serde_json::json!({ "session_id": session_id, "cwd": "/repo", "prompt": "safe observation" }),
+                serde_json::json!({ "session_id": session_id, "cwd": "/repo", "prompt": "Which safe observation remains?" }),
             ),
         ] {
             process(
@@ -27340,7 +27576,7 @@ pub(crate) mod tests {
                 "user-prompt",
                 serde_json::json!({
                     "hook_event_name": "beforeSubmitPrompt",
-                    "prompt": "Run the test suite",
+                    "prompt": "Run the test suite?",
                 }),
             ),
             (

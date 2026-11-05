@@ -807,7 +807,7 @@ async fn idle_tick_skips_a_session_ended_by_a_real_session_end_between_selection
         sid,
         ObservationKind::UserPrompt,
         now - 5 * HOUR_US,
-        "real end wins the race",
+        "Which real end wins the race?",
     )
     .await;
 
@@ -918,7 +918,7 @@ async fn idle_tick_late_real_session_end_with_new_work_reends_with_handoff() {
         sid,
         ObservationKind::UserPrompt,
         now - 1_000,
-        "late work after the idle end",
+        "Which late work remains after the idle end?",
     )
     .await;
     assert_eq!(post_session_end(&state, sid).await, StatusCode::ACCEPTED);

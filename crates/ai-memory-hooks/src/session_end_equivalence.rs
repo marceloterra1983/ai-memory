@@ -11,7 +11,8 @@
 //!
 //! Each test seeds sessions into a real store, runs the oracle on the rows
 //! `observations_for_session` returns, runs the production path on the same
-//! session, and compares the outputs.
+//! session, and compares the rendered outputs. Whether a completed session
+//! needs a baton is tested separately through the hook processing path.
 //!
 //! The failed-call facts (`## Failed tool calls`, the `N failed` clause, the
 //! handoff's `Last failed tool call` line) post-date the oracle. No fixture
@@ -911,7 +912,7 @@ impl Fixture {
                 Some("owner".into()),
                 turn_checkpoint,
             );
-            let new_handoff = super::build_auto_handoff(
+            let new_handoff = super::render_auto_handoff(
                 self.ws,
                 self.proj,
                 agent,

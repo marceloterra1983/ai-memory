@@ -1159,6 +1159,7 @@ pub(crate) fn link_or_adopt_native_session(
     conn: &mut Connection,
     input: &LinkOrAdoptManagedRunSession,
     boundary: ClaudeSessionBoundary,
+    viewer: Option<ai_memory_core::UserId>,
 ) -> StoreResult<ManagedRunSessionLink> {
     if input.native_session_id.trim().is_empty()
         || input.cwd.trim().is_empty()
@@ -1246,6 +1247,7 @@ pub(crate) fn link_or_adopt_native_session(
         }
     };
 
+    authorize_run_scope(&tx, selected.0, viewer)?;
     if !link_native_session_in_transaction(
         &tx,
         selected.0,
@@ -1275,6 +1277,7 @@ pub(crate) fn link_or_adopt_native_session(
 pub(crate) fn link_native_session_in_scope(
     conn: &mut Connection,
     input: &LinkManagedRunSessionInScope,
+    viewer: Option<ai_memory_core::UserId>,
 ) -> StoreResult<ManagedRunSessionLink> {
     if input
         .owner_user
@@ -1311,6 +1314,7 @@ pub(crate) fn link_native_session_in_scope(
             },
         );
     }
+    authorize_run_scope(&tx, input.run_id, viewer)?;
     let linked = link_native_session_in_transaction(
         &tx,
         input.run_id,
@@ -1325,6 +1329,35 @@ pub(crate) fn link_native_session_in_scope(
     } else {
         ManagedRunSessionLink::NoMatch
     })
+}
+
+/// Recheck the selected run's real project while its binding is still atomic.
+fn authorize_run_scope(
+    tx: &Transaction<'_>,
+    run_id: ManagedRunId,
+    viewer: Option<ai_memory_core::UserId>,
+) -> StoreResult<()> {
+    let Some(viewer) = viewer else {
+        return Ok(());
+    };
+    let (workspace, project): (Vec<u8>, Vec<u8>) = tx.query_row(
+        "SELECT w.workspace_id, w.project_id FROM managed_runs mr JOIN workstreams w ON w.id = mr.workstream_id WHERE mr.id = ?1",
+        params![run_id.as_bytes()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    crate::project_authz::resolve_project_authz_strict(
+        tx,
+        WorkspaceId::from_slice(&workspace)?,
+        ProjectId::from_slice(&project)?,
+        &crate::ProjectPrincipal::user(viewer),
+        true,
+    )
+    .map_err(|error| match error {
+        StoreError::Forbidden(_) => StoreError::ProjectWriteForbidden,
+        error => error,
+    })?
+    .authorize(crate::ProjectAccess::Write)
+    .map_err(|_| StoreError::ProjectWriteForbidden)
 }
 
 /// Mark the assigned synchronization packet delivered to SessionStart.

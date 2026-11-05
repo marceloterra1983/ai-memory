@@ -282,6 +282,7 @@ pub(crate) enum WriteCmd {
         owner_filter: OwnerFilter,
         ingest_key: Option<String>,
         moved_from_cwd: Option<String>,
+        authorization: Option<ops::HookProjectAuthorization>,
         reply: oneshot::Sender<StoreResult<HookSessionAdmission>>,
     },
     EndAdmittedSession {
@@ -886,10 +887,12 @@ pub(crate) enum WriteCmd {
     LinkOrAdoptManagedRunSession {
         input: LinkOrAdoptManagedRunSession,
         boundary: crate::workstream::ClaudeSessionBoundary,
+        viewer: Option<UserId>,
         reply: oneshot::Sender<StoreResult<ManagedRunSessionLink>>,
     },
     LinkManagedRunSessionInScope {
         input: LinkManagedRunSessionInScope,
+        viewer: Option<UserId>,
         reply: oneshot::Sender<StoreResult<ManagedRunSessionLink>>,
     },
     AcceptManagedRunContext {
@@ -1767,6 +1770,28 @@ impl WriterHandle {
         ingest_key: Option<String>,
         moved_from_cwd: Option<String>,
     ) -> StoreResult<HookSessionAdmission> {
+        self.admit_hook_session_event_authorized(
+            session,
+            obs,
+            owner_filter,
+            ingest_key,
+            moved_from_cwd,
+            None,
+        )
+        .await
+    }
+
+    /// Admit a hook and authorize every written scope on the writer transaction.
+    /// `None` preserves root and single-user operation without project grants.
+    pub async fn admit_hook_session_event_authorized(
+        &self,
+        session: NewSession,
+        obs: Sanitized<NewObservation>,
+        owner_filter: OwnerFilter,
+        ingest_key: Option<String>,
+        moved_from_cwd: Option<String>,
+        authorization: Option<ops::HookProjectAuthorization>,
+    ) -> StoreResult<HookSessionAdmission> {
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::AdmitHookSessionEvent {
             session,
@@ -1774,6 +1799,7 @@ impl WriterHandle {
             owner_filter,
             ingest_key,
             moved_from_cwd,
+            authorization,
             reply: tx,
         })
         .await?;
@@ -3860,10 +3886,21 @@ impl WriterHandle {
         &self,
         input: LinkOrAdoptManagedRunSession,
     ) -> StoreResult<ManagedRunSessionLink> {
+        self.link_or_adopt_managed_run_session_authorized(input, None)
+            .await
+    }
+
+    /// Bind a managed SessionStart only while its project still admits writes.
+    pub async fn link_or_adopt_managed_run_session_authorized(
+        &self,
+        input: LinkOrAdoptManagedRunSession,
+        viewer: Option<UserId>,
+    ) -> StoreResult<ManagedRunSessionLink> {
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::LinkOrAdoptManagedRunSession {
             input,
             boundary: crate::workstream::ClaudeSessionBoundary::Other,
+            viewer,
             reply: tx,
         })
         .await?;
@@ -3880,10 +3917,22 @@ impl WriterHandle {
         input: LinkOrAdoptManagedRunSession,
         boundary: crate::workstream::ClaudeSessionBoundary,
     ) -> StoreResult<ManagedRunSessionLink> {
+        self.relink_managed_claude_session_authorized(input, boundary, None)
+            .await
+    }
+
+    /// Relink an authorized Claude boundary with transactional project grants.
+    pub async fn relink_managed_claude_session_authorized(
+        &self,
+        input: LinkOrAdoptManagedRunSession,
+        boundary: crate::workstream::ClaudeSessionBoundary,
+        viewer: Option<UserId>,
+    ) -> StoreResult<ManagedRunSessionLink> {
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::LinkOrAdoptManagedRunSession {
             input,
             boundary,
+            viewer,
             reply: tx,
         })
         .await?;
@@ -3896,9 +3945,23 @@ impl WriterHandle {
         &self,
         input: LinkManagedRunSessionInScope,
     ) -> StoreResult<ManagedRunSessionLink> {
+        self.link_managed_run_session_in_scope_authorized(input, None)
+            .await
+    }
+
+    /// Bind a later hook session with project grants checked in the transaction.
+    pub async fn link_managed_run_session_in_scope_authorized(
+        &self,
+        input: LinkManagedRunSessionInScope,
+        viewer: Option<UserId>,
+    ) -> StoreResult<ManagedRunSessionLink> {
         let (tx, rx) = oneshot::channel();
-        self.send(WriteCmd::LinkManagedRunSessionInScope { input, reply: tx })
-            .await?;
+        self.send(WriteCmd::LinkManagedRunSessionInScope {
+            input,
+            viewer,
+            reply: tx,
+        })
+        .await?;
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
@@ -4471,16 +4534,28 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 owner_filter,
                 ingest_key,
                 moved_from_cwd,
+                authorization,
                 reply,
             } => {
-                let result = ops::admit_hook_session_event(
-                    &mut conn,
-                    &session,
-                    &obs,
-                    &owner_filter,
-                    ingest_key.as_deref(),
-                    moved_from_cwd.as_deref(),
-                );
+                let result = match authorization {
+                    Some(authorization) => ops::admit_hook_session_event_authorized(
+                        &mut conn,
+                        &session,
+                        &obs,
+                        &owner_filter,
+                        ingest_key.as_deref(),
+                        moved_from_cwd.as_deref(),
+                        &authorization,
+                    ),
+                    None => ops::admit_hook_session_event(
+                        &mut conn,
+                        &session,
+                        &obs,
+                        &owner_filter,
+                        ingest_key.as_deref(),
+                        moved_from_cwd.as_deref(),
+                    ),
+                };
                 send_or_warn(reply, result, "admit_hook_session_event");
             }
             WriteCmd::EndAdmittedSession {
@@ -5489,14 +5564,21 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::LinkOrAdoptManagedRunSession {
                 input,
                 boundary,
+                viewer,
+                reply,
+            } => {
+                let result = crate::workstream::link_or_adopt_native_session(
+                    &mut conn, &input, boundary, viewer,
+                );
+                send_or_warn(reply, result, "link_or_adopt_managed_run_session");
+            }
+            WriteCmd::LinkManagedRunSessionInScope {
+                input,
+                viewer,
                 reply,
             } => {
                 let result =
-                    crate::workstream::link_or_adopt_native_session(&mut conn, &input, boundary);
-                send_or_warn(reply, result, "link_or_adopt_managed_run_session");
-            }
-            WriteCmd::LinkManagedRunSessionInScope { input, reply } => {
-                let result = crate::workstream::link_native_session_in_scope(&mut conn, &input);
+                    crate::workstream::link_native_session_in_scope(&mut conn, &input, viewer);
                 send_or_warn(reply, result, "link_managed_run_session_in_scope");
             }
             WriteCmd::AcceptManagedRunContext { run_id, reply } => {

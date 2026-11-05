@@ -528,6 +528,13 @@ impl std::fmt::Display for CaptureNotAuthorized {
 
 impl std::error::Error for CaptureNotAuthorized {}
 
+fn capture_store_error(error: StoreError) -> anyhow::Error {
+    match error {
+        StoreError::ProjectWriteForbidden => CaptureNotAuthorized.into(),
+        error => error.into(),
+    }
+}
+
 /// Shared state passed to the hook handler.
 #[derive(Clone)]
 pub struct HookState {
@@ -1810,6 +1817,9 @@ async fn handle_handoff(
         // A refusal is the one failure that must not look like "no handoff":
         // it is a 403 carrying the reason, which the hook client reports on
         // stderr and never injects as context (#708).
+        Err(e) if e.downcast_ref::<CaptureNotAuthorized>().is_some() => {
+            (StatusCode::FORBIDDEN, e.to_string())
+        }
         Err(e) => match e.downcast_ref::<ai_memory_store::ScopeResolutionError>() {
             Some(refusal) if refusal.is_forbidden() => (StatusCode::FORBIDDEN, refusal.to_string()),
             _ => {
@@ -1868,7 +1878,8 @@ async fn fetch_and_accept_handoff_at(
     // authorize the request's repository before interpreting the run id: a
     // shared Codex daemon may carry a terminal id from another checkout, and
     // recovery must select only inside the current, authorized boundary.
-    let managed = fetch_managed_context(state, &query, agent, ws, proj, actor.as_ref()).await?;
+    let managed =
+        fetch_managed_context(state, &query, agent, ws, proj, actor.as_ref(), viewer).await?;
     // Session-start handoff delivery is a foreground action. Publish it so
     // static MCP callers resolve to the directory that is opening now. The
     // query carries no recall preference; the main capture path publishes
@@ -2208,7 +2219,7 @@ async fn pinned_managed_hook_scope(
     let linked = if hint.claude_boundary != ai_memory_store::ClaudeSessionBoundary::Other {
         state
             .writer
-            .relink_managed_claude_session(
+            .relink_managed_claude_session_authorized(
                 ai_memory_store::LinkOrAdoptManagedRunSession {
                     supplied_run_id: run_id,
                     workspace_id,
@@ -2219,20 +2230,26 @@ async fn pinned_managed_hook_scope(
                     owner_user,
                 },
                 hint.claude_boundary,
+                viewer,
             )
-            .await?
+            .await
+            .map_err(capture_store_error)?
     } else {
         state
             .writer
-            .link_managed_run_session_in_scope(ai_memory_store::LinkManagedRunSessionInScope {
-                run_id,
-                workspace_id,
-                project_id,
-                agent: hint.agent,
-                native_session_id: native.into_string(),
-                owner_user,
-            })
-            .await?
+            .link_managed_run_session_in_scope_authorized(
+                ai_memory_store::LinkManagedRunSessionInScope {
+                    run_id,
+                    workspace_id,
+                    project_id,
+                    agent: hint.agent,
+                    native_session_id: native.into_string(),
+                    owner_user,
+                },
+                viewer,
+            )
+            .await
+            .map_err(capture_store_error)?
     };
     if linked != ai_memory_store::ManagedRunSessionLink::Exact(run_id) {
         return Err(anyhow::anyhow!(
@@ -2794,6 +2811,7 @@ async fn fetch_managed_context(
     workspace_id: WorkspaceId,
     project_id: ProjectId,
     actor: Option<&IdentityKey>,
+    viewer: Option<ai_memory_core::UserId>,
 ) -> anyhow::Result<Option<PendingManagedContext>> {
     let Some(raw_run_id) = query.managed_run.as_deref() else {
         return Ok(None);
@@ -2836,16 +2854,20 @@ async fn fetch_managed_context(
     .await?;
     let linked = state
         .writer
-        .link_or_adopt_managed_run_session(ai_memory_store::LinkOrAdoptManagedRunSession {
-            supplied_run_id: run_id,
-            workspace_id,
-            project_id,
-            cwd: cwd.to_owned(),
-            agent,
-            native_session_id: native_identity.into_string(),
-            owner_user,
-        })
-        .await?;
+        .link_or_adopt_managed_run_session_authorized(
+            ai_memory_store::LinkOrAdoptManagedRunSession {
+                supplied_run_id: run_id,
+                workspace_id,
+                project_id,
+                cwd: cwd.to_owned(),
+                agent,
+                native_session_id: native_identity.into_string(),
+                owner_user,
+            },
+            viewer,
+        )
+        .await
+        .map_err(capture_store_error)?;
     let selected_run_id = match linked {
         ai_memory_store::ManagedRunSessionLink::Exact(run_id) => run_id,
         ai_memory_store::ManagedRunSessionLink::Adopted(adopted) => {
@@ -4747,6 +4769,19 @@ async fn process_authorized(
         return Err(anyhow::anyhow!("invalid marker aliases"));
     }
     let session_id = resolve_session_id(&env)?;
+    let turn_checkpoint = env.event == HookEvent::Stop
+        && match env.agent {
+            AgentKind::OpenCode => {
+                env.raw
+                    .get("turn_checkpoint")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            }
+            AgentKind::AntigravityCli => crate::antigravity::stop_is_turn_checkpoint(&env.raw),
+            _ => false,
+        }
+        && env.managed_run.is_none()
+        && !body_is_subagent(&env.raw);
     // An OpenCode `session.moved` relocation, forwarded by the plugin as a
     // SessionStart naming the directory the session left. Admission rebinds
     // the live session row to where it now runs, so its later SessionEnd and
@@ -4893,38 +4928,6 @@ async fn process_authorized(
         }
     };
 
-    // A capture is a write, so it needs `write` — the same rule the MCP write
-    // tools follow. The check lands here, rather than in the handler, because
-    // here is the first moment the repository is known: the handler answers
-    // 202 before this resolution runs, and resolving it up there would put a
-    // database round trip in front of every tool call an agent makes.
-    //
-    // The consequence is that the refusal cannot be an HTTP status, and that
-    // is the right outcome anyway. A 403 would reach the client as an ordinary
-    // failure and be retried until it burnt the entry's attempt budget, which
-    // is how this project once spent 10.7M tokens re-sending something that
-    // could never succeed. Dropping it here is final by construction.
-    //
-    // Decided on the read pool, not the writer actor: this runs for every
-    // captured event, and a round trip through the single writer per event is
-    // the contention the hook path is built to avoid.
-    match ai_memory_store::authorize_scope_for(
-        &state.reader,
-        None,
-        ai_memory_store::ResolvedScope {
-            workspace_id: ws,
-            project_id: proj,
-        },
-        viewer,
-        ai_memory_store::ProjectAccess::Write,
-    )
-    .await
-    {
-        Ok(_) => {}
-        Err(err) if err.is_forbidden() => return Err(CaptureNotAuthorized.into()),
-        Err(err) => return Err(err.into()),
-    }
-
     // Hooks are fire-and-forget and may arrive out of order. Begin the
     // session idempotently before every observation so a resumed agent
     // session, or a prompt racing ahead of SessionStart, cannot trip the
@@ -4984,6 +4987,37 @@ async fn process_authorized(
     // completed. A replay that observes `ResumePending` must not race the first
     // delivery's page, handoff, consolidation, or key-completion tail.
     let (admission, log_title, _ingest_guard) = loop {
+        // A capture is a write, so it needs `write` — the same rule the MCP write
+        // tools follow. The check lands here, rather than in the handler, because
+        // here is the first moment the repository is known: the handler answers
+        // 202 before this resolution runs, and resolving it up there would put a
+        // database round trip in front of every tool call an agent makes.
+        //
+        // The consequence is that the refusal cannot be an HTTP status, and that
+        // is the right outcome anyway. A 403 would reach the client as an ordinary
+        // failure and be retried until it burnt the entry's attempt budget, which
+        // is how this project once spent 10.7M tokens re-sending something that
+        // could never succeed. Dropping it here is final by construction.
+        //
+        // Repeat the fast refusal for each resolution attempt. The writer also
+        // authorizes the effective observation and artifact scopes transactionally.
+        match ai_memory_store::authorize_scope_for(
+            &state.reader,
+            None,
+            ai_memory_store::ResolvedScope {
+                workspace_id: ws,
+                project_id: proj,
+            },
+            viewer,
+            ai_memory_store::ProjectAccess::Write,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(err) if err.is_forbidden() => return Err(CaptureNotAuthorized.into()),
+            Err(err) => return Err(err.into()),
+        }
+
         // Rebuild both records on retry: the store validates and persists this
         // exact scope pair atomically with the keyed observation claim.
         let new_session = NewSession {
@@ -5021,16 +5055,21 @@ async fn process_authorized(
         };
         let result = state
             .writer
-            .admit_hook_session_event(
+            .admit_hook_session_event_authorized(
                 new_session,
                 sanitized,
                 owner_filter.clone(),
                 ingest_key.clone(),
                 moved_from_cwd.clone(),
+                viewer.map(|viewer| ai_memory_store::HookProjectAuthorization {
+                    viewer,
+                    writes_session_scope: turn_checkpoint,
+                }),
             )
             .await;
         match result {
             Ok(admission) => break (admission, log_title, ingest_guard),
+            Err(StoreError::ProjectWriteForbidden) => return Err(CaptureNotAuthorized.into()),
             Err(error)
                 if pinned_scope.is_none()
                     && attempts == 0
@@ -5160,15 +5199,19 @@ async fn process_authorized(
         // admitted scope and operator, not the run id alone.
         let linked = state
             .writer
-            .link_managed_run_session_in_scope(ai_memory_store::LinkManagedRunSessionInScope {
-                run_id,
-                workspace_id: ws,
-                project_id: proj,
-                agent: env.agent,
-                native_session_id: native_session_id.into_string(),
-                owner_user: owner_stamp.clone(),
-            })
-            .await?;
+            .link_managed_run_session_in_scope_authorized(
+                ai_memory_store::LinkManagedRunSessionInScope {
+                    run_id,
+                    workspace_id: ws,
+                    project_id: proj,
+                    agent: env.agent,
+                    native_session_id: native_session_id.into_string(),
+                    owner_user: owner_stamp.clone(),
+                },
+                viewer,
+            )
+            .await
+            .map_err(capture_store_error)?;
         if linked == ai_memory_store::ManagedRunSessionLink::Refused {
             warn!(
                 managed_run = %run_id,
@@ -5337,19 +5380,6 @@ async fn process_authorized(
     // continuation checkpoint without claiming the native session has ended.
     // Antigravity has no conversation-end event at all, so a turn its model
     // finished with nothing left running in the background does the same.
-    let turn_checkpoint = env.event == HookEvent::Stop
-        && match env.agent {
-            AgentKind::OpenCode => {
-                env.raw
-                    .get("turn_checkpoint")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-            }
-            AgentKind::AntigravityCli => crate::antigravity::stop_is_turn_checkpoint(&env.raw),
-            _ => false,
-        }
-        && !managed
-        && !body_is_subagent(&env.raw);
     if matches!(env.event, HookEvent::SessionEnd) || turn_checkpoint {
         // Token-usage visibility (docs: session usage tracking): the native
         // hook spliced an optional `_ai_memory_usage` object into the
@@ -5379,6 +5409,26 @@ async fn process_authorized(
             return Ok(outcome);
         }
         let (page_ws, page_proj) = checkpoint_scope.unwrap_or((ws, proj));
+        if turn_checkpoint {
+            ai_memory_store::authorize_scope_for(
+                &state.reader,
+                None,
+                ai_memory_store::ResolvedScope {
+                    workspace_id: page_ws,
+                    project_id: page_proj,
+                },
+                viewer,
+                ai_memory_store::ProjectAccess::Write,
+            )
+            .await
+            .map_err(|error| {
+                if error.is_forbidden() {
+                    anyhow::Error::from(CaptureNotAuthorized)
+                } else {
+                    error.into()
+                }
+            })?;
+        }
         // A session can hold hundreds of thousands of rows, so nothing on this
         // path loads them all: the lifecycle-only decision is one existence
         // query (the writer re-checks it in the ending transaction with the
@@ -7301,6 +7351,344 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(stored.len(), 1, "the writer's capture must be stored");
+    }
+
+    async fn assert_drifted_session_artifacts_need_original_project_write(event: &str) {
+        use ai_memory_store::GrantLevel;
+
+        for (grant, root_control, allowed) in [
+            (None, false, false),
+            (Some(GrantLevel::Read), false, false),
+            (Some(GrantLevel::Write), false, true),
+            (None, true, true),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let mut state = make_state(&tmp).await;
+            let llm = Arc::new(RecordingLlm(Mutex::new(None)));
+            state.consolidator = Some(Arc::new(Consolidator::new(
+                state.reader.clone(),
+                state.writer.clone(),
+                state.wiki.clone(),
+                llm.clone(),
+                state.workspace_id,
+                state.project_id,
+            )));
+            state.consolidate_on_session_end = true;
+            state.session_consolidation_notify = Some(Arc::new(tokio::sync::Notify::new()));
+            state
+                .writer
+                .set_access_mode(state.project_id, ai_memory_store::AccessMode::Restricted)
+                .await
+                .unwrap();
+            let marker_project = state
+                .writer
+                .get_or_create_project(state.workspace_id, "marker-target", None)
+                .await
+                .unwrap();
+            state
+                .writer
+                .set_access_mode(marker_project, ai_memory_store::AccessMode::Restricted)
+                .await
+                .unwrap();
+            let user =
+                user_holding(&state, "alice", state.project_id, Some(GrantLevel::Write)).await;
+            state
+                .writer
+                .grant_memory(user, marker_project, GrantLevel::Write, None)
+                .await
+                .unwrap();
+            let actor = ai_memory_core::ActorContext {
+                user: Some("alice".into()),
+                ..Default::default()
+            }
+            .identity_key();
+            let session = SessionId::new();
+            let envelope = |name: &str, project: &str, key: Option<&str>| {
+                HookEnvelope::from_query_and_body(
+                    HookQuery {
+                        event: name.into(),
+                        agent: Some("opencode2".into()),
+                        cwd: Some(tmp.path().to_string_lossy().into_owned()),
+                        workspace: Some("default".into()),
+                        project: Some(project.into()),
+                        ingest_key: key.map(str::to_owned),
+                        ..Default::default()
+                    },
+                    serde_json::json!({
+                        "session_id": session.to_string(),
+                        "prompt": "preserve completed fixture work",
+                        "turn_checkpoint": name == "stop",
+                    }),
+                )
+            };
+            for name in ["session-start", "user-prompt-submit"] {
+                process_authorized(
+                    &state,
+                    envelope(name, "scratch", None),
+                    actor.clone(),
+                    ai_memory_core::AuthLevel::User,
+                    Vec::new(),
+                    Some(user),
+                )
+                .await
+                .unwrap();
+            }
+            state
+                .writer
+                .revoke_memory(user, state.project_id, None)
+                .await
+                .unwrap();
+            if let Some(grant) = grant {
+                state
+                    .writer
+                    .grant_memory(user, state.project_id, grant, None)
+                    .await
+                    .unwrap();
+            }
+
+            // The marker now names a writable project, but the terminal event
+            // and checkpoint artifacts still belong to the session's original
+            // project. Permission on the marker must not authorize that write.
+            let result = process_authorized(
+                &state,
+                envelope(event, "marker-target", Some("artifact-scope-check")),
+                actor.clone(),
+                if root_control {
+                    ai_memory_core::AuthLevel::Root
+                } else {
+                    ai_memory_core::AuthLevel::User
+                },
+                Vec::new(),
+                if root_control { None } else { Some(user) },
+            )
+            .await;
+            if allowed {
+                result.expect("write grant and root controls must preserve legitimate rescoping");
+            } else {
+                let error =
+                    result.expect_err("marker write must not bypass original-project grants");
+                assert!(
+                    error.downcast_ref::<CaptureNotAuthorized>().is_some(),
+                    "{event} with {grant:?}: refusal must be terminal: {error}",
+                );
+            }
+            let counts = state
+                .reader
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT \
+                         (SELECT COUNT(*) FROM observations), \
+                         (SELECT ended_at IS NOT NULL FROM sessions), \
+                         (SELECT COUNT(*) FROM pages WHERE path GLOB 'sessions/*'), \
+                         (SELECT COUNT(*) FROM handoffs), \
+                         (SELECT COUNT(*) FROM session_consolidation_jobs), \
+                         (SELECT COUNT(*) FROM ingest_keys)",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, u64>(0)?,
+                                row.get::<_, bool>(1)?,
+                                row.get::<_, u64>(2)?,
+                                row.get::<_, u64>(3)?,
+                                row.get::<_, u64>(4)?,
+                                row.get::<_, u64>(5)?,
+                            ))
+                        },
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                counts,
+                if allowed {
+                    (
+                        3,
+                        event == "session-end",
+                        1,
+                        1,
+                        u64::from(event == "session-end"),
+                        1,
+                    )
+                } else {
+                    (2, false, 0, 0, 0, 0)
+                },
+                "{event} with {grant:?}, root={root_control}: refusal precedes every mutation",
+            );
+            assert!(
+                state
+                    .reader
+                    .recent_pages_for_project(state.workspace_id, marker_project, 20)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "the marker project never owns the session artifacts",
+            );
+            assert!(llm.0.lock().unwrap().is_none(), "no provider is called");
+        }
+    }
+
+    #[tokio::test]
+    async fn drifted_session_end_requires_write_on_its_original_project() {
+        assert_drifted_session_artifacts_need_original_project_write("session-end").await;
+    }
+
+    #[tokio::test]
+    async fn drifted_turn_checkpoint_requires_write_on_its_original_project() {
+        assert_drifted_session_artifacts_need_original_project_write("stop").await;
+    }
+
+    #[tokio::test]
+    async fn native_session_move_requires_write_on_its_source_project() {
+        use ai_memory_store::GrantLevel;
+
+        for (source_grant, root_control, allowed) in [
+            (None, false, false),
+            (Some(GrantLevel::Read), false, false),
+            (Some(GrantLevel::Write), false, true),
+            (None, true, true),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let state = make_state(&tmp).await;
+            state
+                .writer
+                .set_access_mode(state.project_id, ai_memory_store::AccessMode::Restricted)
+                .await
+                .unwrap();
+            let target = state
+                .writer
+                .get_or_create_project(state.workspace_id, "move-target", None)
+                .await
+                .unwrap();
+            state
+                .writer
+                .set_access_mode(target, ai_memory_store::AccessMode::Restricted)
+                .await
+                .unwrap();
+            let user =
+                user_holding(&state, "alice", state.project_id, Some(GrantLevel::Write)).await;
+            state
+                .writer
+                .grant_memory(user, target, GrantLevel::Write, None)
+                .await
+                .unwrap();
+            let actor = ai_memory_core::ActorContext {
+                user: Some("alice".into()),
+                ..Default::default()
+            }
+            .identity_key();
+            let session = SessionId::new();
+            let source_cwd = tmp.path().join("source").to_string_lossy().into_owned();
+            let target_cwd = tmp.path().join("target").to_string_lossy().into_owned();
+            let envelope = |event: &str, project: &str, cwd: &str| {
+                HookEnvelope::from_query_and_body(
+                    HookQuery {
+                        event: event.into(),
+                        agent: Some("opencode2".into()),
+                        cwd: Some(cwd.into()),
+                        workspace: Some("default".into()),
+                        project: Some(project.into()),
+                        ..Default::default()
+                    },
+                    serde_json::json!({
+                        "session_id": session.to_string(),
+                        "prompt": "preserve original source observations",
+                    }),
+                )
+            };
+            for event in ["session-start", "user-prompt-submit"] {
+                process_authorized(
+                    &state,
+                    envelope(event, "scratch", &source_cwd),
+                    actor.clone(),
+                    ai_memory_core::AuthLevel::User,
+                    Vec::new(),
+                    Some(user),
+                )
+                .await
+                .unwrap();
+            }
+            state
+                .writer
+                .revoke_memory(user, state.project_id, None)
+                .await
+                .unwrap();
+            if let Some(level) = source_grant {
+                state
+                    .writer
+                    .grant_memory(user, state.project_id, level, None)
+                    .await
+                    .unwrap();
+            }
+            let mut moved = envelope("session-start", "move-target", &target_cwd);
+            moved.raw["session_moved"] = serde_json::json!(true);
+            moved.raw["session_moved_from_cwd"] = serde_json::json!(source_cwd);
+            moved.ingest_key = Some("source-to-target".into());
+            let result = process_authorized(
+                &state,
+                moved,
+                actor,
+                if root_control {
+                    ai_memory_core::AuthLevel::Root
+                } else {
+                    ai_memory_core::AuthLevel::User
+                },
+                Vec::new(),
+                if root_control { None } else { Some(user) },
+            )
+            .await;
+            let scope = state
+                .reader
+                .find_session_scope(session)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                scope,
+                (
+                    state.workspace_id,
+                    if allowed { target } else { state.project_id },
+                    Some(if allowed { target_cwd } else { source_cwd }),
+                ),
+                "a native move may not rebind a session from an unwritable source project",
+            );
+            let counts = state
+                .reader
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT (SELECT COUNT(*) FROM observations), \
+                             (SELECT COUNT(*) FROM ingest_keys), \
+                             (SELECT COUNT(*) FROM pages), \
+                             (SELECT COUNT(*) FROM handoffs), \
+                             (SELECT COUNT(*) FROM session_consolidation_jobs)",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, u64>(0)?,
+                                row.get::<_, u64>(1)?,
+                                row.get::<_, u64>(2)?,
+                                row.get::<_, u64>(3)?,
+                                row.get::<_, u64>(4)?,
+                            ))
+                        },
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                counts,
+                if allowed {
+                    (3, 1, 0, 0, 0)
+                } else {
+                    (2, 0, 0, 0, 0)
+                }
+            );
+            if allowed {
+                result.expect("source write and root controls must preserve native moves");
+            } else {
+                let error = result.expect_err("the source project needs write access");
+                assert!(error.downcast_ref::<CaptureNotAuthorized>().is_some());
+            }
+        }
     }
 
     /// An unauthorized batch item is CONSUMED, never left to be retried.
@@ -27733,7 +28121,8 @@ pub(crate) mod tests {
                         AgentKind::ClaudeCode,
                         state.workspace_id,
                         state.project_id,
-                        None
+                        None,
+                        None,
                     )
                     .await
                     .unwrap()

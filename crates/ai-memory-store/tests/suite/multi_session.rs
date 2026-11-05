@@ -6027,3 +6027,120 @@ async fn repeated_end_recovery_receipt_preserves_identity_and_completion() {
         1
     );
 }
+
+/// A matching run id and operator cannot carry an obsolete grant decision into
+/// either the initial binding or a later hook's binding transaction.
+#[tokio::test]
+async fn managed_hook_binding_rechecks_revoked_project_write_in_transaction() {
+    use ai_memory_store::{AccessMode, GrantLevel, LinkManagedRunSessionInScope};
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, project) = scope(&store).await;
+    store
+        .writer
+        .set_access_mode(project, AccessMode::Restricted)
+        .await
+        .unwrap();
+    let user = store
+        .writer
+        .create_human_user(
+            NewUser {
+                username: "hook-writer".into(),
+                name: None,
+                email: None,
+            },
+            UserRole::User,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let owner = operator("hook-writer");
+    let prepare = |name: &str| PrepareWorkstreamRun {
+        scope_by_id: false,
+        workspace_id: ws,
+        project_id: project,
+        repo_fingerprint: name.into(),
+        worktree_fingerprint: name.into(),
+        cwd: "/synthetic".into(),
+        agent: AgentKind::Codex,
+        automatic_harness: false,
+        available_agents: Vec::new(),
+        selection: WorkstreamSelection::New(name.into()),
+        lease_owner: name.into(),
+    };
+    let start_run = store
+        .writer
+        .prepare_workstream_run_owned(prepare("start"), Some(owner.clone()))
+        .await
+        .unwrap();
+    let later_run = store
+        .writer
+        .prepare_workstream_run_owned(prepare("later"), Some(owner.clone()))
+        .await
+        .unwrap();
+    let native = SessionId::new().to_string();
+    let initial = || LinkOrAdoptManagedRunSession {
+        supplied_run_id: start_run.run_id,
+        workspace_id: ws,
+        project_id: project,
+        cwd: "/synthetic".into(),
+        agent: AgentKind::Codex,
+        native_session_id: native.clone(),
+        owner_user: Some(owner.clone()),
+    };
+    let later = || LinkManagedRunSessionInScope {
+        run_id: later_run.run_id,
+        workspace_id: ws,
+        project_id: project,
+        agent: AgentKind::Codex,
+        native_session_id: native.clone(),
+        owner_user: Some(owner.clone()),
+    };
+    for grant in [None, Some(GrantLevel::Read)] {
+        if let Some(grant) = grant {
+            store
+                .writer
+                .grant_memory(user, project, grant, None)
+                .await
+                .unwrap();
+        }
+        let error = store
+            .writer
+            .link_or_adopt_managed_run_session_authorized(initial(), Some(user))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::ProjectWriteForbidden));
+        let error = store
+            .writer
+            .link_managed_run_session_in_scope_authorized(later(), Some(user))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::ProjectWriteForbidden));
+        for run in [start_run.run_id, later_run.run_id] {
+            let status = store.reader.managed_run_status(run).await.unwrap().unwrap();
+            assert!(!status.native_session_linked && status.native_session_id.is_none());
+        }
+    }
+    store
+        .writer
+        .grant_memory(user, project, GrantLevel::Write, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .writer
+            .link_or_adopt_managed_run_session_authorized(initial(), Some(user))
+            .await
+            .unwrap(),
+        ManagedRunSessionLink::Exact(start_run.run_id)
+    );
+    assert_eq!(
+        store
+            .writer
+            .link_managed_run_session_in_scope_authorized(later(), Some(user))
+            .await
+            .unwrap(),
+        ManagedRunSessionLink::Exact(later_run.run_id)
+    );
+}

@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Bound conditional page writes and readback to complete source snapshots, added cross-process page locks, and restored typed page/scope absence for the local relay (`143ad28a`, `d0eb4754`).
+
 - Preserved the local query embedding endpoint independently of document fallback (`4cfbdf60`; [phase A reconciliation](docs/subida-3.4.2/CLASSIFICACAO.md)).
 
 ## [3.4.2] - 2026-11-05

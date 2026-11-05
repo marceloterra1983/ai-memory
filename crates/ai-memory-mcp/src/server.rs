@@ -2246,7 +2246,12 @@ impl AiMemoryServer {
     /// handle for a create-on-write resolution, or an underlying store failure
     /// — stay `internal_error` (`-32603`).
     fn scope_error(err: ai_memory_store::ScopeResolutionError) -> McpError {
-        if err.is_bad_request() || err.is_not_found() {
+        if err.is_not_found() {
+            McpError::invalid_params(
+                err.to_string(),
+                Some(serde_json::json!({"code": "scope_not_found"})),
+            )
+        } else if err.is_bad_request() {
             McpError::invalid_params(err.to_string(), None)
         } else {
             McpError::internal_error(err.to_string(), None)
@@ -3128,7 +3133,7 @@ impl AiMemoryServer {
     /// pass; only the observation prune still runs.
     #[must_use]
     pub fn with_wiki(mut self, wiki: Wiki) -> Self {
-        self.wiki = Some(wiki);
+        self.wiki = Some(wiki.with_store_reader(self.reader.clone()));
         self
     }
 
@@ -3136,7 +3141,7 @@ impl AiMemoryServer {
     #[must_use]
     pub fn with_consolidator(mut self, wiki: Wiki, consolidator: Arc<Consolidator>) -> Self {
         self.consolidator = Some(consolidator);
-        self.wiki = Some(wiki);
+        self.wiki = Some(wiki.with_store_reader(self.reader.clone()));
         self
     }
 
@@ -6076,108 +6081,56 @@ impl AiMemoryServer {
         // only on the success paths below, so an error read reinforces nothing.
         let bump_actor = Self::bump_actor_from_parts(&parts);
         let mut bump_ids: Vec<PageId> = Vec::new();
-        // Also returned as `page_id`: the version token a conditional
-        // `memory_write_page`/`memory_delete_page` passes back.
-        let page_id = self
-            .reader
-            .latest_page_id_by_ids(ws, proj, page_path.to_string())
+        // The file and its optional version are captured together under the
+        // same lock as writes; full source equality precedes presentation caps.
+        let snapshot = wiki
+            .read_page_version(ws, proj, &page_path, &self.reader)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let page_id = snapshot.as_ref().and_then(|page| page.page_id);
         if let Some(seed_id) = page_id {
             bump_ids.push(seed_id);
         }
         if let Some(nodes) = &related {
             bump_ids.extend(nodes.iter().map(|n| n.id));
         }
-
-        let result = match wiki.read_page(ws, proj, &page_path) {
-            Ok(md) => {
-                // Derive the title so an empty/absent frontmatter `title`
-                // falls back to the body's H1 (then the path stem), instead
-                // of surfacing "" — auto-improve pages whose stored
-                // frontmatter title was never filled otherwise read back
-                // titleless despite a proper `# Heading` (#599).
+        let result = match snapshot {
+            Some(page) => {
+                let md = page.markdown;
                 let title = ai_memory_wiki::derive_title(&md.frontmatter, &md.body, &page_path);
                 let (sections, sections_truncated) = crate::page_patch::section_hashes(&md.body);
                 let total_chars = md.body.chars().count();
-                let truncated = total_chars > max_chars;
-                let body = cap_text_with_marker(&md.body, max_chars, "body");
-                ok_json(&annotate(serde_json::json!({
+                let mut value = serde_json::json!({
                     "path": page_path.to_string(),
                     "page_id": page_id.map(|id| id.to_string()),
                     "title": title,
-                    "body": body,
+                    "body": cap_text_with_marker(&md.body, max_chars, "body"),
                     "frontmatter": md.frontmatter,
                     "sections": sections,
                     "sections_truncated": sections_truncated,
-                    "truncated": truncated,
+                    "truncated": total_chars > max_chars,
                     "total_chars": total_chars,
-                })))
-            }
-            Err(disk_err) if is_missing_wiki_file(&disk_err) => {
-                match self
-                    .reader
-                    .page_body_by_ids(ws, proj, page_path.as_str())
-                    .await
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
-                {
-                    Some(stored) => {
-                        let frontmatter: serde_json::Value =
-                            serde_json::from_str(&stored.frontmatter_json)
-                                .unwrap_or(serde_json::Value::Null);
-                        let title = frontmatter
-                            .get("title")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                            .or(Some(stored.title));
-                        let (sections, sections_truncated) =
-                            crate::page_patch::section_hashes(&stored.body);
-                        let total_chars = stored.body.chars().count();
-                        let truncated = total_chars > max_chars;
-                        let body = cap_text_with_marker(&stored.body, max_chars, "body");
-                        ok_json(&annotate(serde_json::json!({
-                            "path": page_path.to_string(),
-                            "page_id": page_id.map(|id| id.to_string()),
-                            "title": title,
-                            "body": body,
-                            "frontmatter": frontmatter,
-                            "sections": sections,
-                            "sections_truncated": sections_truncated,
-                            "served_from": "db-fallback",
-                            "truncated": truncated,
-                            "total_chars": total_chars,
-                        })))
-                    }
-                    None => {
-                        // Not on disk and not in the DB under the resolved
-                        // scope. Name the scope (and flag auto-resolution) so
-                        // scope-bleed is diagnosable from the error itself,
-                        // instead of leaking the raw disk error/path.
-                        let scope = self.scope_label(ws, proj).await;
-                        let hint = if auto_scoped {
-                            " — this scope was auto-resolved from the active \
-                             project; pass explicit workspace+project if this \
-                             is a parallel multi-project session where the \
-                             write may have landed in a different scope"
-                        } else {
-                            ""
-                        };
-                        // Not-found under the resolved scope is caller-fixable
-                        // too, as `memory_status` and
-                        // `memory_read_session_observations` already answer for
-                        // an unknown project or session. The `hint` below only
-                        // helps if the client treats this as its own mistake.
-                        Err(McpError::invalid_params(
-                            format!(
-                                "page {} not found in resolved scope {scope}{hint}",
-                                page_path.as_str()
-                            ),
-                            None,
-                        ))
-                    }
+                });
+                if page.from_store {
+                    value["served_from"] = serde_json::json!("db-fallback");
                 }
+                ok_json(&annotate(value))
             }
-            Err(disk_err) => Err(McpError::internal_error(disk_err.to_string(), None)),
+            None => {
+                let scope = self.scope_label(ws, proj).await;
+                let hint = if auto_scoped {
+                    " — this scope was auto-resolved from the active project; pass explicit workspace+project for parallel sessions"
+                } else {
+                    ""
+                };
+                Err(McpError::invalid_params(
+                    format!(
+                        "page {} not found in resolved scope {scope}{hint}",
+                        page_path.as_str()
+                    ),
+                    Some(serde_json::json!({"code": "page_not_found"})),
+                ))
+            }
         };
         if result.is_ok() {
             self.spawn_access_bump(bump_ids, bump_actor.as_ref());
@@ -28306,6 +28259,67 @@ mod tests {
                     .await
                     .unwrap_err();
                 assert_precondition_failed(&err, None);
+            }
+        }
+        #[tokio::test]
+        async fn relay_absence_codes_are_typed() {
+            let (_tmp, server) = server(true).await;
+            for (project, code) in [
+                ("scratch", "page_not_found"),
+                ("missing", "scope_not_found"),
+            ] {
+                let error = server
+                    .memory_read_page(
+                        Parameters(ReadPageArgs {
+                            path: Some("notes/absent.md".into()),
+                            query: None,
+                            workspace: Some("default".into()),
+                            project: Some(project.into()),
+                            project_id: None,
+                            scope: None,
+                            include_related: false,
+                            related_depth: None,
+                            max_chars: None,
+                        }),
+                        OptionalParts(test_parts_default()),
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.data.as_ref().and_then(|d| d["code"].as_str()),
+                    Some(code),
+                    "{error:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn relay_id_never_describes_an_external_body_or_metadata_edit() {
+            let (_tmp, server) = server(true).await;
+            put(&server, write("notes/a.md", "original", "scratch"))
+                .await
+                .unwrap();
+            let wiki = server.wiki.as_ref().unwrap();
+            let path = PagePath::new("notes/a.md").unwrap();
+            let abs = wiki.abs_path(server.workspace_id, server.project_id, &path);
+            let original = std::fs::read(&abs).unwrap();
+            for metadata in [false, true] {
+                std::fs::write(&abs, &original).unwrap();
+                let mut md = wiki
+                    .read_page(server.workspace_id, server.project_id, &path)
+                    .unwrap();
+                if metadata {
+                    md.frontmatter["title"] = serde_json::json!("external");
+                } else {
+                    md.body.push_str("external");
+                }
+                std::fs::write(&abs, ai_memory_wiki::emit(&md).unwrap()).unwrap();
+                let result = read(&server, "notes/a.md").await;
+                assert!(
+                    result["page_id"].is_null(),
+                    "version bound to another source: {result}"
+                );
+                assert_eq!(result["body"], md.body);
             }
         }
     }

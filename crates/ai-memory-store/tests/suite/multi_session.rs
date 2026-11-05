@@ -27,6 +27,70 @@ use ai_memory_store::{
     WorkstreamSelection,
 };
 
+/// A bare path must still bind both coordinates when the standalone wiki asks
+/// the writer for the head. An id and its body come from one row.
+#[tokio::test]
+async fn writer_page_head_binds_version_body_and_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, project) = scope(&store).await;
+    let foreign_ws = store
+        .writer
+        .get_or_create_workspace("foreign")
+        .await
+        .unwrap();
+    let foreign_project = store
+        .writer
+        .get_or_create_project(ws, "foreign", None)
+        .await
+        .unwrap();
+    let id = store
+        .writer
+        .upsert_page(NewPage {
+            workspace_id: ws,
+            project_id: project,
+            path: PagePath::new("guarded.md").unwrap(),
+            title: "shared fixture".into(),
+            body: "exact version body".into(),
+            tier: Tier::Semantic,
+            frontmatter_json: serde_json::json!({"title":"shared fixture"}),
+            pinned: true,
+            links: Vec::new(),
+            author_id: None,
+            expires_at: None,
+            entities: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let head = store
+        .writer
+        .latest_page_head(ws, project, "guarded.md")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            head.id,
+            head.body.as_str(),
+            head.title.as_str(),
+            head.tier.as_str(),
+            head.pinned
+        ),
+        (id, "exact version body", "shared fixture", "semantic", true)
+    );
+    for (attempt_ws, attempt_project) in [(foreign_ws, project), (ws, foreign_project)] {
+        assert!(
+            store
+                .writer
+                .latest_page_head(attempt_ws, attempt_project, "guarded.md")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
 fn operator(name: &str) -> String {
     IdentityKey::User(name.into()).storage_key()
 }

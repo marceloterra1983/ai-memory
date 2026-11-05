@@ -1761,6 +1761,8 @@ pub enum SessionEndDisposition {
 /// written in the same transaction, so serving it is safe.
 #[derive(Debug, Clone)]
 pub struct StoredPageBody {
+    /// Version id selected in the same row as this content.
+    pub id: PageId,
     /// Page title as stored in the DB.
     pub title: String,
     /// Page body (markdown without frontmatter).
@@ -12275,22 +12277,33 @@ impl ReaderPool {
         self.with_conn(move |conn| {
             let row = conn
                 .query_row(
-                    "SELECT title, body, frontmatter_json, tier, pinned FROM pages \
+                    "SELECT title, body, frontmatter_json, tier, pinned, id FROM pages \
                      WHERE workspace_id = ?1 AND project_id = ?2 AND path = ?3 \
                        AND is_latest = 1",
                     params![workspace_id.as_bytes(), project_id.as_bytes(), path],
                     |row| {
-                        Ok(StoredPageBody {
-                            title: row.get(0)?,
-                            body: row.get(1)?,
-                            frontmatter_json: row.get(2)?,
-                            tier: row.get(3)?,
-                            pinned: row.get::<_, i64>(4)? != 0,
-                        })
+                        Ok((
+                            row.get::<_, Vec<u8>>(5)?,
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
                     },
                 )
                 .optional()?;
-            Ok(row)
+            row.map(|(id, title, body, frontmatter_json, tier, pinned)| {
+                Ok(StoredPageBody {
+                    id: PageId::from_slice(&id)?,
+                    title,
+                    body,
+                    frontmatter_json,
+                    tier,
+                    pinned: pinned != 0,
+                })
+            })
+            .transpose()
         })
         .await
     }

@@ -16,7 +16,7 @@ use ai_memory_core::{
     NewSession, NewSessionUsage, NewUser, ObservationId, OwnerFilter, PageId, PagePath, ProjectId,
     Sanitized, SessionId, UserId, UserRole, WorkspaceId,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension as _};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -53,6 +53,12 @@ pub struct StartupContextAcceptance {
 
 /// Commands accepted by the writer thread.
 pub(crate) enum WriteCmd {
+    LatestPageHead {
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: String,
+        reply: oneshot::Sender<StoreResult<Option<crate::StoredPageBody>>>,
+    },
     GetOrCreateWorkspace {
         name: String,
         reply: oneshot::Sender<StoreResult<WorkspaceId>>,
@@ -932,6 +938,28 @@ struct WriterInner {
 }
 
 impl WriterHandle {
+    /// Read a page version and its content together on the writer connection.
+    /// Used by wiki guards when a standalone Wiki has no reader pool.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL and ID errors.
+    pub async fn latest_page_head(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: impl Into<String>,
+    ) -> StoreResult<Option<crate::StoredPageBody>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::LatestPageHead {
+            workspace_id,
+            project_id,
+            path: path.into(),
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Take ownership of `conn` and spawn the writer thread.
     pub(crate) fn spawn(conn: Connection) -> Self {
         let (tx, rx) = mpsc::channel(1024);
@@ -4094,6 +4122,32 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 )
                 .map(|ctx| ctx.authorize(need));
                 send_or_warn(reply, result, "authorize_project");
+            }
+            WriteCmd::LatestPageHead {
+                workspace_id,
+                project_id,
+                path,
+                reply,
+            } => {
+                let result = (|| -> StoreResult<Option<crate::StoredPageBody>> {
+                    let row = conn.query_row(
+                        "SELECT id, title, body, frontmatter_json, tier, pinned FROM pages WHERE workspace_id = ?1 AND project_id = ?2 AND path = ?3 AND is_latest = 1",
+                        rusqlite::params![workspace_id.as_bytes(), project_id.as_bytes(), path],
+                        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, bool>(5)?)),
+                    ).optional()?;
+                    row.map(|(id, title, body, frontmatter_json, tier, pinned)| {
+                        Ok(crate::StoredPageBody {
+                            id: PageId::from_slice(&id)?,
+                            title,
+                            body,
+                            frontmatter_json,
+                            tier,
+                            pinned,
+                        })
+                    })
+                    .transpose()
+                })();
+                send_or_warn(reply, result, "latest_page_head");
             }
             WriteCmd::GetOrCreateWorkspace { name, reply } => {
                 let result = ops::get_or_create_workspace(&mut conn, &name);

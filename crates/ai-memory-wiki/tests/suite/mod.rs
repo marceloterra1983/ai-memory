@@ -6,3 +6,5 @@ mod admission;
 mod auto_improve_admission;
 mod ledger_files;
 mod wiki_git_ledgers;
+
+mod page_file_lock;

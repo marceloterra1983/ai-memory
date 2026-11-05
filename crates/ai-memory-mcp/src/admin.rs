@@ -7244,6 +7244,7 @@ mod page_copy_differs_tests {
 
     fn stored(fm: serde_json::Value, body: &str) -> ai_memory_store::StoredPageBody {
         ai_memory_store::StoredPageBody {
+            id: ai_memory_core::PageId::new(),
             title: "T".into(),
             body: body.into(),
             frontmatter_json: fm.to_string(),

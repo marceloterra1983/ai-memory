@@ -26,6 +26,17 @@ use crate::git::{Checkpoint, GitAdapter};
 use crate::markdown::{Markdown, derive_title, emit, parse};
 use crate::watcher::is_pending_path;
 
+/// A source snapshot whose optional version token describes its exact content.
+#[derive(Debug, Clone)]
+pub struct VersionedPage {
+    /// Complete parsed source, without a presentation cap.
+    pub markdown: Markdown,
+    /// SQL version matching both the body and frontmatter, or no token for edits.
+    pub page_id: Option<PageId>,
+    /// Whether the source file was missing and the indexed snapshot was used.
+    pub from_store: bool,
+}
+
 /// Store deletion and best-effort file cleanup from [`Wiki::purge_session`].
 #[derive(Debug, Clone)]
 pub struct PurgeSessionOutcome {
@@ -1434,6 +1445,9 @@ impl Wiki {
             // Restore shares the writer/reindex lock, including the disk read
             // that chooses generated.at and any rollback after a refused upsert.
             let _page_guard = self.lock_page(workspace_id, project_id, &path).await;
+            let _file_locks = self
+                .lock_page_files(&[(workspace_id, project_id, path.clone())])
+                .await?;
             let abs = self.confined_page_path(workspace_id, project_id, &path, Prepare::Inspect)?;
             // Conform like the three sibling write paths (`write_page_inner`,
             // `apply_batch`, `approve_auto_improve_proposal`) do: the row this
@@ -2589,6 +2603,7 @@ impl Wiki {
             self.ensure_project_workspace(workspace_id, project_id)
                 .await?;
             let abs = self.confined_page_path(workspace_id, project_id, &path, Prepare::Parents)?;
+            let _files = self.lock_page_files(&[(workspace_id, project_id, path.clone())]).await?;
             let installed =
                 replace_file_with_rollback_snapshot(&self.git, &abs, emitted.as_bytes())?;
             match self
@@ -2707,6 +2722,9 @@ impl Wiki {
         path: PagePath,
     ) -> WikiResult<(PageId, Option<PendingEmbed>)> {
         let _page_guard = self.lock_page(workspace_id, project_id, &path).await;
+        let _file_locks = self
+            .lock_page_files(&[(workspace_id, project_id, path.clone())])
+            .await?;
         let abs = self.confined_page_path(workspace_id, project_id, &path, Prepare::Inspect)?;
         let raw = std::fs::read_to_string(&abs)?;
         let md = parse(&raw)?;
@@ -3307,18 +3325,13 @@ impl Wiki {
                 .map(|(req, _, _, _)| (req.workspace_id, req.project_id, req.path.clone()))
                 .collect();
             let _page_guards = self.lock_pages(&batch_keys).await;
-            if let (Some(preconditions), Some(reader)) = (&preconditions, &self.store_reader) {
-                for (index, ((req, _, _, _), precondition)) in
-                    staged.iter().zip(preconditions).enumerate()
-                {
-                    let current = reader
-                        .latest_page_id_by_ids(
-                            req.workspace_id,
-                            req.project_id,
-                            req.path.as_str().to_string(),
-                        )
-                        .await?;
-                    if !precondition_holds(*precondition, current) {
+            let _file_locks = self.lock_page_files(&batch_keys).await?;
+            if let Some(preconditions) = &preconditions {
+                for (index, ((req, _, _, _), precondition)) in staged.iter().zip(preconditions).enumerate() {
+                    let stored = self.latest_page_head(req.workspace_id, req.project_id, &req.path).await?;
+                    let current = stored.as_ref().map(|row| row.id);
+                    if !precondition_holds(*precondition, current)
+                        || !source_matches_precondition(*precondition, self.read_page(req.workspace_id, req.project_id, &req.path), stored.as_ref())? {
                         return Ok(ConditionalBatchWrite::Mismatch { index, current });
                     }
                 }
@@ -3501,6 +3514,98 @@ impl Wiki {
         guards
     }
 
+    async fn latest_page_head(&self, workspace: WorkspaceId, project: ProjectId, path: &PagePath) -> WikiResult<Option<ai_memory_store::StoredPageBody>> {
+        match &self.store_reader {
+            Some(reader) => Ok(reader.page_body_by_ids(workspace, project, path.as_str()).await?),
+            None => Ok(self.writer.latest_page_head(workspace, project, path.as_str()).await?),
+        }
+    }
+
+    /// Acquire stable OS locks outside the rename-based wiki tree. Sorted
+    /// acquisition keeps batch writes deadlock-free across independent handles.
+    async fn lock_page_files(&self, keys: &[PageKey]) -> WikiResult<Vec<std::fs::File>> {
+        use sha2::{Digest as _, Sha256};
+        let mut paths: Vec<PathBuf> = keys.iter().map(|(ws, proj, path)| {
+            let digest = Sha256::new().chain_update(ws.as_bytes()).chain_update([0])
+                .chain_update(proj.as_bytes()).chain_update([0]).chain_update(path.as_str().as_bytes()).finalize();
+            self.data_dir().join("page-locks").join(format!("{digest:x}"))
+        }).collect();
+        paths.sort();
+        paths.dedup();
+        tokio::task::spawn_blocking(move || {
+            paths
+                .into_iter()
+                .map(|path| {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(path)?;
+                    fs2::FileExt::lock_exclusive(&file)?;
+                    Ok(file)
+                })
+                .collect::<WikiResult<Vec<_>>>()
+        })
+        .await
+        .map_err(|e| ai_memory_wiki_error(&format!("page file lock task failed: {e}")))?
+    }
+
+    /// Read a file and attach a version only when its entire body and
+    /// frontmatter match one indexed row. Missing files use that same row.
+    /// External edits remain readable, but carry no CAS token until reindexed.
+    ///
+    /// # Errors
+    /// Returns filesystem, markdown parsing or store errors unchanged.
+    pub async fn read_page_version(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &PagePath,
+        reader: &ReaderPool,
+    ) -> WikiResult<Option<VersionedPage>> {
+        let _mutation = self.mutation_lock.read().await;
+        let _page = self.lock_page(workspace_id, project_id, path).await;
+        let _files = self
+            .lock_page_files(&[(workspace_id, project_id, path.clone())])
+            .await?;
+        let stored = reader
+            .page_body_by_ids(workspace_id, project_id, path.as_str())
+            .await?;
+        match self.read_page(workspace_id, project_id, path) {
+            Ok(markdown) => {
+                let page_id = stored
+                    .as_ref()
+                    .filter(|row| disk_matches_stored(&markdown, row))
+                    .map(|row| row.id);
+                Ok(Some(VersionedPage {
+                    markdown,
+                    page_id,
+                    from_store: false,
+                }))
+            }
+            Err(WikiError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => stored
+                .map(|row| {
+                    let frontmatter = serde_json::from_str(&row.frontmatter_json).map_err(|e| {
+                        ai_memory_wiki_error(&format!("invalid indexed frontmatter: {e}"))
+                    })?;
+                    Ok(VersionedPage {
+                        markdown: Markdown {
+                            frontmatter,
+                            body: row.body,
+                        },
+                        page_id: Some(row.id),
+                        from_store: true,
+                    })
+                })
+                .transpose(),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Write `body` (with optional `frontmatter`) atomically to
     /// `<wiki_root>/<workspace_id>/<project_id>/<path>` and upsert the
     /// matching page row in the store.
@@ -3663,14 +3768,17 @@ impl Wiki {
             // writer's and leave disk disagreeing with the DB `latest` row
             // (#607). Different paths still proceed concurrently.
             let _page_guard = self.lock_page(workspace_id, project_id, &path).await;
+            let _file_locks = self
+                .lock_page_files(&[(workspace_id, project_id, path.clone())])
+                .await?;
             self.confined_page_path(workspace_id, project_id, &path, Prepare::Inspect)?;
             self.ensure_project_workspace(workspace_id, project_id)
                 .await?;
-            if let (Some(precondition), Some(reader)) = (precondition, &self.store_reader) {
-                let current = reader
-                    .latest_page_id_by_ids(workspace_id, project_id, path.as_str().to_string())
-                    .await?;
-                if !precondition_holds(precondition, current) {
+            if let Some(precondition) = precondition {
+                let stored = self.latest_page_head(workspace_id, project_id, &path).await?;
+                let current = stored.as_ref().map(|row| row.id);
+                if !precondition_holds(precondition, current)
+                    || !source_matches_precondition(precondition, self.read_page(workspace_id, project_id, &path), stored.as_ref())? {
                     return Ok(ConditionalWrite::Mismatch { current });
                 }
             }
@@ -4259,6 +4367,25 @@ fn rollback_installed_files(git: &GitAdapter, installed: &[InstalledFile]) -> Wi
         }
     }
     Ok(())
+}
+
+fn disk_matches_stored(md: &Markdown, row: &ai_memory_store::StoredPageBody) -> bool {
+    md.body == row.body
+        && serde_json::from_str::<serde_json::Value>(&row.frontmatter_json)
+            .is_ok_and(|frontmatter| frontmatter == md.frontmatter)
+}
+
+fn source_matches_precondition(
+    condition: PagePrecondition,
+    disk: WikiResult<Markdown>,
+    stored: Option<&ai_memory_store::StoredPageBody>,
+) -> WikiResult<bool> {
+    match disk {
+        Ok(md) => Ok(matches!(condition, PagePrecondition::Latest(_))
+            && stored.is_some_and(|row| disk_matches_stored(&md, row))),
+        Err(WikiError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
+    }
 }
 
 fn precondition_holds(precondition: PagePrecondition, current: Option<PageId>) -> bool {

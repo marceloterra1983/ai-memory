@@ -158,13 +158,15 @@ fn successful_archive_download_replaces_output_and_preserves_permissions() {
 
 #[cfg(unix)]
 #[test]
-fn successful_archive_download_replaces_a_symlink_privately_without_altering_its_target() {
+fn archive_download_follows_symlinks_and_refuses_directory_targets() {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     for export in [false, true] {
         for directory_target in [false, true] {
             let home = tempfile::tempdir().unwrap();
-            let target = home.path().join("previous");
-            let dest = home.path().join("backup.tar.gz");
+            let archives = home.path().join("archives");
+            std::fs::create_dir(&archives).unwrap();
+            let target = archives.join("previous");
+            let dest = archives.join("backup.tar.gz");
             if directory_target {
                 std::fs::create_dir(&target).unwrap();
                 std::fs::write(target.join("keep"), b"untouched directory").unwrap();
@@ -176,34 +178,71 @@ fn successful_archive_download_replaces_a_symlink_privately_without_altering_its
             symlink(&target, &dest).unwrap();
             let output = download(home.path(), &dest, export, true);
             assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(
-                !std::fs::symlink_metadata(&dest)
+                std::fs::symlink_metadata(&dest)
                     .unwrap()
                     .file_type()
                     .is_symlink()
             );
-            assert_eq!(std::fs::read(&dest).unwrap(), BODY);
-            assert_eq!(
-                std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
+            assert_eq!(std::fs::read_link(&dest).unwrap(), target);
             assert_eq!(
                 std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
                 mode
             );
             if directory_target {
+                assert!(!output.status.success());
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("output path is a directory")
+                );
                 assert_eq!(
                     std::fs::read(target.join("keep")).unwrap(),
                     b"untouched directory"
                 );
+                assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
             } else {
-                assert_eq!(std::fs::read(&target).unwrap(), b"previous usable archive");
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(std::fs::metadata(&target).unwrap().is_file());
+                assert_eq!(std::fs::read(&target).unwrap(), BODY);
+                assert_eq!(std::fs::read(&dest).unwrap(), BODY);
             }
+            assert_eq!(std::fs::read_dir(&archives).unwrap().count(), 2);
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn archive_download_refuses_a_symlink_to_a_hardlinked_target_without_touching_it() {
+    use std::os::unix::fs::symlink;
+    for export in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let archives = home.path().join("archives");
+        std::fs::create_dir(&archives).unwrap();
+        let target = archives.join("previous.tar.gz");
+        let alias = archives.join("alias.tar.gz");
+        let dest = archives.join("backup.tar.gz");
+        std::fs::write(&target, b"previous usable archive").unwrap();
+        std::fs::hard_link(&target, &alias).unwrap();
+        symlink(&target, &dest).unwrap();
+        let output = download(home.path(), &dest, export, true);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("refusing multiply-linked output file")
+        );
+        assert!(
+            std::fs::symlink_metadata(&dest)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&dest).unwrap(), target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"previous usable archive");
+        assert_eq!(std::fs::read(&alias).unwrap(), b"previous usable archive");
+        assert_eq!(std::fs::read_dir(&archives).unwrap().count(), 3);
     }
 }
 

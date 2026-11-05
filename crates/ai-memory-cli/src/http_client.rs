@@ -589,10 +589,10 @@ async fn probe_server_with_timeout(endpoint: &ServerEndpoint, timeout: Duration)
 /// Intended for routes whose response is binary (e.g. `POST /admin/backup`
 /// returns an `application/gzip` tarball). On non-2xx the response body is
 /// consumed and returned as an error string. Returns bytes written. A completed
-/// download atomically replaces the destination path; a destination symlink is
-/// replaced rather than modifying the file it points to. Replacement symlinks
-/// and new destinations use private permissions; only existing regular files
-/// retain their permissions.
+/// download atomically replaces the destination file, following an existing
+/// symlink without replacing the link. New destinations use private permissions;
+/// existing regular files retain their permissions. Non-regular and hardlinked
+/// targets are refused.
 ///
 /// # Errors
 /// Returns an error when the connection fails, the response is non-2xx,
@@ -666,7 +666,8 @@ fn resolve_output_path(dest: &Path) -> Result<std::path::PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        if std::fs::metadata(&path)?.nlink() > 1 {
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.is_file() && metadata.nlink() > 1 {
             anyhow::bail!("refusing multiply-linked output file: {}", dest.display());
         }
     }

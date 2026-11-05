@@ -11,6 +11,10 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved the local query embedding endpoint independently of document fallback (`4cfbdf60`; [phase A reconciliation](docs/subida-3.4.2/CLASSIFICACAO.md)).
+
 ## [3.4.2] - 2026-11-05
 
 ### Added

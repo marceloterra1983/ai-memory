@@ -477,6 +477,7 @@ pub struct OpenAiCompatEmbedder {
     client: reqwest::Client,
     api_key: Option<SecretString>,
     base_url: String,
+    query_base_url: Option<String>,
     model: String,
     dim: u32,
     /// Prepended to every query text before embedding (before truncation).
@@ -518,11 +519,21 @@ impl OpenAiCompatEmbedder {
             client,
             api_key,
             base_url: base_url.into(),
+            query_base_url: None,
             model: model.into(),
             dim,
             query_prefix: String::new(),
             document_prefix: String::new(),
         })
+    }
+
+    /// Override only the query endpoint, leaving document identity unchanged.
+    /// A blank string clears the override.
+    #[must_use]
+    pub fn with_query_base_url(mut self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        self.query_base_url = (!url.trim().is_empty()).then(|| url.trim().to_string());
+        self
     }
 
     /// Set the strings prepended to query / document text before embedding,
@@ -593,7 +604,7 @@ impl Embedder for OpenAiCompatEmbedder {
         let prefixed = prepend_prefix(&self.query_prefix, text);
         openai_style_embed(
             &self.client,
-            &self.base_url,
+            self.query_base_url.as_deref().unwrap_or(&self.base_url),
             self.api_key.as_ref(),
             &self.model,
             self.dim,

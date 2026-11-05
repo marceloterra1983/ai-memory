@@ -574,6 +574,9 @@ pub struct Config {
     pub embedding_dim: Option<u32>,
     /// Optional embedding base URL override.
     pub embedding_base_url: Option<String>,
+    /// Separate `openai-compat` query endpoint; documents keep `embedding_base_url`.
+    /// Set via `AI_MEMORY_EMBEDDING_QUERY_BASE_URL` or TOML. Blank is unset.
+    pub embedding_query_base_url: Option<String>,
     /// Optional prefix prepended to every embedding **query** before it is
     /// sent to the `openai` or `openai-compat` embedder, ahead of the
     /// existing truncation. Unset (the default) is a no-op — no behaviour
@@ -1496,6 +1499,7 @@ impl Default for Config {
             embedding_model: None,
             embedding_dim: None,
             embedding_base_url: None,
+            embedding_query_base_url: None,
             embedding_query_prefix: None,
             embedding_document_prefix: None,
             decay: DecaySettings::default(),
@@ -3351,6 +3355,7 @@ impl Config {
             dim,
             api_key,
             base_url,
+            query_base_url: non_empty(self.embedding_query_base_url.as_deref()).map(str::to_string),
             models_dir: Some(self.data_dir.join("models")),
             copilot_auth,
             defaulted,

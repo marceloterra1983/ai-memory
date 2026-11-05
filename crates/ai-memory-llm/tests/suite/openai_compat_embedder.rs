@@ -105,6 +105,7 @@ async fn factory_built_compat_embedder_sends_no_request_id_header() {
         dim: 8,
         api_key: SecretString::from(String::new()),
         base_url: Some(format!("{}/v1", server.uri())),
+        query_base_url: None,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -124,6 +125,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         dim: 768,
         api_key: SecretString::from(String::new()),
         base_url: Some("http://localhost:11434/v1".into()),
+        query_base_url: None,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -140,6 +142,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         dim: 768,
         api_key: SecretString::from(String::new()),
         base_url: None,
+        query_base_url: None,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -160,6 +163,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         dim: 0,
         api_key: SecretString::from(String::new()),
         base_url: Some("http://localhost:11434/v1".into()),
+        query_base_url: None,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -308,6 +312,7 @@ async fn factory_wires_configured_prefixes_into_the_compat_embedder() {
         dim: 8,
         api_key: SecretString::from(String::new()),
         base_url: Some(format!("{}/v1", server.uri())),
+        query_base_url: None,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -332,4 +337,30 @@ fn existing_default_dimension_api_remains_source_compatible() {
         try_default_embedding_dim(EmbedderChoice::OpenAiCompat, "nomic-embed-text"),
         None
     );
+}
+
+/// The operator's document fallback must never move query inference or the
+/// identity used to compare previously stored document vectors.
+#[tokio::test]
+async fn query_endpoint_is_separate_from_documents_and_identity() {
+    let documents = MockServer::start().await;
+    let queries = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(embedding_body(8)))
+        .expect(1)
+        .mount(&documents)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(embedding_body(8)))
+        .expect(1)
+        .mount(&queries)
+        .await;
+    let embedder = OpenAiCompatEmbedder::new(documents.uri() + "/v1", None, "fixture", 8)
+        .unwrap()
+        .with_query_base_url(queries.uri() + "/v1");
+    assert_eq!(embedder.model_identity(), "fixture");
+    embedder.embed_document("document").await.unwrap();
+    embedder.embed_query("query").await.unwrap();
 }

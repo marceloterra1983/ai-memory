@@ -657,7 +657,7 @@ As três dúvidas de ranking foram medidas: título procedural afogado, força r
 | `0379a6fa` | portar | `e75a95ee` |
 | `9cfa8dc3` | portar | `e75a95ee` |
 | `eebdd33c` | portar | `3c72db2b` |
-| `d6a28c77` | portar | `3c72db2b`, `4b91ecf5` |
+| `d6a28c77` | portar | `3c72db2b`, `4b91ecf5`. Contrato do fork preservado: o download mantém o symlink e substitui atomicamente seu alvo regular, conservando permissões; recusa diretórios e alvos com hardlinks sem alteração nem temporário. A suíte da tag foi adaptada: não se espera mais trocar o link por arquivo privado nem deixar o alvo regular intacto. |
 | `a032e4c6` | duvida | Não portado: `cargo clippy --workspace --all-targets -- -D warnings` passou com Rust 1.95, sem precisar das supressões de dream/curadoria ou helpers SHA antigos. |
 | `29549016` | portar | `3581a6fd` |
 | `1d93add8` | portar | `a988bb90` |
@@ -669,7 +669,7 @@ As três dúvidas de ranking foram medidas: título procedural afogado, força r
 | `c3b5a60e` | portar | `55158975` |
 | `2d26dae5` | portar | `5fe0e7cc` |
 | `d009b152` | portar | `87941aeb` |
-| `21b7879c` | portar | `4b91ecf5` |
+| `21b7879c` | portar | `4b91ecf5`; redirects continuam recusados. O contrato de destino compartilhado nesse porte segue `d6a28c77`, com symlink preservado e recusa de alvo não regular ou com hardlinks; substitui a expectativa de troca do symlink da tag. |
 | `d0d13651` | portar | `4b91ecf5` |
 | `404fa8a0` | portar | `4b91ecf5` |
 | `8f272d97` | portar | `e88899c4` |

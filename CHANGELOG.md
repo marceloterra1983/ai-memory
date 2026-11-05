@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Recognized ASCII `title:` and `body:` FTS field prefixes regardless of case, preserving punctuation, grouping and prefix queries (`b078dcb1`).
+
 - Skipped indecodable legacy handoffs without hiding valid items, promoting automatic items, or swallowing SQLite failures (`59873022`).
 
 - Included handoff `from_session_id` in administrative listings and kept malformed legacy origins as null instead of dropping the item (`1d93add8`, `62baa09e`).

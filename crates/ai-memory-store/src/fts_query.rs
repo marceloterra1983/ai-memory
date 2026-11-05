@@ -414,6 +414,16 @@ fn prepare_fts5_token(token: &str) -> Vec<String> {
         return parts;
     }
 
+    // Canonicalize only known ASCII column names before the existing term
+    // quoting and prefix rules; user text after the colon keeps its case.
+    if let Some((column, term)) = token.split_once(':') {
+        for canonical in ["title", "body"] {
+            if column != canonical && column.eq_ignore_ascii_case(canonical) {
+                return prepare_fts5_token(&format!("{canonical}:{term}"));
+            }
+        }
+    }
+
     if has_unknown_bare_column(token) {
         return token
             .replace(':', " ")
@@ -998,6 +1008,21 @@ mod tests {
             if !prepared.is_empty() {
                 assert_parses(&prepared);
             }
+        }
+    }
+
+    #[test]
+    fn column_qualifiers_accept_ascii_case_without_losing_terms() {
+        for (raw, lowercase) in [
+            ("TITLE:handoff", "title:handoff"),
+            ("TiTlE:current.md", "title:current.md"),
+            ("(BoDy:deploy*)", "(body:deploy*)"),
+            ("BODY:10:30", "body:10:30"),
+            ("TITLE:\"release notes\"", "title:\"release notes\""),
+        ] {
+            let prepared = prepare_fts5_query(raw);
+            assert_parses(&prepared);
+            assert_eq!(prepared, prepare_fts5_query(lowercase), "{raw}");
         }
     }
 

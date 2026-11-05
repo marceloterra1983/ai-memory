@@ -2013,15 +2013,7 @@ pub struct SessionsSettings {
     pub idle_end_after_hours: u32,
 }
 
-/// Exact scope admitted to local dream and restricted compat embeddings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DreamScope {
-    /// Existing workspace name.
-    pub workspace: String,
-    /// Existing project name within the workspace.
-    pub project: String,
-}
+pub use ai_memory_mcp::dream::DreamScope;
 
 /// `[dream]` — the opt-in LLM dream pass (docs/design-memory-aging.md §B2–B4).
 ///

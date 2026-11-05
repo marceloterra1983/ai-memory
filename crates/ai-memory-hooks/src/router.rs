@@ -538,6 +538,8 @@ fn capture_store_error(error: StoreError) -> anyhow::Error {
 /// Shared state passed to the hook handler.
 #[derive(Clone)]
 pub struct HookState {
+    /// Live work reservation shared with the local dream runtime.
+    pub activity_clock: ai_memory_consolidate::ActivityClock,
     /// Default workspace to use when a hook event lacks a `cwd` field.
     pub workspace_id: WorkspaceId,
     /// Default project to use when a hook event lacks a `cwd` field.
@@ -836,6 +838,9 @@ async fn admit_hook(
     headers: HeaderMap,
     mut body: serde_json::Value,
 ) -> (StatusCode, &'static str) {
+    let active = state
+        .activity_clock
+        .begin(Timestamp::now().as_microsecond());
     // Unconditional backstop (#196): drop any raw assistant-message field on the
     // `Value` before it becomes a `HookEnvelope`, so the field can never reach
     // `body_excerpt`, tracing, or the store — regardless of client version.
@@ -918,6 +923,7 @@ async fn admit_hook(
     state.ingest_metrics.record_accepted();
     tokio::spawn(async move {
         let _permit = permit;
+        let _active = active;
         let _ = process_envelope(
             state,
             env,
@@ -1106,6 +1112,9 @@ async fn handle_hook_batch(
     headers: HeaderMap,
     Json(items): Json<Vec<HookBatchItem>>,
 ) -> impl IntoResponse {
+    let _active = state
+        .activity_clock
+        .begin(Timestamp::now().as_microsecond());
     if items.len() > MAX_HOOK_BATCH_ITEMS {
         warn!(
             items = items.len(),
@@ -9005,6 +9014,7 @@ pub(crate) mod tests {
         let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
         let sanitizer = Sanitizer::default();
         HookState {
+            activity_clock: ai_memory_consolidate::ActivityClock::default(),
             ingest_metrics: Arc::new(ai_memory_core::IngestMetrics::default()),
             workspace_id: ws,
             project_id: proj,
@@ -12459,6 +12469,9 @@ pub(crate) mod tests {
         state.ingest_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let metrics = state.ingest_metrics.clone();
         let semaphore = state.ingest_semaphore.clone();
+        let activity = state.activity_clock.clone();
+        let cancel =
+            ai_memory_consolidate::DreamCancel::for_activity(activity.clone(), activity.snapshot());
 
         let response = handle_hook(
             State(Arc::new(state)),
@@ -12476,7 +12489,21 @@ pub(crate) mod tests {
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(
+            cancel.is_cancelled(),
+            "hook admission must synchronously cancel dream"
+        );
+        assert_eq!(
+            activity.snapshot().in_flight,
+            1,
+            "202 must retain the hook reservation"
+        );
         drop(semaphore.acquire().await.unwrap());
+        assert_eq!(
+            activity.snapshot().in_flight,
+            0,
+            "finished processing releases activity"
+        );
 
         assert!(
             metrics.snapshot().last_persisted_ms.is_some(),

@@ -19,6 +19,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 - Bounded dream head/vector snapshots and revalidated every source identity, body hash, eligibility input and expiry in one writer transaction (`bd524699`, `36cba6dc`).
 
+- Restored manual dream plans/apply with scheduling disabled, exact scopes, local semantic/literal refusal and all-source snapshot CAS; preserved embedding selection with disabled dream scopes (`bd524699`, `585ab238`, `60593c0b`, `36cba6dc`).
+
 - Restored conditional relation cleanup with head/hash checks, body preservation and recoverable checkpoints; retained raw generated declarations for review (`3a4a8d79`, `5cc3d4eb`).
 
 - Required existing scoped targets for typed relations and preserved metadata, evidence and session ownership through conditional curation (`3a4a8d79`, `5cc3d4eb`).

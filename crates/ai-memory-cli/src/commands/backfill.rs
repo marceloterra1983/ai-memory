@@ -1949,6 +1949,7 @@ mod tests {
             .await
             .unwrap();
         let state = HookState {
+            activity_clock: ai_memory_consolidate::ActivityClock::default(),
             workspace_id,
             project_id,
             writer: store.writer.clone(),
@@ -2153,6 +2154,7 @@ mod tests {
             .await
             .unwrap();
         let state = HookState {
+            activity_clock: ai_memory_consolidate::ActivityClock::default(),
             workspace_id,
             project_id,
             writer: store.writer.clone(),

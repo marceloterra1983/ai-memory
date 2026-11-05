@@ -73,6 +73,7 @@ async fn harness_with(index_file_paths: bool) -> Harness {
     let active_project = ActiveProject::new();
     let ingest_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
     let hooks = hook_router(HookState {
+        activity_clock: ai_memory_consolidate::ActivityClock::default(),
         ingest_metrics: ingest_metrics.clone(),
         workspace_id: ws,
         project_id: proj,

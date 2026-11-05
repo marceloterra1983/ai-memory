@@ -56,6 +56,7 @@ async fn harness() -> (TempDir, Store, Wiki, HookState) {
         .unwrap();
     let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
     let state = HookState {
+        activity_clock: ai_memory_consolidate::ActivityClock::default(),
         ingest_metrics: Arc::new(IngestMetrics::default()),
         workspace_id: ws,
         project_id: proj,

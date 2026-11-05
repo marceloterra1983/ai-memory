@@ -49,6 +49,7 @@ pub mod curator;
 pub mod data_purge;
 pub mod delete_page;
 pub mod doctor;
+pub mod dream;
 pub mod embed;
 mod eval_embedding_cache;
 pub mod export_okf;

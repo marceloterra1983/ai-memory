@@ -91,7 +91,7 @@ pub async fn run(config: &Config, config_path: Option<&Path>, args: UpgradeArgs)
         "{}",
         i18n.format(
             "cli-upgrade-upgraded-to-tag",
-            &[("value0", tag.to_string())]
+            &[("value0", super::show::terminal_text(&tag))]
         )
     );
     info!(%tag, path = %exe.display(), "native upgrade complete");
@@ -189,7 +189,10 @@ async fn fetch_verified_archive(
         "{}",
         i18n.format(
             "cli-upgrade-downloading-asset-tag",
-            &[("value0", asset.to_string()), ("value1", tag.to_string())]
+            &[
+                ("value0", asset.to_string()),
+                ("value1", super::show::terminal_text(tag))
+            ]
         )
     );
     let archive_bytes = fetcher

@@ -142,7 +142,7 @@ pub(super) fn render(report: &DoctorReport, terminal: &crate::terminal::Terminal
                     "{}", i18n.text("cli-presentation-no-captured-session-check-the-external-producer-and-repository-policy")));
             } else {
                 terminal.line(format_args!(
-                    "{}", i18n.format("cli-presentation-ran-here-but-nothing-was-captured-install-its-hook-ai-memory-install-hooks-a", &[("value0", row.agent.to_string())])));
+                    "{}", i18n.format("cli-presentation-ran-here-but-nothing-was-captured-install-its-hook-ai-memory-install-hooks-a", &[("value0", terminal_text(&row.agent))])));
             }
         }
         if let Some(count) = row.mixed_capture_sessions.filter(|count| *count > 0) {

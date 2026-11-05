@@ -497,7 +497,7 @@ fn choose_after_run(
         paint.bold(&i18n.diagnostic(&format!(
             "ai-memory: {} exited successfully in workstream '{}'.",
             current.as_str(),
-            workstream_name
+            super::show::terminal_text(workstream_name)
         )))
     )?;
     writeln!(
@@ -1120,7 +1120,7 @@ async fn run_once_with_wiring(
         eprintln!("{}", config.i18n.diagnostic(&format!("ai-memory: linked {} session {} is missing from its native store; starting fresh and repointing workstream '{}' after the new session is established",
             harness.as_str(),
             display_session_id(&orphaned_session),
-            prepared.workstream_name)));
+            super::show::terminal_text(&prepared.workstream_name))));
         // The hint tells the user to repeat their own command with a selector
         // right after the harness name, which only works when they typed one
         // and launched an interactive session (`codex exec` and `opencode run`
@@ -1146,7 +1146,7 @@ async fn run_once_with_wiring(
             config.i18n.diagnostic(&format!(
                 "ai-memory: starting a fresh {} session in workstream '{}'",
                 harness.as_str(),
-                prepared.workstream_name
+                super::show::terminal_text(&prepared.workstream_name)
             ))
         );
     }
@@ -1795,7 +1795,7 @@ async fn run_once_with_wiring(
         "{}",
         config.i18n.diagnostic(&format!(
             "ai-memory: workstream '{}' saved {imported} new event(s)",
-            prepared.workstream_name
+            super::show::terminal_text(&prepared.workstream_name)
         ))
     );
     interrupt_task.abort();
@@ -5005,7 +5005,7 @@ fn choose_native_session(
         i18n.diagnostic(&format!(
             "ai-memory: no {} session is linked to workstream '{}'.",
             harness.as_str(),
-            workstream_name
+            super::show::terminal_text(workstream_name)
         ))
     )?;
     writeln!(
@@ -5490,7 +5490,7 @@ async fn wait_out_held_lease(
             "ai-memory: the workstream is held by {} until {} — usually a launcher that exited \
          without releasing it. Waiting {}s for that lease to lapse (Ctrl-C to abort; \
          `--new <name>` starts a separate workstream).",
-            held.owner,
+            super::show::terminal_text(&held.owner),
             held.expires,
             wait.as_secs_f64().ceil()
         ))

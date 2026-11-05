@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Preserved topical title candidates, proportional source votes, ties and calibrated scope unions in the new observation-stream ranker, using one snapshot for both FTS windows (`1f0ff776`, `ad3d8c73`, relevant part of `d2a57a10`).
+
 - Applied recent-page limits in SQL before decoding the tail, retaining TTL, timestamp ordering and cursor pagination (`985e96d2`).
 
 - Recognized ASCII `title:` and `body:` FTS field prefixes regardless of case, preserving punctuation, grouping and prefix queries (`b078dcb1`).

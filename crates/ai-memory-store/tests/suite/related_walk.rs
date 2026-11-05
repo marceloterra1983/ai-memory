@@ -860,9 +860,9 @@ async fn page_links_preview_caps_in_sql_and_counts_only_readable_neighbours() {
 
 /// `contradiction_edges` returns declared contradicts edges from latest
 /// unexpired pages. A target edge resolves only when pointing at an existing,
-/// latest, and unexpired page. If the target was tombstoned, expired, or never
-/// existed, `resolved` evaluates to false. An expired source page is omitted
-/// entirely from contradiction edges.
+/// latest, and unexpired page. A previously indexed target that was tombstoned
+/// or expired has `resolved = false`; a target that never existed creates no
+/// typed edge. An expired source page is omitted entirely.
 #[tokio::test]
 async fn contradiction_edges_require_latest_unexpired_target() {
     let tmp = tempfile::tempdir().unwrap();
@@ -990,15 +990,17 @@ async fn contradiction_edges_require_latest_unexpired_target() {
             ),
             (
                 "notes/source.md".to_string(),
-                "notes/missing_target.md".to_string(),
-                false,
-            ),
-            (
-                "notes/source.md".to_string(),
                 "notes/tombstoned_target.md".to_string(),
                 false,
             ),
         ]
+    );
+    let missing: i64 = store.reader.with_conn(|conn| {
+        conn.query_row("SELECT count(*) FROM links WHERE to_path='notes/missing_target.md' AND link_type='contradicts'", [], |row| row.get(0)).map_err(Into::into)
+    }).await.unwrap();
+    assert_eq!(
+        missing, 0,
+        "a never-existing target cannot create a typed edge"
     );
 }
 

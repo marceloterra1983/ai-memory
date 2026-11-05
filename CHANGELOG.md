@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Required existing scoped targets for typed relations and preserved metadata, evidence and session ownership through conditional curation (`3a4a8d79`, `5cc3d4eb`).
+
 - Restored dedicated, keyless local dream clients with bounded requests, no proxy, redirect or provider fallback (`bd524699`).
 
 - Restored exact typed relation parsing, preserving raw declarations for curation and legitimate sentinel-named `.md` pages (`3a4a8d79`, `5cc3d4eb`).

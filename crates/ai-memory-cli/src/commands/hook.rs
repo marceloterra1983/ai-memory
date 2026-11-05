@@ -327,8 +327,14 @@ fn compute_backfill_usage(
 /// ReEndWithNewWork` already re-runs the full end path when more
 /// observations arrive after an early close). Every failure is logged and
 /// swallowed; this must never delay or fail the real session-start hook.
+///
+/// `scope_qs` is the session-start's own scope query, the claim that named
+/// the candidate. The fork's relay drain (`reliable_mcp.hook_delivery`)
+/// refuses an envelope without an explicit `ingest_key` on every pass, so the
+/// close carries that scope and a key of its own, like every other event.
 fn dispatch_backfill_close(
     candidate: &BackfillCandidate,
+    scope_qs: &str,
     dd: &Path,
     server_url: &str,
     auth_token: Option<&str>,
@@ -358,14 +364,19 @@ fn dispatch_backfill_close(
         );
         return;
     };
-    let cwd_qs = candidate
-        .cwd
-        .as_deref()
-        .filter(|cwd| !cwd.is_empty())
-        .map_or_else(String::new, |cwd| format!("&cwd={}", url_encode(cwd)));
+    let cwd_qs = if scope_qs.is_empty() {
+        candidate
+            .cwd
+            .as_deref()
+            .filter(|cwd| !cwd.is_empty())
+            .map_or_else(String::new, |cwd| format!("&cwd={}", url_encode(cwd)))
+    } else {
+        scope_qs.to_owned()
+    };
+    let ingest_key = uuid::Uuid::new_v4().simple().to_string();
     let base = server_url.trim_end_matches('/');
     let event_url = format!(
-        "{base}/hook?event=session-end&agent={agent}&session_id={session_id}{cwd_qs}",
+        "{base}/hook?event=session-end&agent={agent}&session_id={session_id}{cwd_qs}&ingest_key={ingest_key}",
         agent = candidate.agent_kind.as_str(),
         session_id = url_encode(&candidate.session_id),
     );
@@ -2223,6 +2234,7 @@ where
                 if let Some(candidate) = &backfill_candidate {
                     dispatch_backfill_close(
                         candidate,
+                        &qs,
                         &dd,
                         &args.server_url,
                         effective_token,
@@ -3516,6 +3528,39 @@ mod tests {
             .split('&')
             .filter_map(|part| part.split_once('='))
             .find_map(|(name, value)| (name == key).then_some(value))
+    }
+
+    /// The fork's relay drain refuses a keyless envelope on every pass, so the
+    /// close-on-continuation event must name the claim's scope and its own key.
+    #[test]
+    fn dispatch_backfill_close_spools_the_claim_scope_and_an_ingest_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dd = tmp.path().join("data");
+        let candidate = BackfillCandidate {
+            session_id: "old-session".into(),
+            agent_kind: AgentKind::Cursor,
+            cwd: Some("/elsewhere".into()),
+        };
+        dispatch_backfill_close(
+            &candidate,
+            "&cwd=%2Fproj&workspace=default&project=proj",
+            &dd,
+            "http://127.0.0.1:1",
+            None,
+            false,
+        );
+        let entries = read_spooled_entries(&hook_spool::spool_dir(&dd));
+        assert_eq!(entries.len(), 1);
+        let url = &entries[0].url;
+        assert_eq!(query_param(url, "event"), Some("session-end"), "{url}");
+        assert_eq!(query_param(url, "session_id"), Some("old-session"), "{url}");
+        assert_eq!(query_param(url, "workspace"), Some("default"), "{url}");
+        assert_eq!(query_param(url, "project"), Some("proj"), "{url}");
+        assert_eq!(url.matches("cwd=").count(), 1, "{url}");
+        assert!(
+            query_param(url, "ingest_key").is_some_and(|key| key.len() == 32),
+            "{url}"
+        );
     }
 
     #[test]

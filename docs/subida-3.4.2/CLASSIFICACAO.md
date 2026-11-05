@@ -658,7 +658,7 @@ As três dúvidas de ranking foram medidas: título procedural afogado, força r
 | `9cfa8dc3` | portar | `e75a95ee` |
 | `eebdd33c` | portar | `3c72db2b` |
 | `d6a28c77` | portar | `3c72db2b`, `4b91ecf5` |
-| `a032e4c6` | duvida | Não portado: clippy 1.95 com -D warnings decide a necessidade; não copiar supressões de dream/curadoria ou helpers SHA antigos. Resultado global registrado na validação. |
+| `a032e4c6` | duvida | Não portado: `cargo clippy --workspace --all-targets -- -D warnings` passou com Rust 1.95, sem precisar das supressões de dream/curadoria ou helpers SHA antigos. |
 | `29549016` | portar | `3581a6fd` |
 | `1d93add8` | portar | `a988bb90` |
 | `62baa09e` | portar | `a988bb90` |
@@ -675,3 +675,71 @@ As três dúvidas de ranking foram medidas: título procedural afogado, força r
 | `8f272d97` | portar | `e88899c4` |
 | `b1389f55` | portar | `e88899c4` |
 | `56758c2c` | portar | `e88899c4` |
+
+
+### Validação da continuação
+
+Toolchain usada: Rust/Cargo 1.95.0. O shell inicial apontava para 1.99.1;
+os comandos Cargo foram executados com o diretório da 1.95 no início do PATH.
+
+- `cargo build --release --locked`: passou.
+- SHA256 de `target/release/ai-memory`:
+  `94b9c6564c417c701bb3e08a96b9ad6d9d4485067ceafdfe40daa0d686c53359`.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passou.
+- `cargo fmt --all -- --check`, `git diff --check` e cargo-deny offline:
+  passaram.
+
+Foram executados `cargo test --workspace --exclude ai-memory-cli --no-fail-fast`,
+`cargo test --locked -p ai-memory-cli --lib` e os doctests CLI: 7375 passed,
+0 failed, 19 ignored no conjunto dos comandos. Os três ignorados da biblioteca
+CLI foram executados depois com `--ignored`: 3 passed, 0 failed. O guard
+instalado `assert_fixbrainrank.sh` confirmou exatamente 1 passed.
+
+| Crate | passed | failed | ignored no comando padrão |
+|---|---:|---:|---:|
+| ai-memory-cli (lib) | 2346 | 0 | 3 |
+| ai-memory-consolidate | 569 | 0 | 6 |
+| ai-memory-core | 385 | 0 | 0 |
+| ai-memory-eval (lib + smoke) | 84 | 0 | 4 |
+| ai-memory-hooks | 804 | 0 | 0 |
+| ai-memory-llm | 453 | 0 | 2 |
+| ai-memory-mcp | 847 | 0 | 2 |
+| ai-memory-store | 958 | 0 | 1 |
+| ai-memory-web | 311 | 0 | 0 |
+| ai-memory-wiki | 383 | 0 | 1 |
+| ai-memory-workstream | 235 | 0 | 0 |
+
+Os demais ignorados são testes de modelo/dataset/provedor externo ou medições
+manuais. Os 32 testes Python do worker passaram. A comparação dos plugins
+commitados com o renderer do release e a renderização das cinco integrações TS
+em diretórios sintéticos também passaram.
+
+Cada obrigatório teve prova por remoção do trecho correspondente, falha de
+asserção e restauração: 19 pares, cada um com 0 passed/1 failed sem o trecho e
+1 passed/0 failed com ele. A leitura integral acrescenta o par HTTP descrito
+acima. Os hashes dos fontes restaurados foram conferidos. Os comandos e logs
+estão em `target/evidence-a3/negative-summary.json` e nos arquivos adjacentes;
+erros de compilação ou do harness não foram contados como prova negativa.
+
+O release foi exercitado com o cliente original do relay, sem alterá-lo, em
+HOME/data/pre sintéticos e porta 59123. Passaram create_only, page_not_found,
+scope_not_found, recusa do expected_page_id obsoleto sem alterar arquivo nem
+quantidade de versões, descrição/ajuda publicadas, leitura integral de 70015
+caracteres/140015 bytes e caps explícitos. Um segundo servidor sintético
+confirmou documento integral, endpoint de consulta separado, identidade do
+embedding e cache de query com dream desligado e scopes não vazio.
+
+**Fechamento pendente:** não foi executado `cargo test --workspace` sem
+exclusões. A suíte de integração CLI compilou e listou 430 testes; somente os
+4 testes estáticos de repo_layout foram executados, todos aprovados. Restam
+426 sem execução. Seus launchers herdam/modificam o ambiente e alocam portas
+com `127.0.0.1:0`, sem garantir o env-i e o piso >59000 exigidos pelo brief.
+
+O primeiro ensaio CLI usou TMPDIR dentro da worktree e teve 50 falhas porque
+fixtures sem repositório encontraram o Git/configurações ancestrais. Após
+corrigir o ambiente, a biblioteca passou sem alteração do código. O marcador
+sintético criado na raiz foi transferido para as evidências. O log também
+registra descoberta da configuração .claude do checkout principal; esse
+ensaio não certifica a fronteira de principal intocado, e não foi feita nova
+inspeção dele. Por essas lacunas, esta continuação não libera VERDE para o
+fechamento da fase A. O relato final nativo permanece a autoridade do veredito.

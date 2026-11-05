@@ -600,3 +600,21 @@ for env vars and Ollama/OpenRouter/Atlas Cloud/OrcaRouter/Cheaper Inference/API 
 examples, and
 [`docs/llm-provider-comparison.md`](llm-provider-comparison.md)
 for the empirical model comparison.
+
+## Local phase-A compatibility on 3.4.2
+
+For `openai-compat`, `embedding_query_base_url` selects the query endpoint
+independently of `embedding_base_url`. A document-only CPU fallback can
+therefore override the latter through the environment without moving queries.
+`embedding_document_timeout_secs` (environment
+`AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS`) defaults to 120 and accepts
+1–1800; the deadline includes the response body and does not change the query
+budget.
+
+A nonempty `dream.scopes` list retains the fork's restricted local embedding
+mode even when `dream.enabled=false`: complete UTF-8 document chunks, bounded
+JSON requests, credential-free local endpoints and normalized pooling weighted
+by source bytes. The dream engine and its local scope allowlist are deferred
+to phase B; keep dream disabled during phase A. Query vectors have a bounded
+per-instance TTL cache. Documents and search results are not cached. Provider
+and admission clients refuse all redirects.

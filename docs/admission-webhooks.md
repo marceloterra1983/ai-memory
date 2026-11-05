@@ -356,10 +356,9 @@ blocking = false                                         # fire-and-forget after
 
 Only `http://` and `https://` webhook URLs are accepted; any other scheme, a
 bare hostname, or an empty `url` fails server startup when the chain is
-built. Redirects are followed only when the target stays on the same
-`scheme://host:port` origin as the configured `url` (up to 10 hops); a redirect
-to another origin fails the webhook request without forwarding the payload or
-applying any response mutation.
+built. In the local phase-A port, redirects are never followed, including on
+the same `scheme://host:port` origin. A redirect fails the webhook request
+without forwarding the payload or applying any response mutation.
 
 ### `blocking` (default `true`)
 

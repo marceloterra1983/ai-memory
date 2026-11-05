@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Guarded dream source snapshots and apply through the existing Wiki funnel with confined checkpoints, content checks, cancellation and rollback (`bd524699`).
+
 - Bounded dream head/vector snapshots and revalidated every source identity, body hash, eligibility input and expiry in one writer transaction (`bd524699`, `36cba6dc`).
 
 - Restored conditional relation cleanup with head/hash checks, body preservation and recoverable checkpoints; retained raw generated declarations for review (`3a4a8d79`, `5cc3d4eb`).

@@ -342,6 +342,17 @@ pub struct AdmissionChain {
     webhooks: Arc<Vec<WebhookConfig>>,
     client: reqwest::Client,
     async_semaphore: Arc<tokio::sync::Semaphore>,
+    dream_private: bool,
+    dream_cancel: Option<DreamAdmissionCancel>,
+}
+
+#[derive(Clone)]
+struct DreamAdmissionCancel(Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl std::fmt::Debug for DreamAdmissionCancel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DreamAdmissionCancel(..)")
+    }
 }
 
 impl AdmissionChain {
@@ -385,7 +396,79 @@ impl AdmissionChain {
             webhooks: Arc::new(webhooks),
             client,
             async_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_ASYNC_ADMISSION_IN_FLIGHT)),
+            dream_private: false,
+            dream_cancel: None,
         })
+    }
+
+    pub(crate) fn dream_local(&self) -> WikiResult<Self> {
+        for hook in self.webhooks.iter().filter(|h| {
+            h.events.contains(&AdmissionOp::Consolidate)
+                || h.events.contains(&AdmissionOp::WritePage)
+        }) {
+            let url = reqwest::Url::parse(&hook.url)
+                .map_err(|_| dream_admission_error("dream admission URL invalid"))?;
+            let local = url
+                .host_str()
+                .and_then(|host| {
+                    host.trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .ok()
+                })
+                .is_some_and(|ip| ip.is_loopback());
+            if !local
+                || !matches!(url.scheme(), "http" | "https")
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || url.port_or_known_default() == Some(8789)
+            {
+                return Err(dream_admission_error(
+                    "dream admission must use literal loopback without credentials, redirects, proxies, or port 8789",
+                ));
+            }
+        }
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()
+            .map_err(|_| dream_admission_error("dream admission client unavailable"))?;
+        Ok(Self {
+            webhooks: self.webhooks.clone(),
+            client,
+            async_semaphore: self.async_semaphore.clone(),
+            dream_private: true,
+            dream_cancel: None,
+        })
+    }
+
+    pub(crate) fn set_dream_cancel(&mut self, cancel: Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.dream_cancel = Some(DreamAdmissionCancel(cancel));
+    }
+
+    fn check_dream_cancel(&self) -> WikiResult<()> {
+        if self.dream_cancel.as_ref().is_some_and(|check| (check.0)()) {
+            return Err(dream_admission_error("dream cancelled during admission"));
+        }
+        Ok(())
+    }
+
+    async fn dream_await<F: std::future::Future>(&self, future: F) -> WikiResult<F::Output> {
+        if self.dream_cancel.is_none() {
+            return Ok(future.await);
+        }
+        self.check_dream_cancel()?;
+        tokio::pin!(future);
+        let mut poll = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            tokio::select! {
+                biased;
+                _ = poll.tick() => self.check_dream_cancel()?,
+                result = &mut future => return Ok(result),
+            }
+        }
     }
 
     /// `true` if no webhooks are configured (caller can skip the round-trip).
@@ -409,6 +492,7 @@ impl AdmissionChain {
         ctx: &AdmissionContext,
     ) -> WikiResult<()> {
         for hook in self.webhooks.iter() {
+            self.check_dream_cancel()?;
             // Caller-driven skip list (loop prevention via X-Memory-Skip-Admission-Chain).
             if ctx.skip_webhooks.iter().any(|n| n == &hook.name) {
                 tracing::debug!(webhook = %hook.name, "admission skip (caller opt-out)");
@@ -435,13 +519,15 @@ impl AdmissionChain {
             };
 
             let result = self
-                .client
-                .post(&hook.url)
-                .header("X-Memory-Op", ctx.op.as_header_value())
-                .timeout(webhook_timeout(hook.timeout_ms))
-                .json(&payload)
-                .send()
-                .await;
+                .dream_await(
+                    self.client
+                        .post(&hook.url)
+                        .header("X-Memory-Op", ctx.op.as_header_value())
+                        .timeout(webhook_timeout(hook.timeout_ms))
+                        .json(&payload)
+                        .send(),
+                )
+                .await?;
 
             match result {
                 Ok(resp) if resp.status().is_success() => {
@@ -449,9 +535,14 @@ impl AdmissionChain {
                         tracing::debug!(webhook = %hook.name, "admission no-op (204)");
                         continue;
                     }
-                    let bytes = match read_response_limited(resp).await {
+                    let bytes = match self.dream_await(read_response_limited(resp)).await? {
                         Ok(Some(b)) => b,
                         Ok(None) => {
+                            if self.dream_private {
+                                return Err(dream_admission_error(
+                                    "dream admission response exceeded cap",
+                                ));
+                            }
                             tracing::warn!(
                                 webhook = %hook.name,
                                 cap = MAX_RESPONSE_BYTES,
@@ -460,6 +551,11 @@ impl AdmissionChain {
                             continue;
                         }
                         Err(e) => {
+                            if self.dream_private {
+                                return Err(dream_admission_error(
+                                    "dream admission response read failed",
+                                ));
+                            }
                             tracing::warn!(
                                 webhook = %hook.name,
                                 error = %e,
@@ -470,6 +566,16 @@ impl AdmissionChain {
                     };
                     match serde_json::from_slice::<WebhookResponseBody>(&bytes) {
                         Ok(parsed) => {
+                            if self.dream_private
+                                && parsed
+                                    .page
+                                    .as_ref()
+                                    .is_none_or(|p| p.body.is_none() && p.frontmatter.is_none())
+                            {
+                                return Err(dream_admission_error(
+                                    "dream admission response shape invalid",
+                                ));
+                            }
                             if let Some(page) = parsed.page {
                                 if let Some(new_fm) = page.frontmatter {
                                     markdown.frontmatter = new_fm;
@@ -481,6 +587,11 @@ impl AdmissionChain {
                             }
                         }
                         Err(e) => {
+                            if self.dream_private {
+                                return Err(dream_admission_error(
+                                    "dream admission response shape invalid",
+                                ));
+                            }
                             tracing::warn!(
                                 webhook = %hook.name,
                                 error = %e,
@@ -491,6 +602,11 @@ impl AdmissionChain {
                 }
                 Ok(resp) => {
                     let status = resp.status();
+                    if self.dream_private {
+                        return Err(dream_admission_error(
+                            "dream admission HTTP refusal or redirect",
+                        ));
+                    }
                     let body_txt = response_text_limited(resp).await;
                     let err_msg = format!(
                         "admission webhook {} status {}: {}",
@@ -508,6 +624,9 @@ impl AdmissionChain {
                     }
                 }
                 Err(e) => {
+                    if self.dream_private {
+                        return Err(dream_admission_error("dream admission request failed"));
+                    }
                     let detail = format_request_error(&e);
                     tracing::warn!(
                         webhook = %hook.name,
@@ -610,6 +729,7 @@ impl AdmissionChain {
         page_path: Option<&str>,
         ctx: &AdmissionContext,
     ) -> WikiResult<()> {
+        self.check_dream_cancel()?;
         let empty_frontmatter = serde_json::Value::Object(serde_json::Map::new());
         let payload = WebhookRequestBody {
             page: WebhookPagePayload {
@@ -620,19 +740,26 @@ impl AdmissionChain {
             ctx,
         };
         let result = self
-            .client
-            .post(&hook.url)
-            .header("X-Memory-Op", ctx.op.as_header_value())
-            .timeout(webhook_timeout(hook.timeout_ms))
-            .json(&payload)
-            .send()
-            .await;
+            .dream_await(
+                self.client
+                    .post(&hook.url)
+                    .header("X-Memory-Op", ctx.op.as_header_value())
+                    .timeout(webhook_timeout(hook.timeout_ms))
+                    .json(&payload)
+                    .send(),
+            )
+            .await?;
         match result {
             Ok(resp) if resp.status().is_success() => {
                 tracing::debug!(webhook = %hook.name, op = ctx.op.as_header_value(), "admission notify ok");
             }
             Ok(resp) => {
                 let status = resp.status();
+                if self.dream_private {
+                    return Err(dream_admission_error(
+                        "dream admission HTTP refusal or redirect",
+                    ));
+                }
                 let body_txt = response_text_limited(resp).await;
                 tracing::warn!(webhook = %hook.name, status = %status, body = %body_txt, "admission notify error response");
                 if matches!(hook.failure_policy, FailurePolicy::Reject) {
@@ -643,6 +770,9 @@ impl AdmissionChain {
                 }
             }
             Err(e) => {
+                if self.dream_private {
+                    return Err(dream_admission_error("dream admission notify failed"));
+                }
                 let detail = format_request_error(&e);
                 tracing::warn!(
                     webhook = %hook.name,
@@ -720,6 +850,8 @@ impl AdmissionChain {
             return;
         };
         let client = self.client.clone();
+        let dream_private = self.dream_private;
+        let dream_cancel = self.dream_cancel.clone();
         let url = hook.url.clone();
         let name = hook.name.clone();
         let timeout = hook.timeout_ms;
@@ -730,6 +862,9 @@ impl AdmissionChain {
         let body = body.to_string();
         tokio::spawn(async move {
             let _permit = permit;
+            if dream_cancel.as_ref().is_some_and(|check| (check.0)()) {
+                return;
+            }
             let payload = WebhookRequestBody {
                 page: WebhookPagePayload {
                     path: path.as_deref().unwrap_or(""),
@@ -753,6 +888,10 @@ impl AdmissionChain {
                     tracing::warn!(webhook = %name, status = %resp.status(), "admission async error response");
                 }
                 Err(e) => {
+                    if dream_private {
+                        tracing::warn!("dream admission observer request failed");
+                        return;
+                    }
                     let detail = format_request_error(&e);
                     tracing::warn!(
                         webhook = %name,
@@ -763,6 +902,10 @@ impl AdmissionChain {
             }
         });
     }
+}
+
+fn dream_admission_error(reason: &str) -> WikiError {
+    ai_memory_store::StoreError::InvalidState(reason.into()).into()
 }
 
 /// `true` when this webhook's answer can change the outcome of an operation —

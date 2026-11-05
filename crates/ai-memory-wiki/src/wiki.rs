@@ -27,7 +27,10 @@ use crate::markdown::{Markdown, derive_title, emit, parse};
 use crate::watcher::is_pending_path;
 
 mod curation;
+mod dream;
 pub use curation::{RelationCurationRequest, RelationCurationResult};
+pub use dream::{DreamApplyResult, DreamSource};
+use dream::{DreamBatchGuard, dream_refused, read_dream_file};
 
 /// A source snapshot whose optional version token describes its exact content.
 #[derive(Debug, Clone)]
@@ -3208,7 +3211,7 @@ impl Wiki {
     /// Returns [`WikiError`] for any filesystem, parsing, or store
     /// error.
     pub async fn apply_batch(&self, requests: Vec<WritePageRequest>) -> WikiResult<Vec<PageId>> {
-        match self.apply_batch_inner(requests, None).await? {
+        match self.apply_batch_inner(requests, None, None).await?.0 {
             ConditionalBatchWrite::Written(ids) => Ok(ids),
             ConditionalBatchWrite::Mismatch { .. } => Err(ai_memory_wiki_error(
                 "an unconditional page batch reported a precondition mismatch",
@@ -3226,16 +3229,19 @@ impl Wiki {
         requests: Vec<(WritePageRequest, PagePrecondition)>,
     ) -> WikiResult<ConditionalBatchWrite> {
         let (requests, preconditions): (Vec<_>, Vec<_>) = requests.into_iter().unzip();
-        self.apply_batch_inner(requests, Some(preconditions)).await
+        self.apply_batch_inner(requests, Some(preconditions), None)
+            .await
+            .map(|(outcome, _)| outcome)
     }
 
     async fn apply_batch_inner(
         &self,
         requests: Vec<WritePageRequest>,
         preconditions: Option<Vec<PagePrecondition>>,
-    ) -> WikiResult<ConditionalBatchWrite> {
+        dream: Option<DreamBatchGuard>,
+    ) -> WikiResult<(ConditionalBatchWrite, Option<String>)> {
         if requests.is_empty() {
-            return Ok(ConditionalBatchWrite::Written(Vec::new()));
+            return Ok((ConditionalBatchWrite::Written(Vec::new()), None));
         }
         // Reject any path that cannot be materialised and checkpointed on every
         // supported platform, before anything is written.
@@ -3257,18 +3263,29 @@ impl Wiki {
             Option<AdmissionContext>,
         )> = Vec::with_capacity(requests.len());
         for mut req in requests {
+            if dream.as_ref().is_some_and(|guard| (guard.cancel)()) {
+                return Err(dream_refused("dream cancelled before admission"));
+            }
+            let gated_body = req.body.clone();
+            let gated_title = req.title.clone();
             // Defence-in-depth scrub at the batch boundary too.
             req.body = self.sanitizer.scrub(&req.body);
             if let Some(t) = req.title.take() {
                 req.title = Some(self.sanitizer.scrub(&t));
             }
 
+            if dream.is_some() && (req.body != gated_body || req.title != gated_title) {
+                return Err(dream_refused(
+                    "dream draft sanitization changed reviewed content",
+                ));
+            }
             req.frontmatter = stamp_last_modified_by(req.frontmatter, &req.actor);
             let mut markdown = Markdown {
                 frontmatter: req.frontmatter,
                 body: req.body,
             };
 
+            let gated_markdown = dream.as_ref().map(|_| markdown.clone());
             let resolved_ctx = if let Some(chain) = &self.admission_chain {
                 let mut ctx = req.admission_ctx.take().unwrap_or_default();
                 ctx.actor = req.actor.clone();
@@ -3282,6 +3299,11 @@ impl Wiki {
 
             markdown.body = self.sanitizer.scrub(&markdown.body);
             scrub_frontmatter_strings(&mut markdown.frontmatter, &self.sanitizer);
+            if gated_markdown.is_some_and(|gated| gated != markdown) {
+                return Err(dream_refused(
+                    "dream admission or sanitization changed reviewed content",
+                ));
+            }
             req.pinned = req.pinned
                 || is_slot_path(&req.path)
                 || markdown
@@ -3312,8 +3334,17 @@ impl Wiki {
             staged.push((req_with_title, emitted, abs, resolved_ctx));
         }
 
-        let (ids, dispatches) = {
-            let _guard = self.mutation_lock.read().await;
+        let (ids, dispatches, checkpoint) = {
+            let _dream_guard = if let Some(dream) = &dream {
+                Some(dream::await_lock(self.mutation_lock.write(), &dream.cancel).await?)
+            } else {
+                None
+            };
+            let _ordinary_guard = if dream.is_none() {
+                Some(self.mutation_lock.read().await)
+            } else {
+                None
+            };
             for (req, _, _, _) in &staged {
                 self.confined_page_path(
                     req.workspace_id,
@@ -3329,8 +3360,18 @@ impl Wiki {
                 .iter()
                 .map(|(req, _, _, _)| (req.workspace_id, req.project_id, req.path.clone()))
                 .collect();
-            let _page_guards = self.lock_pages(&batch_keys).await;
-            let _file_locks = self.lock_page_files(&batch_keys).await?;
+            let _page_guards = match &dream {
+                Some(guard) => {
+                    dream::await_lock(self.lock_pages(&batch_keys), &guard.cancel).await?
+                }
+                None => self.lock_pages(&batch_keys).await,
+            };
+            let _file_locks = match &dream {
+                Some(guard) => {
+                    dream::await_lock(self.lock_page_files(&batch_keys), &guard.cancel).await??
+                }
+                None => self.lock_page_files(&batch_keys).await?,
+            };
             if let Some(preconditions) = &preconditions {
                 for (index, ((req, _, _, _), precondition)) in
                     staged.iter().zip(preconditions).enumerate()
@@ -3346,10 +3387,60 @@ impl Wiki {
                             stored.as_ref(),
                         )?
                     {
-                        return Ok(ConditionalBatchWrite::Mismatch { index, current });
+                        return Ok((ConditionalBatchWrite::Mismatch { index, current }, None));
                     }
                 }
             }
+            let checkpoint = if let Some(dream) = &dream {
+                if (dream.cancel)() {
+                    return Err(dream_refused("dream cancelled before staging"));
+                }
+                let mut checkpoint_sources = Vec::with_capacity(dream.sources.len());
+                for source in &dream.sources {
+                    let head = &source.head;
+                    let bytes = read_dream_file(
+                        &self.abs_path(head.workspace_id, head.project_id, &head.candidate.path),
+                        ai_memory_store::DREAM_SOURCE_MAX_BYTES,
+                    )?;
+                    if ai_memory_store::dream_source_digest(&bytes) != source.file_sha256 {
+                        return Err(dream_refused("dream source file changed; batch cancelled"));
+                    }
+                    let rel = self
+                        .abs_path(head.workspace_id, head.project_id, &head.candidate.path)
+                        .strip_prefix(&self.root)
+                        .map_err(|_| dream_refused("dream source is outside wiki root"))?
+                        .to_path_buf();
+                    checkpoint_sources.push((rel, bytes));
+                }
+                let oid = match self.git.commit_dream_sources(&checkpoint_sources)? {
+                    Some(oid) => oid.to_string(),
+                    None => {
+                        self.git
+                            .recent_checkpoints(1)?
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| dream_refused("dream pre-merge checkpoint missing"))?
+                            .oid
+                    }
+                };
+                for source in &dream.sources {
+                    let head = &source.head;
+                    let rel = self
+                        .abs_path(head.workspace_id, head.project_id, &head.candidate.path)
+                        .strip_prefix(&self.root)
+                        .map_err(|_| dream_refused("dream source is outside wiki root"))?
+                        .to_path_buf();
+                    let bytes = self.git.file_at_rev(&oid, &rel)?;
+                    if ai_memory_store::dream_source_digest(&bytes) != source.file_sha256 {
+                        return Err(dream_refused(
+                            "dream checkpoint does not retain exact source",
+                        ));
+                    }
+                }
+                Some(oid)
+            } else {
+                None
+            };
             let mut staged_files: Vec<(
                 WritePageRequest,
                 tempfile::NamedTempFile,
@@ -3409,6 +3500,9 @@ impl Wiki {
             // the derived DB from the markdown source of truth.
             let mut installed = Vec::with_capacity(staged_files.len());
             let mut dispatches = Vec::with_capacity(staged_files.len());
+            if dream.as_ref().is_some_and(|guard| (guard.cancel)()) {
+                return Err(dream_refused("dream cancelled before file install"));
+            }
             for (req, tmp, abs, ctx) in staged_files {
                 let install = match persist_tmp_with_rollback_snapshot(&self.git, tmp, &abs) {
                     Ok(install) => install,
@@ -3421,19 +3515,34 @@ impl Wiki {
                 dispatches.push((req.path, req.frontmatter, req.body, ctx));
             }
 
-            let write = match &preconditions {
-                Some(preconditions) => {
-                    let pages = pages
-                        .into_iter()
-                        .zip(preconditions.iter().copied())
-                        .collect();
-                    self.writer.upsert_pages_batch_if(pages).await
-                }
-                None => self
-                    .writer
-                    .upsert_pages_batch(pages)
+            let write = if let Some(guard) = &dream {
+                self.writer
+                    .upsert_dream_pages_batch(
+                        pages,
+                        guard
+                            .sources
+                            .iter()
+                            .map(|source| source.head.clone())
+                            .collect(),
+                        guard.cancel.clone(),
+                    )
                     .await
-                    .map(ConditionalBatchUpsert::Upserted),
+                    .map(ConditionalBatchUpsert::Upserted)
+            } else {
+                match &preconditions {
+                    Some(preconditions) => {
+                        let pages = pages
+                            .into_iter()
+                            .zip(preconditions.iter().copied())
+                            .collect();
+                        self.writer.upsert_pages_batch_if(pages).await
+                    }
+                    None => self
+                        .writer
+                        .upsert_pages_batch(pages)
+                        .await
+                        .map(ConditionalBatchUpsert::Upserted),
+                }
             };
             let ids = match write {
                 Ok(ConditionalBatchUpsert::Upserted(ids)) => ids,
@@ -3443,7 +3552,7 @@ impl Wiki {
                         &installed,
                         &ai_memory_wiki_error("conditional page batch changed during write"),
                     )?;
-                    return Ok(ConditionalBatchWrite::Mismatch { index, current });
+                    return Ok((ConditionalBatchWrite::Mismatch { index, current }, None));
                 }
                 Err(e) => {
                     rollback_or_inconsistent(&self.git, &installed, &e)?;
@@ -3451,7 +3560,7 @@ impl Wiki {
                 }
             };
 
-            (ids, dispatches)
+            (ids, dispatches, checkpoint)
         };
 
         // Embed each applied version like `write_page` does, after the
@@ -3461,12 +3570,14 @@ impl Wiki {
         // record per-page outcomes from these ids, so an `Err` here would
         // report written pages as failed. The vector-less page is picked up
         // by the next embedding backfill.
-        for (id, (path, frontmatter, body, _)) in ids.iter().zip(&dispatches) {
-            if let Err(error) = self
-                .embed_page_version(*id, body, frontmatter_abstract(frontmatter))
-                .await
-            {
-                tracing::warn!(%error, path = %path.as_str(), "batch page indexed without its embedding");
+        if dream.is_none() {
+            for (id, (path, frontmatter, body, _)) in ids.iter().zip(&dispatches) {
+                if let Err(error) = self
+                    .embed_page_version(*id, body, frontmatter_abstract(frontmatter))
+                    .await
+                {
+                    tracing::warn!(%error, path = %path.as_str(), "batch page indexed without its embedding");
+                }
             }
         }
 
@@ -3478,7 +3589,7 @@ impl Wiki {
             }
         }
 
-        Ok(ConditionalBatchWrite::Written(ids))
+        Ok((ConditionalBatchWrite::Written(ids), checkpoint))
     }
 
     /// Acquire the per-path write lock for one page, serializing concurrent
@@ -3566,26 +3677,32 @@ impl Wiki {
             .collect();
         paths.sort();
         paths.dedup();
-        tokio::task::spawn_blocking(move || {
-            paths
-                .into_iter()
-                .map(|path| {
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent)?;
+        // Locks belong to this future. Dropping a cancelled snapshot or apply
+        // releases any already-acquired files instead of leaving a blocking
+        // worker alive with partial ownership of the batch.
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)?;
+            loop {
+                match fs2::FileExt::try_lock_exclusive(&file) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
-                    let file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(path)?;
-                    fs2::FileExt::lock_exclusive(&file)?;
-                    Ok(file)
-                })
-                .collect::<WikiResult<Vec<_>>>()
-        })
-        .await
-        .map_err(|e| ai_memory_wiki_error(&format!("page file lock task failed: {e}")))?
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            files.push(file);
+        }
+        Ok(files)
     }
 
     /// Read a file and attach a version only when its entire body and

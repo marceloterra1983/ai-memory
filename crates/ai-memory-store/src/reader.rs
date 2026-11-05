@@ -8210,7 +8210,7 @@ impl ReaderPool {
     ) -> StoreResult<Vec<OpenHandoff>> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, from_agent, to_agent, cwd, created_at \
+                "SELECT id, from_agent, to_agent, cwd, created_at, from_session_id \
                  FROM handoffs \
                  WHERE workspace_id = ?1 AND project_id = ?2 AND state = 'open' \
                  ORDER BY created_at ASC, id ASC \
@@ -8230,21 +8230,29 @@ impl ReaderPool {
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, i64>(4)?,
+                        row.get::<_, Option<Vec<u8>>>(5)?,
                     ))
                 },
             )?;
             let mut out = Vec::new();
             for row in rows {
-                let (id, from_agent, to_agent, cwd, created_at) = row?;
+                let (id, from_agent, to_agent, cwd, created_at, from_session) = row?;
                 let Ok(id) = HandoffId::from_slice(&id) else {
                     continue;
                 };
+                // This content-free listing must keep an addressable row even
+                // when its origin is malformed; it cannot be claimed here.
+                let from_session_id = from_session
+                    .as_deref()
+                    .and_then(|bytes| SessionId::from_slice(bytes).ok())
+                    .map(|session| session.to_string());
                 out.push(OpenHandoff {
                     id: id.to_string(),
                     from_agent,
                     to_agent,
                     cwd,
                     created_at_ms: created_at / 1_000,
+                    from_session_id,
                 });
             }
             Ok(out)
@@ -16109,6 +16117,8 @@ pub struct OpenHandoff {
     pub to_agent: Option<String>,
     pub cwd: Option<String>,
     pub created_at_ms: i64,
+    /// Origin session for automatic handoffs; absent for manual or invalid origins.
+    pub from_session_id: Option<String>,
 }
 
 fn handoff_owner_sql(filter: &OwnerFilter, param_index: usize) -> (String, Option<String>) {

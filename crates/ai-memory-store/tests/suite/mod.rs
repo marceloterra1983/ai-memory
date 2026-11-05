@@ -17,6 +17,7 @@ mod handoff_ownership;
 mod identity_resolution;
 mod idle_session_end;
 mod live_token_usage;
+mod local_port;
 mod most_recently_active_scope;
 mod multi_session;
 mod observation_prune;

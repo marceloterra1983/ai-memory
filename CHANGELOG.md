@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Included handoff `from_session_id` in administrative listings and kept malformed legacy origins as null instead of dropping the item (`1d93add8`, `62baa09e`).
+
 - Preserved only closed, bounded tool labels in hook payloads, including metadata-only capture and generated adapters (`c3b5a60e`).
 
 - Neutralized received workstream/lease names, upgrade tags, doctor hook hints and finalize-session errors as single-line terminal text (`8f272d97`, `b1389f55`, `56758c2c`).

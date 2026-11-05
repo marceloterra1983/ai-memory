@@ -50,12 +50,13 @@ pub struct NewPage {
     pub frontmatter_json: serde_json::Value,
     /// `true` to mark the page as user-pinned (never decay).
     pub pinned: bool,
-    /// Outgoing links discovered in the page body.
+    /// Outgoing body references and typed frontmatter relations.
     ///
     /// The store resolves these against the latest page rows in the target
     /// project (the source's own project for bare links, or the named
     /// project for a cross-project `[[project:path]]` link) and keeps
-    /// unresolved forward links as `to_page_id = NULL`.
+    /// unresolved body references as `to_page_id = NULL`. Typed relations require
+    /// an exact existing latest target in the declared scope.
     pub links: Vec<LinkTarget>,
     /// Multi-user attribution: the registered user (v0.8 `users` table)
     /// that made this write, when resolved by the auth middleware.
@@ -598,6 +599,24 @@ impl Relation {
 
     /// Every relation, for schema/docs enumeration.
     pub const ALL: [Self; 3] = [Self::Causes, Self::Fixes, Self::Contradicts];
+}
+
+/// Bare absence markers that cannot name a `.md` page. Matching is exact,
+/// ignoring case and surrounding whitespace; titles remain untouched.
+#[must_use]
+pub fn relation_target_is_bare_sentinel(target: &str) -> bool {
+    ["none", "nenhuma", "n/a"]
+        .iter()
+        .any(|marker| target.trim().eq_ignore_ascii_case(marker))
+}
+
+/// Legacy extension-appended absence markers, which can also name live pages.
+/// Curation must resolve exact existence in the source scope before removal.
+#[must_use]
+pub fn relation_target_is_sentinel_path(target: &str) -> bool {
+    ["none.md", "nenhuma.md", "n/a.md"]
+        .iter()
+        .any(|marker| target.trim().eq_ignore_ascii_case(marker))
 }
 
 impl LinkTarget {

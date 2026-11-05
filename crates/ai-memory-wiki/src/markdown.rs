@@ -366,8 +366,9 @@ fn last_segment_names_a_page(target: &str) -> bool {
 ///   contradicts: ["decisions/0007.md", "other-project:notes/x.md"]
 /// ```
 ///
-/// Values use the same target grammar as wikilinks (`path`,
-/// `project:path`, `workspace/project:path`). Keys outside the closed
+/// Values name exact `.md` paths (`path.md`, `project:path.md`, or
+/// `workspace/project:path.md`). Extension-less values and absence markers stay
+/// untouched in frontmatter for curation. Keys outside the closed
 /// [`Relation`] vocabulary are skipped (a typo must not silently mint a
 /// new edge kind); malformed paths are skipped likewise.
 pub fn extract_relation_links(frontmatter: &serde_json::Value) -> Vec<LinkTarget> {
@@ -385,23 +386,19 @@ pub fn extract_relation_links(frontmatter: &serde_json::Value) -> Vec<LinkTarget
         };
         for target in list.iter().filter_map(|v| v.as_str()) {
             let (workspace, project, raw_path) = split_scope(target);
-            // Same terminal normalization as wikilinks: extension-less
-            // targets gain `.md`; a directory target, a stem-less `.md`, and
-            // anything with a non-md extension are not pages and are skipped.
             let raw_path = raw_path.trim();
-            let last = raw_path.rsplit_once('/').map_or(raw_path, |(_, s)| s);
-            let names_a_page = last_segment_names_a_page(raw_path)
-                && (!last.contains('.') || raw_path.ends_with(".md"));
-            if !names_a_page {
-                tracing::warn!(target = %log_bounded(target), "relation target is not a page; skipping");
+            if ai_memory_core::relation_target_is_bare_sentinel(raw_path) {
                 continue;
             }
-            let normalized = if last.contains('.') {
-                raw_path.to_string()
-            } else {
-                format!("{raw_path}.md")
-            };
-            let Ok(path) = PagePath::new(normalized) else {
+            // Keep explicit .md declarations, including live sentinel-named pages.
+            // The writer checks exact existence in the same transaction as the edge.
+            if !last_segment_names_a_page(raw_path) || !raw_path.ends_with(".md") {
+                tracing::warn!(
+                    "relation target is not an explicit page path; preserving frontmatter without indexing"
+                );
+                continue;
+            }
+            let Ok(path) = PagePath::new(raw_path) else {
                 tracing::warn!(target = %log_bounded(target), "unparseable relation target; skipping");
                 continue;
             };
@@ -1203,7 +1200,7 @@ mod tests {
     fn relations_frontmatter_becomes_typed_edges() {
         let fm = serde_json::json!({
             "relations": {
-                "fixes": ["gotchas/build.md", "concepts/writer"],
+                "fixes": ["gotchas/build.md", "concepts/writer.md"],
                 "contradicts": ["other-proj:decisions/0007.md"],
                 "causes": ["ws/proj:notes/x.md"],
             }
@@ -1216,7 +1213,6 @@ mod tests {
             .filter(|l| l.relation == Some(ai_memory_core::Relation::Fixes))
             .collect();
         assert_eq!(fixes.len(), 2);
-        // extension-less target gains .md
         assert!(
             fixes
                 .iter()
@@ -1239,7 +1235,7 @@ mod tests {
     fn extract_relation_links_global_target_pins_default_workspace() {
         let fm = serde_json::json!({
             "relations": {
-                "fixes": ["_global:python-env"],
+                "fixes": ["_global:python-env.md"],
                 "contradicts": ["other/_global:notes/x.md"],
             }
         });
@@ -1257,6 +1253,38 @@ mod tests {
             .unwrap();
         assert_eq!(contra.workspace.as_deref(), Some("other"));
         assert_eq!(contra.project.as_deref(), Some(GLOBAL_SCOPE_PROJECT));
+    }
+
+    #[test]
+    fn curation_bare_sentinels_titles_and_extensionless_values_stay_raw() {
+        let fm = serde_json::json!({
+            "source_session": "synthetic-origin",
+            "relations": {"contradicts": [
+                "None", " Nenhuma ", "N/A", "A free title", "concepts/writer"
+            ]}
+        });
+        let original = fm.clone();
+        assert!(
+            extract_relation_links(&fm).is_empty(),
+            "bare markers and titles must not mint typed paths"
+        );
+        assert_eq!(fm, original, "raw declarations and origin must survive");
+    }
+
+    #[test]
+    fn curation_md_sentinel_forms_remain_exact_path_candidates() {
+        let fm = serde_json::json!({
+            "relations": {"contradicts": [
+                "none.md", "Nenhuma.md", "N/A.md", "notes/none-mentioned.md"
+            ]}
+        });
+        let links = extract_relation_links(&fm);
+        assert_eq!(links.len(), 4);
+        let paths: Vec<_> = links.iter().map(|link| link.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["none.md", "Nenhuma.md", "N/A.md", "notes/none-mentioned.md"]
+        );
     }
 
     #[test]

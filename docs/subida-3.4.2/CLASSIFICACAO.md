@@ -743,3 +743,11 @@ registra descoberta da configuração .claude do checkout principal; esse
 ensaio não certifica a fronteira de principal intocado, e não foi feita nova
 inspeção dele. Por essas lacunas, esta continuação não libera VERDE para o
 fechamento da fase A. O relato final nativo permanece a autoridade do veredito.
+
+
+## Fase B — decisões de reconciliação
+
+| Origem | Equivalente preservado na tag/fase A | Garantia acrescentada e prova |
+|---|---|---|
+| `3a4a8d79`, `5cc3d4eb` — parser | `split_scope`, vocabulário `Relation`, `PagePath` e roteamento `_global` | Relações exigem `.md` explícito; títulos e sentinelas nus permanecem no frontmatter, sem inventar caminho. Formas `.md` de sentinela continuam candidatas a alvo legítimo. Regressões `markdown::tests::curation_*`; negativo do parser reprovou antes da correção. |
+| `80dd19cd` | Fora do servidor Linux | Excluído também da fase B: alteração exclusiva do companion macOS. |

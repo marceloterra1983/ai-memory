@@ -1,5 +1,20 @@
 # Tradução de crates/ai-memory-core/locales/en/diagnostics.ftl.
 
+diag-dream-scopes-local-embedder = os escopos de DREAM exigem um gerador de embeddings local disponível
+diag-dream-explicit-scope = DREAM exige --workspace e --project explícitos e não vazios
+diag-dream-exact-scope-names = os nomes em dream.scopes devem ser exatos, não vazios e sem espaços em branco nas extremidades
+diag-dream-duplicate-scopes = dream.scopes não pode conter escopos duplicados
+diag-dream-enabled-scope-allowlist = dream.enabled exige uma lista não vazia de escopos permitidos em dream.scopes
+diag-dream-trusted-llm-endpoint = dream.llm_endpoint deve ser um endpoint confiável com endereço literal de loopback
+diag-dream-endpoint-model-together = dream.llm_endpoint e dream.llm_model devem ser configurados juntos
+diag-dream-explicit-model-names = os nomes de modelos de DREAM devem ser explícitos, não vazios e ter no máximo 200 bytes
+diag-dream-enabled-local-models = dream.enabled exige endpoint e modelo LLM locais dedicados e jev_model
+diag-dream-finite-max-eps = dream.max_eps deve ser finito e estar entre zero e um
+diag-dream-embedding-dimensions = as dimensões dos embeddings de DREAM devem estar entre 1 e 8192
+diag-dream-enabled-local-embedding = DREAM habilitado exige um provedor local de embeddings explícito
+diag-dream-explicit-embedding-url = DREAM exige um embedding_base_url local explícito
+diag-dream-trusted-embedding-endpoint = os embeddings de DREAM devem usar um endpoint confiável com endereço literal de loopback
+diag-dream-local-embedding-provider = DREAM exige embeddings local ou openai-compat local
 diag-preview = { $value0 }  { $value1 }  { $value2 }  PRÉVIA
 diag-aborted-no-input = operação abortada (sem entrada)
 diag-aborted = operação abortada

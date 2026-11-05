@@ -297,7 +297,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0_u8; 4096];
-            stream.read(&mut request).await.unwrap();
+            assert!(stream.read(&mut request).await.unwrap() > 0);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n")
                 .await

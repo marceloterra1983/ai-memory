@@ -222,15 +222,7 @@ fn dedup_on() -> ColdClusterDedup {
 }
 
 fn dream_on() -> DreamConfig {
-    DreamConfig {
-        enabled: true,
-        embedding: Some(synthetic_coord()),
-        min_pts: 0,
-        max_eps: 0.0,
-        max_clusters_per_run: 0,
-        min_cold_pages: 0,
-        idle_window_secs: 0,
-    }
+    super::dream_pass::dream_on()
 }
 
 // Two near-duplicate episodic bodies: near-identical prose (so the bag-of-words
@@ -802,7 +794,7 @@ async fn s1_all_flags_off_is_inert_on_a_cold_corpus() {
 // SCENARIO 2 — the LLM "dream" lifecycle (fake provider, zero live calls)
 // ===========================================================================
 
-/// Fake provider: returns a merged page whose body echoes the whole prompt (so
+/// Fake provider: returns a merged page whose body copies the complete sources (so
 /// the survivor demonstrably keeps every source fact), records that it was
 /// handed the `DreamMergedPage` JSON schema (invariant #7), and counts calls.
 struct FakeMergeLlm {
@@ -866,9 +858,21 @@ impl LlmProvider for FakeMergeLlm {
                 .first()
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
+            let bodies: Vec<_> = prompt
+                .split("### Page: ")
+                .skip(1)
+                .map(|page| {
+                    page.split_once("\n\n")
+                        .unwrap()
+                        .1
+                        .strip_suffix("\n\n")
+                        .unwrap()
+                })
+                .collect();
+            let title: String = bodies[0].chars().take(40).collect();
             Ok(serde_json::json!({
-                "title": "Dream Merge",
-                "body_markdown": format!("Dream-merged coherent page.\n\n{prompt}"),
+                "title": title,
+                "body_markdown": bodies.join("\n\n"),
             }))
         })
     }
@@ -924,8 +928,7 @@ async fn s2_dream_merges_cold_cluster_via_llm() {
     let survivor = merge.survivor.clone();
     let loser = merge.merged[0].clone();
     assert_ne!(survivor, loser);
-    // The LLM-authored survivor keeps every source fact (the fake echoes the
-    // prompt, which carries both source bodies).
+    // The source-copy draft keeps both complete source bodies.
     let survivor_body = latest_body(&fx, &survivor);
     assert!(
         survivor_body.contains("crates/ai-memory-store/src/ops.rs")

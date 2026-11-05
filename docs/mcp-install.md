@@ -363,8 +363,11 @@ and no managed-workstream adapter.
 `$XDG_CONFIG_HOME` for its skill roots; on a non-default XDG setup pass the
 concrete path with `--config-file`.
 
-Servers live under the top-level snake_case `mcp_servers` key. Note the
-casing: `mcpServers`, which most other clients use, is ignored here.
+Servers live under a top-level map. Muse documents the snake_case
+`mcp_servers` key and also accepts the camelCase `mcpServers` that most other
+clients use, but it offers no MCP server at all when both are present.
+`--apply` uses an existing `mcpServers` map, otherwise `mcp_servers`, and
+refuses a file that already has both without changing it.
 
 ```json
 {
@@ -401,6 +404,7 @@ Two details of Muse's schema are worth knowing before hand-editing the file:
 - **`mode` defaults to `required`**, and a required server that fails to start
   aborts the whole Muse run. ai-memory writes `"mode": "optional"` explicitly
   so an unreachable memory server costs you recall rather than the session.
+  `--apply` keeps a `mode` the entry already has.
 
 A non-default `framing` value is rejected on `streamable_http`, so the
 generated entry omits the key.

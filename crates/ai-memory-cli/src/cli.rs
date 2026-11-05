@@ -2328,8 +2328,8 @@ pub enum McpClient {
     /// does not expose ai-memory-compatible lifecycle hooks.
     Zed,
     /// Muse Code (Meta) — `~/.config/muse/settings.json`, servers under a
-    /// top-level snake_case `mcp_servers` map with `transport:
-    /// "streamable_http"` + `url` + `headers`.
+    /// top-level snake_case `mcp_servers` map (or an existing `mcpServers`
+    /// map) with `transport: "streamable_http"` + `url` + `headers`.
     ///
     /// Two documented constraints shape the generated entry. The settings
     /// file must carry `"schema_version": 1` or *every* Muse Code command

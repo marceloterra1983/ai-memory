@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Stopped `install-mcp --client muse --apply` from adding `mcp_servers` next to
+  an existing `mcpServers` map, which leaves Muse offering no MCP server. It now
+  writes into the existing map, refuses a file with both maps unchanged, and
+  keeps a `mode` the entry already has. `uninstall` also removed the entry from
+  `mcpServers`, and the docs no longer claim Muse ignores that spelling.
 - Neutralized terminal controls in synthetic session-finalization errors,
   purge-preview refusals (plain bodies and JSON `error` fields), forbidden
   handoff warnings, both workstream-rename confirmations, and `doctor` agent

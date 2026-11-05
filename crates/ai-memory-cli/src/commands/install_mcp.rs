@@ -44,9 +44,9 @@ enum JsonMcpLocation {
     /// Top-level `context_servers` key used by Zed's settings.json.
     RootContextServers,
     /// Top-level snake_case `mcp_servers` key used by Muse Code's
-    /// settings.json. Distinct from `RootMcpServers` purely by casing —
-    /// Muse documents `mcp_servers`, and the camelCase spelling every
-    /// other client uses would be ignored.
+    /// settings.json. Muse also accepts camelCase `mcpServers` but offers no
+    /// MCP server when both are present, so an existing `mcpServers` map is
+    /// used instead of adding this one.
     RootMcpServersSnake,
 }
 
@@ -632,7 +632,7 @@ fn upsert_json_mcp_entry(
     root: &mut serde_json::Map<String, serde_json::Value>,
     args: &InstallMcpArgs,
 ) -> Result<()> {
-    let entry = build_json_mcp_entry(args)?;
+    let mut entry = build_json_mcp_entry(args)?;
     match json_mcp_location(args.client).context("internal: unsupported JSON MCP client")? {
         JsonMcpLocation::RootMcpServers => {
             let servers = root
@@ -680,11 +680,34 @@ fn upsert_json_mcp_entry(
             servers.insert(args.name.clone(), entry);
         }
         JsonMcpLocation::RootMcpServersSnake => {
+            // Muse reads either spelling but offers no MCP server when both
+            // exist, so never add the second map or write into one of a pair.
+            let has_camel = root.contains_key("mcpServers");
+            if has_camel && root.contains_key("mcp_servers") {
+                bail!(
+                    "settings has both `mcpServers` and `mcp_servers`, and Muse offers no \
+                     MCP server that way; merge them into one map and re-run"
+                );
+            }
+            let key = if has_camel {
+                "mcpServers"
+            } else {
+                "mcp_servers"
+            };
             let servers = root
-                .entry("mcp_servers")
+                .entry(key)
                 .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
                 .as_object_mut()
-                .context("`mcp_servers` is present but not an object")?;
+                .with_context(|| format!("`{key}` is present but not an object"))?;
+            // `optional` is only the default: downgrading a server the
+            // operator made `required` would silently hide its outages.
+            if let Some(mode) = servers
+                .get(&args.name)
+                .and_then(|existing| existing.get("mode"))
+                .cloned()
+            {
+                entry["mode"] = mode;
+            }
             servers.insert(args.name.clone(), entry);
         }
     }
@@ -995,14 +1018,15 @@ fn build_mcp_entry_zcode(args: &InstallMcpArgs) -> Result<serde_json::Value> {
 }
 
 /// Muse Code MCP entry: `transport: "streamable_http"` + `url` + optional
-/// `headers` under `~/.config/muse/settings.json`'s `mcp_servers` map.
+/// `headers` under `~/.config/muse/settings.json`'s `mcp_servers` map, or
+/// its existing `mcpServers` map.
 ///
 /// `mode` is written explicitly because Muse Code defaults it to
 /// `required`, and a required server that fails to start aborts the whole
 /// run. Memory is an augmentation, so an unreachable server should cost
-/// the user their recall, not their coding session. No `framing` key is
-/// emitted: a non-default `framing` on `streamable_http` fails Muse's own
-/// validation.
+/// the user their recall, not their coding session; a `mode` already set on
+/// the entry is kept. No `framing` key is emitted: a non-default `framing`
+/// on `streamable_http` fails Muse's own validation.
 fn build_mcp_entry_muse(args: &InstallMcpArgs) -> Result<serde_json::Value> {
     let bearer = bearer_header_value(args.auth_token.as_deref());
     let server_url = args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL);
@@ -1374,6 +1398,9 @@ fn render_muse(args: &InstallMcpArgs) -> Result<String> {
          # mode is set to \"optional\" on purpose: Muse defaults it to\n\
          # \"required\", which aborts the whole run when the server is\n\
          # unreachable. Auth goes in the headers map.\n\
+         #\n\
+         # If the file already has mcpServers, merge into that map instead:\n\
+         # Muse offers no MCP server when both spellings are present.\n\
          {snippet}\n",
         snippet = render_json_mcp_fragment(args)?,
     ))
@@ -1630,6 +1657,63 @@ mod tests {
         // Downgrading a future schema would break the user's settings file;
         // an unrecognized value is Muse's own error to report.
         assert_eq!(root["schema_version"], 2);
+    }
+
+    #[test]
+    fn muse_upsert_uses_an_existing_camel_case_map() {
+        let mut root = serde_json::Map::new();
+        root.insert(
+            "mcpServers".into(),
+            json!({"my-tools": {"transport": "stdio", "command": "my-mcp-server"}}),
+        );
+
+        upsert_json_mcp_entry(&mut root, &args_for(McpClient::Muse)).unwrap();
+
+        // Muse offers no MCP server at all when both spellings are present.
+        assert!(!root.contains_key("mcp_servers"), "{root:#?}");
+        assert_eq!(root["mcpServers"]["my-tools"]["command"], "my-mcp-server");
+        assert_eq!(
+            root["mcpServers"]["ai-memory"]["transport"],
+            "streamable_http"
+        );
+        assert_eq!(root["mcpServers"]["ai-memory"]["mode"], "optional");
+        assert_eq!(root["schema_version"], 1);
+    }
+
+    #[test]
+    fn muse_upsert_keeps_an_existing_mode() {
+        for key in ["mcp_servers", "mcpServers"] {
+            let mut root = serde_json::Map::new();
+            root.insert(
+                key.into(),
+                json!({"ai-memory": {
+                    "transport": "streamable_http",
+                    "url": "http://old-host:49374/mcp",
+                    "mode": "required",
+                }}),
+            );
+
+            upsert_json_mcp_entry(&mut root, &args_for(McpClient::Muse)).unwrap();
+
+            assert_eq!(root[key]["ai-memory"]["mode"], "required", "{key}");
+            assert_eq!(
+                root[key]["ai-memory"]["url"], "http://127.0.0.1:49374/mcp",
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_upsert_refuses_both_maps_and_changes_nothing() {
+        let mut root = serde_json::Map::new();
+        root.insert("mcpServers".into(), json!({"a": {"command": "a"}}));
+        root.insert("mcp_servers".into(), json!({"b": {"command": "b"}}));
+        let before = root.clone();
+
+        let err = upsert_json_mcp_entry(&mut root, &args_for(McpClient::Muse)).unwrap_err();
+
+        assert!(format!("{err:#}").contains("both"), "{err:#}");
+        assert_eq!(root, before);
     }
 
     #[test]

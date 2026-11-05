@@ -1215,8 +1215,8 @@ fn mcp_servers_path(client: McpClient) -> Option<&'static [&'static str]> {
         McpClient::Openclaw | McpClient::Zero | McpClient::Zcode => Some(&["mcp", "servers"]),
         McpClient::VsCodeCopilot => Some(&["servers"]),
         McpClient::Zed => Some(&["context_servers"]),
-        // Muse Code spells the key snake_case; the camelCase spelling the
-        // clients above use would leave the entry behind.
+        // Muse Code documents snake_case; `strip_mcp_json` also covers the
+        // camelCase map it accepts.
         McpClient::Muse => Some(&["mcp_servers"]),
         McpClient::Codex | McpClient::Grok | McpClient::Pi => None,
     }
@@ -1340,6 +1340,21 @@ fn strip_mcp_json(
     let Some(path) = mcp_servers_path(client) else {
         return Ok((content.to_string(), Vec::new()));
     };
+    let (mut new_content, mut removed) = strip_mcp_json_at(content, path, name, url)?;
+    if matches!(client, McpClient::Muse) {
+        let (next, mut hits) = strip_mcp_json_at(&new_content, &["mcpServers"], name, url)?;
+        new_content = next;
+        removed.append(&mut hits);
+    }
+    Ok((new_content, removed))
+}
+
+fn strip_mcp_json_at(
+    content: &str,
+    path: &[&str],
+    name: Option<&str>,
+    url: &str,
+) -> Result<(String, Vec<String>)> {
     let mut removed = Vec::new();
     let new_content = mutate_json(content, |root| {
         let mut cursor: &mut serde_json::Map<String, serde_json::Value> = root;
@@ -1979,6 +1994,34 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v["mcpServers"].get("ai-memory").is_none());
         assert!(v["mcpServers"].get("other").is_some());
+    }
+
+    #[test]
+    fn strip_mcp_muse_removes_from_either_map() {
+        for key in ["mcp_servers", "mcpServers"] {
+            let content = serde_json::json!({
+                "schema_version": 1,
+                key: {
+                    "ai-memory": {"transport": "streamable_http", "url": "http://127.0.0.1:49374/mcp"},
+                    "other": {"transport": "stdio", "command": "my-mcp-server"},
+                },
+            })
+            .to_string();
+
+            let (out, removed) = strip_mcp_json(
+                &content,
+                McpClient::Muse,
+                Some("ai-memory"),
+                "http://127.0.0.1:49374/mcp",
+            )
+            .unwrap();
+
+            assert_eq!(removed, vec!["ai-memory".to_string()], "{key}");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert!(v[key].get("ai-memory").is_none(), "{key}: {out}");
+            assert!(v[key].get("other").is_some(), "{key}: {out}");
+            assert_eq!(v["schema_version"], 1, "{key}: {out}");
+        }
     }
 
     #[test]

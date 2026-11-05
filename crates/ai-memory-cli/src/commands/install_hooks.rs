@@ -6969,13 +6969,16 @@ fn hook_source_candidates(
 }
 
 fn repo_root_guess() -> Option<PathBuf> {
-    repo_root_from_exe(&current_exe_resolved()?)
+    crate::install_layout::repo_root_guess(
+        current_exe_resolved().as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
 }
 
-/// When the binary lives under target/{debug,release}/<name>, the
-/// workspace root is two parents up.
+/// Probe the executable's ancestors for a real hook source directory.
+#[cfg(test)]
 fn repo_root_from_exe(exe: &Path) -> Option<PathBuf> {
-    Some(exe.parent()?.parent()?.parent()?.to_path_buf())
+    crate::install_layout::repo_root_from_exe(exe)
 }
 
 /// Directory the running binary lives in. The release tarball ships the
@@ -13155,6 +13158,7 @@ model = "gpt-5"
     fn hooks_are_found_through_a_symlinked_binary() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("hooks/claude-code")).unwrap();
         let exe = repo.join("target").join("release").join("ai-memory");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();

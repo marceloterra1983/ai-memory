@@ -960,15 +960,18 @@ fn source_candidates(explicit: Option<&Path>, sub: &str, exe: Option<PathBuf>) -
     )));
     // Native Linux packages install hook sources under /usr/share.
     v.push(PathBuf::from(format!("/usr/share/ai-memory/hooks/{sub}")));
-    if let Some(exe) = exe {
-        // Release tarball: `hooks/` sits in the same dir as the binary.
+    if let Some(exe) = exe.as_ref() {
         if let Some(dir) = exe.parent() {
             v.push(dir.join(crate::install_layout::HOOKS_DIR_NAME).join(sub));
         }
-        // Repo-local fallback for `cargo run setup-agent` during dev:
-        // target/<profile>/<bin> → repo root.
-        if let Some(root) = exe.parent().and_then(Path::parent).and_then(Path::parent) {
-            v.push(root.join(crate::install_layout::HOOKS_DIR_NAME).join(sub));
+    }
+    if let Some(root) = crate::install_layout::repo_root_guess(
+        exe.as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    ) {
+        let candidate = root.join(crate::install_layout::HOOKS_DIR_NAME).join(sub);
+        if !v.contains(&candidate) {
+            v.push(candidate);
         }
     }
     v
@@ -1046,10 +1049,13 @@ mod tests {
     #[test]
     fn source_candidates_preserve_cargo_run_repo_root() {
         // `cargo run`: target/<profile>/<bin> → repo root holds `hooks/`.
-        let exe = PathBuf::from("/home/dev/ai-memory/target/debug/ai-memory");
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("hooks/claude-code")).unwrap();
+        let exe = repo.join("target/debug/ai-memory");
         let candidates = source_candidates(None, "claude-code", Some(exe));
         assert!(
-            candidates.contains(&PathBuf::from("/home/dev/ai-memory/hooks/claude-code")),
+            candidates.contains(&repo.join("hooks/claude-code")),
             "repo-root hooks/ dir must still be probed; got {candidates:?}"
         );
     }

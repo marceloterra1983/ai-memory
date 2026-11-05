@@ -574,6 +574,105 @@ impl GitAdapter {
 
     /// Called with the commit lock already held by
     /// [`commit_all_with_fallback`]; `slot` is that lock's payload.
+    /// Checkpoint only the already-validated bounded dream sources. Building
+    /// from HEAD in an independent index excludes foreign staged or dirty
+    /// files, and never takes the ordinary commit's full-walk fallback.
+    pub(crate) fn commit_dream_sources(
+        &self,
+        sources: &[(PathBuf, Vec<u8>)],
+    ) -> WikiResult<Option<git2::Oid>> {
+        if sources.is_empty() || sources.len() > 2 {
+            return Err(WikiError::Io(std::io::Error::other(
+                "dream checkpoint source shape invalid",
+            )));
+        }
+        crate::confinement::inspect_git_directory(&self.root)?;
+        let mut slot = self.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(Open {
+                repo: open_validated_repository(&self.root).map_err(|error| match error {
+                    OpenRepositoryError::Git(error) => map_git_err(error),
+                    OpenRepositoryError::Wiki(error) => error,
+                })?,
+                head: None,
+            });
+        }
+        let open = slot.as_mut().ok_or_else(|| {
+            WikiError::Io(std::io::Error::other(
+                "dream checkpoint repository unavailable",
+            ))
+        })?;
+        let repo = &open.repo;
+        let parent = repo
+            .head()
+            .ok()
+            .and_then(|h| h.target())
+            .map(|id| repo.find_commit(id))
+            .transpose()
+            .map_err(map_git_err)?;
+        let mut selected = git2::Index::new().map_err(map_git_err)?;
+        if let Some(parent) = &parent {
+            selected
+                .read_tree(&parent.tree().map_err(map_git_err)?)
+                .map_err(map_git_err)?;
+        }
+        let mut entries = Vec::with_capacity(sources.len());
+        for (path, bytes) in sources {
+            if path.is_absolute() || bytes.len() > ai_memory_store::DREAM_SOURCE_MAX_BYTES {
+                return Err(WikiError::Io(std::io::Error::other(
+                    "dream checkpoint source outside bounds",
+                )));
+            }
+            let path = path.to_str().ok_or_else(|| {
+                WikiError::Io(std::io::Error::other("dream checkpoint path invalid"))
+            })?;
+            let path = slash_path(Path::new(path));
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: bytes.len() as u32,
+                id: repo.blob(bytes).map_err(map_git_err)?,
+                flags: 0,
+                flags_extended: 0,
+                path: path.as_bytes().to_vec(),
+            };
+            selected.add(&entry).map_err(map_git_err)?;
+            entries.push(entry);
+        }
+        let tree_id = selected.write_tree_to(repo).map_err(map_git_err)?;
+        if parent.as_ref().is_some_and(|p| p.tree_id() == tree_id) {
+            return Ok(None);
+        }
+        let tree = repo.find_tree(tree_id).map_err(map_git_err)?;
+        let sig = Signature::now(COMMIT_AUTHOR_NAME, COMMIT_AUTHOR_EMAIL).map_err(map_git_err)?;
+        let parents: Vec<_> = parent.iter().collect();
+        let oid = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "dream: pre-merge source checkpoint",
+                &tree,
+                &parents,
+            )
+            .map_err(map_git_err)?;
+        // Keep the ordinary index consistent for these sources while retaining
+        // unrelated staged entries as uncommitted work.
+        let mut ordinary = repo.index().map_err(map_git_err)?;
+        ordinary.read(true).map_err(map_git_err)?;
+        for entry in entries {
+            ordinary.add(&entry).map_err(map_git_err)?;
+        }
+        ordinary.write().map_err(map_git_err)?;
+        open.head = Some(oid);
+        Ok(Some(oid))
+    }
+
     fn commit_all_git2(
         &self,
         slot: &mut Option<Open>,
@@ -1681,6 +1780,28 @@ mod tests {
             Err(WikiError::Confinement { .. })
         ));
         assert!(!called.load(Ordering::Relaxed));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dream_checkpoint_refuses_replaced_git_directory_with_local_control() {
+        let root = tempdir();
+        let foreign = tempdir();
+        let adapter = GitAdapter::open_or_init(root.path()).unwrap();
+        let _foreign = GitAdapter::open_or_init(foreign.path()).unwrap();
+        std::fs::rename(root.path().join(".git"), root.path().join(".git-held")).unwrap();
+        std::os::unix::fs::symlink(foreign.path().join(".git"), root.path().join(".git")).unwrap();
+        let source = vec![(
+            PathBuf::from("scope/project/source.md"),
+            b"synthetic source".to_vec(),
+        )];
+        assert!(
+            adapter.commit_dream_sources(&source).is_err(),
+            "dream must retain tag repository confinement"
+        );
+        std::fs::remove_file(root.path().join(".git")).unwrap();
+        std::fs::rename(root.path().join(".git-held"), root.path().join(".git")).unwrap();
+        assert!(adapter.commit_dream_sources(&source).unwrap().is_some());
     }
 
     #[test]

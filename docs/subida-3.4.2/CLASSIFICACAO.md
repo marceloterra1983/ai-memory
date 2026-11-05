@@ -637,12 +637,12 @@ As três dúvidas de ranking foram medidas: título procedural afogado, força r
 | Commit local | Classe | Commit novo ou motivo |
 |---|---|---|
 | `c4ea6bb3` | portar | `b8409e4a` |
-| `bd524699` | portar | Adiado expressamente para fase B: dream local. |
-| `585ab238` | portar | Adiado expressamente para fase B: dream local. |
-| `60593c0b` | portar | Adiado expressamente para fase B: dream local. |
-| `36cba6dc` | portar | Adiado expressamente para fase B: dream local. |
-| `3a4a8d79` | portar | Adiado expressamente para fase B: curadoria local. |
-| `5cc3d4eb` | portar | Adiado expressamente para fase B: curadoria local. |
+| `bd524699` | portar | `3e87cac2`, `992a3337`, `9c9602a7`, `3fda82ca`, `660fce42`: clientes locais, leitores limitados, snapshots/CAS e operação manual na arquitetura da tag. |
+| `585ab238` | portar | `660fce42`: CLI/admin manual reutilizam autorização bootstrap/multiusuário da tag; nenhum gate root redundante. |
+| `60593c0b` | portar | `3fda82ca`: gate semântico local com prova literal e negativa; perda de keep-token é recusa. |
+| `36cba6dc` | portar | `992a3337`, `3fda82ca`: expiração idêntica (inclusive ausência) antes de inferência e no CAS, sem prorrogar TTL. |
+| `3a4a8d79` | portar | `f8509fa0`, `87cc3103`, `96eca2e2`: relações exatas, curadoria condicional, metadados e reconciliação de sessões/diagnósticos. |
+| `5cc3d4eb` | portar | `f8509fa0`, `96eca2e2`: sentinelas exatas sem apagar alvo legítimo, preservando declarações brutas e corpo sob head/hash. |
 | `d6db29ad` | portar | `09c36478` |
 | `4cfbdf60` | portar | `36e17769` |
 | `80dd19cd` | portar | Excluído expressamente desta fase: somente macOS. |
@@ -759,3 +759,6 @@ fechamento da fase A. O relato final nativo permanece a autoridade do veredito.
 | `bd524699`, `36cba6dc` — store dream | `row_to_decay_candidate`, `upsert_page_in_tx` e ator único da tag | Novos leitores limitados recusam cap+1 e dimensões inválidas, sem sampling; CAS transacional exige coordenadas de todas as fontes, head, hash do corpo e digest de elegibilidade. TTL precisa permanecer idêntico, inclusive ausência, e não pode expirar até apply. Cancelamento antes de commit faz rollback de todas as versões. Testes `dream_cas` (10 casos) com controles de identidade e hash independentes. |
 | `bd524699` — snapshots/CAS | Clustering, cold scoring, `apply_batch_inner`, `PagePrecondition`, fase A OS locks, rollback e supersessão | Leitores limitados de heads/vetores, hash completo de arquivo/corpo, digest de elegibilidade e CAS de todas as fontes com TTL idêntico foram acrescentados ao funil existente. Snapshot não cria manifests. Checkpoint só das fontes conserva também confinamento de `.git` da tag, ausente no helper antigo do fork. |
 | `60593c0b`, `36cba6dc` — semântica/preservação/TTL | B4 e `LlmOperationId(Dream)` da tag; limpeza de summary/abstract nos stubs | Jev local decide relação temática; suporte é provado por duas cópias completas exatas e título literal. Warning de keep-token e delink do draft viraram recusa, preservando negação, exceção, conflito, números e bindings. `dropped_keep_tokens` legado permanece vazio. Expirações comparam instantes, inclusive ausência, antes de inferência e na transação. |
+| `bd524699` — atividade/deadline | Clock do tool router e cadência nativa da tag | Clock ganhou reservas/generation para hooks pós-202, tools, embeddings e jobs relevantes; scheduler e manual usam o mesmo runtime serializado e prazo global. Espera de OS locks usa try-lock assíncrono: a revisão reproduziu um worker bloqueante retendo lock após cancelamento; teste vermelho/verde prova a liberação mantendo o segundo lock preso. Shutdown/desconexão drenam apply/rollback antes de fechar o store. |
+| `bd524699`, `585ab238` — manual/allowlist/config | Scheduler da tag e política admin operacional foram mantidos | Foram acrescentados CLI/endpoint manual, allowlist exata compartilhada, config estrita e modelos dedicados. Manual força apenas o seu pass, sem ligar agendamento. `dream.scopes` não vazio continua selecionando embedding `local_only` com `enabled=false`; regressão da fase A e forma de produção estão cobertas. |
+| `3a4a8d79`, `5cc3d4eb` — orçamento de prompt | Piso de entrada, reserva de observações e oracle independente de projeção da tag | `65404ff0`: orientação de relações exatas foi compactada para não consumir o piso existente. O oracle recebe apenas a nova redação estática, mantendo projeção e seleção congeladas; regressões de reserva e equivalência byte a byte foram preservadas. |

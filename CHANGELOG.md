@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Restored exact typed relation parsing, preserving raw declarations for curation and legitimate sentinel-named `.md` pages (`3a4a8d79`, `5cc3d4eb`).
+
 - Restored complete page readback when `max_chars` is omitted, preserving explicit caps and byte equality for the local reliable-mcp relay (`143ad28a`).
 
 - Aligned integration fixtures with selective handoffs, disabled TS drains and repaired model paths; fixed the embedded dream scope example and translated new archive destination errors.

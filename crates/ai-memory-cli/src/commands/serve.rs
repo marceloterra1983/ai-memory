@@ -1491,7 +1491,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
         llm_providers.clone(),
         config.decay,
         config.sessions,
-        config.dream,
+        config.dream.clone(),
         activity_clock,
         config.contradiction_band_min,
         config.contradiction_band_max,

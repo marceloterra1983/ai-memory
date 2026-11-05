@@ -499,6 +499,7 @@ impl Embedder for OpenAiEmbedder {
 pub struct OpenAiCompatEmbedder {
     client: reqwest::Client,
     document_timeout: Duration,
+    local_only: bool,
     api_key: Option<SecretString>,
     base_url: String,
     query_base_url: Option<String>,
@@ -542,6 +543,7 @@ impl OpenAiCompatEmbedder {
         Ok(Self {
             client,
             document_timeout: Duration::from_secs(DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS),
+            local_only: false,
             api_key,
             base_url: base_url.into(),
             query_base_url: None,
@@ -550,6 +552,150 @@ impl OpenAiCompatEmbedder {
             query_prefix: String::new(),
             document_prefix: String::new(),
         })
+    }
+
+    /// Build the credential-free local transport used for integral documents.
+    /// Each UTF-8 chunk fits the 8192-byte JSON budget; source bytes determine
+    /// pooling weights. Queries stay single requests on their own endpoint.
+    ///
+    /// # Errors
+    /// Refuses nonliteral loopback HTTP endpoints, invalid models or zero dim.
+    pub fn new_local(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        dim: u32,
+    ) -> LlmResult<Self> {
+        let base_url = base_url.into();
+        validate_local_embedding_endpoint(&base_url)?;
+        let model = model.into();
+        if model.trim().is_empty() || model.len() > 200 || dim == 0 {
+            return Err(LlmError::NotConfigured(
+                "local embedding model/dim is invalid".into(),
+            ));
+        }
+        let mut embedder = Self::new(base_url, None, model, dim)?;
+        embedder.client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(120))
+            .build()?;
+        embedder.local_only = true;
+        Ok(embedder)
+    }
+
+    async fn local_embed(
+        &self,
+        base_url: &str,
+        text: &str,
+        timeout: Duration,
+    ) -> LlmResult<Vec<f32>> {
+        validate_local_embedding_endpoint(base_url)?;
+        let wire = serde_json::to_vec(&serde_json::json!({"model":self.model,"input":text}))
+            .map_err(|_| LlmError::Schema("local embedding serialization failed".into()))?;
+        if wire.len() > 8192 {
+            return Err(LlmError::Schema(
+                "local embedding request exceeds 8192 bytes".into(),
+            ));
+        }
+        let response = self
+            .client
+            .post(normalize_openai_base(base_url, "embeddings"))
+            .timeout(timeout)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(wire)
+            .send()
+            .await
+            .map_err(|_| {
+                LlmError::UnexpectedShape("local embedding request failed or timed out".into())
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(LlmError::Provider {
+                status: status.as_u16(),
+                body: "local embedding request refused".into(),
+                retry_after: None,
+            });
+        }
+        let bytes = crate::response::response_bytes_limited(response, 128 * 1024)
+            .await
+            .map_err(|_| {
+                LlmError::UnexpectedShape(
+                    "local embedding response failed or exceeded byte limit".into(),
+                )
+            })?;
+        let response: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| LlmError::UnexpectedShape("invalid local embedding JSON".into()))?;
+        let values = response
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .filter(|data| data.len() == 1)
+            .and_then(|data| data[0].get("embedding"))
+            .and_then(serde_json::Value::as_array)
+            .filter(|values| values.len() == self.dim as usize)
+            .ok_or_else(|| {
+                LlmError::UnexpectedShape("local embedding dimension/result mismatch".into())
+            })?;
+        let vector: Option<Vec<f32>> = values
+            .iter()
+            .map(|value| {
+                value
+                    .as_f64()
+                    .map(|value| value as f32)
+                    .filter(|value| value.is_finite())
+            })
+            .collect();
+        let vector = vector
+            .ok_or_else(|| LlmError::UnexpectedShape("nonfinite local embedding value".into()))?;
+        let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= 0.0 {
+            return Err(LlmError::UnexpectedShape(
+                "degenerate local embedding vector".into(),
+            ));
+        }
+        Ok(normalise(vector))
+    }
+
+    async fn local_embed_document(&self, prefix: &str, text: &str) -> LlmResult<Vec<f32>> {
+        let overhead = serde_json::to_vec(&serde_json::json!({"model":self.model,"input":prefix}))
+            .map_err(|_| LlmError::Schema("local embedding serialization failed".into()))?
+            .len();
+        let budget = 8192usize
+            .checked_sub(overhead)
+            .ok_or_else(|| LlmError::Schema("local embedding prefix exceeds wire budget".into()))?;
+        if text.is_empty() {
+            return self
+                .local_embed(&self.base_url, prefix, self.document_timeout)
+                .await;
+        }
+        let mut remaining = text;
+        let mut pool = vec![0.0_f64; self.dim as usize];
+        while !remaining.is_empty() {
+            let end = local_embedding_chunk_end(remaining, budget)?;
+            let input = prepend_prefix(prefix, &remaining[..end]);
+            let vector = self
+                .local_embed(&self.base_url, &input, self.document_timeout)
+                .await?;
+            if end == text.len() {
+                return Ok(vector);
+            }
+            let weight = end as f64 / text.len() as f64;
+            for (pooled, value) in pool.iter_mut().zip(vector) {
+                *pooled += weight * f64::from(value);
+            }
+            remaining = &remaining[end..];
+        }
+        let norm = pool.iter().map(|value| value * value).sum::<f64>().sqrt();
+        if !norm.is_finite() || norm <= 0.0 {
+            return Err(LlmError::UnexpectedShape(
+                "degenerate local embedding pool".into(),
+            ));
+        }
+        Ok(pool
+            .into_iter()
+            .map(|value| (value / norm) as f32)
+            .collect())
     }
 
     /// Set the document request deadline; queries keep their 120-second budget.
@@ -610,6 +756,9 @@ impl Embedder for OpenAiCompatEmbedder {
     }
 
     async fn embed(&self, text: &str) -> LlmResult<Vec<f32>> {
+        if self.local_only {
+            return self.local_embed_document("", text).await;
+        }
         openai_style_embed(
             &self.client,
             &self.base_url,
@@ -623,6 +772,9 @@ impl Embedder for OpenAiCompatEmbedder {
     }
 
     async fn embed_document(&self, text: &str) -> LlmResult<Vec<f32>> {
+        if self.local_only {
+            return self.local_embed_document(&self.document_prefix, text).await;
+        }
         let prefixed = prepend_prefix(&self.document_prefix, text);
         openai_style_embed(
             &self.client,
@@ -638,6 +790,15 @@ impl Embedder for OpenAiCompatEmbedder {
 
     async fn embed_query(&self, text: &str) -> LlmResult<Vec<f32>> {
         let prefixed = prepend_prefix(&self.query_prefix, text);
+        if self.local_only {
+            return self
+                .local_embed(
+                    self.query_base_url.as_deref().unwrap_or(&self.base_url),
+                    &prefixed,
+                    Duration::from_secs(120),
+                )
+                .await;
+        }
         openai_style_embed(
             &self.client,
             self.query_base_url.as_deref().unwrap_or(&self.base_url),
@@ -649,6 +810,53 @@ impl Embedder for OpenAiCompatEmbedder {
         )
         .await
     }
+}
+
+pub(crate) fn validate_local_embedding_endpoint(endpoint: &str) -> LlmResult<()> {
+    let refused = || {
+        LlmError::NotConfigured("local embedding requires literal loopback HTTP with an explicit port and no credentials; port 8789 is excluded".into())
+    };
+    let url = reqwest::Url::parse(endpoint).map_err(|_| refused())?;
+    let authority = endpoint
+        .strip_prefix("http://")
+        .and_then(|url| url.split('/').next())
+        .unwrap_or_default();
+    if url.scheme() != "http"
+        || !(authority.starts_with("127.0.0.1:") || authority.starts_with("[::1]:"))
+        || !url
+            .host_str()
+            .is_some_and(|host| host == "127.0.0.1" || host == "[::1]")
+        || url.port().is_none_or(|port| port == 0 || port == 8789)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+fn local_embedding_chunk_end(text: &str, budget: usize) -> LlmResult<usize> {
+    let mut used = 0;
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        let bytes = serde_json::to_vec(&character)
+            .map_err(|_| LlmError::Schema("local embedding serialization failed".into()))?
+            .len()
+            - 2;
+        if bytes > budget - used {
+            break;
+        }
+        used += bytes;
+        end = index + character.len_utf8();
+    }
+    if end == 0 {
+        return Err(LlmError::Schema(
+            "local embedding prefix leaves no room for a source character".into(),
+        ));
+    }
+    Ok(end)
 }
 
 /// Voyage Embeddings API.

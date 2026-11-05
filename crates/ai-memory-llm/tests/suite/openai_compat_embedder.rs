@@ -107,6 +107,7 @@ async fn factory_built_compat_embedder_sends_no_request_id_header() {
         base_url: Some(format!("{}/v1", server.uri())),
         query_base_url: None,
         document_timeout_secs: 120,
+        local_only: false,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -128,6 +129,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         base_url: Some("http://localhost:11434/v1".into()),
         query_base_url: None,
         document_timeout_secs: 120,
+        local_only: false,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -146,6 +148,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         base_url: None,
         query_base_url: None,
         document_timeout_secs: 120,
+        local_only: false,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -168,6 +171,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         base_url: Some("http://localhost:11434/v1".into()),
         query_base_url: None,
         document_timeout_secs: 120,
+        local_only: false,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -318,6 +322,7 @@ async fn factory_wires_configured_prefixes_into_the_compat_embedder() {
         base_url: Some(format!("{}/v1", server.uri())),
         query_base_url: None,
         document_timeout_secs: 120,
+        local_only: false,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -396,4 +401,75 @@ async fn compat_document_timeout_covers_response_body_but_queries_keep_their_bud
     assert!(embedder.embed_document("document").await.is_err());
     assert!(embedder.embed_query("query").await.is_ok());
     server.join().unwrap();
+}
+
+#[tokio::test]
+async fn local_documents_cover_all_utf8_source_and_pool_by_source_bytes() {
+    use std::sync::{Arc, Mutex};
+    let documents = MockServer::start().await;
+    let queries = MockServer::start().await;
+    let chunks = Arc::new(Mutex::new(Vec::<String>::new()));
+    let recorded = chunks.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(move |request: &Request| {
+            assert!(request.body.len() <= 8192);
+            assert!(request.headers.get("authorization").is_none());
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let source = body["input"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("passage: ")
+                .unwrap();
+            recorded.lock().unwrap().push(source.to_string());
+            let vector = if source.ends_with("TAIL") {
+                [0.0, 1.0]
+            } else {
+                [1.0, 0.0]
+            };
+            ResponseTemplate::new(200).set_body_json(json!({"data":[{"embedding":vector}]}))
+        })
+        .mount(&documents)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":[{"embedding":[1.0,0.0]}]})),
+        )
+        .expect(1)
+        .mount(&queries)
+        .await;
+    let text = "界\"\\\n".repeat(3000) + "TAIL";
+    let embedder = OpenAiCompatEmbedder::new_local(documents.uri() + "/v1", "fixture", 2)
+        .unwrap()
+        .with_prefixes("query: ", "passage: ")
+        .with_query_base_url(queries.uri() + "/v1");
+    let identity = embedder.model_identity();
+    let vector = embedder.embed_document(&text).await.unwrap();
+    embedder.embed_query("where is TAIL?").await.unwrap();
+    assert_eq!(embedder.model_identity(), identity);
+    let chunks = chunks.lock().unwrap();
+    assert!(chunks.len() > 1);
+    assert_eq!(chunks.concat(), text);
+    let tail_bytes = chunks.last().unwrap().len() as f32;
+    let head_bytes = (text.len() - chunks.last().unwrap().len()) as f32;
+    let norm = (tail_bytes * tail_bytes + head_bytes * head_bytes).sqrt();
+    assert!((vector[0] - head_bytes / norm).abs() < 1e-5);
+    assert!((vector[1] - tail_bytes / norm).abs() < 1e-5);
+}
+
+#[test]
+fn restricted_local_embedding_refuses_nonliteral_or_credentialed_endpoints() {
+    for endpoint in [
+        "http://localhost:59100/v1",
+        "https://127.0.0.1:59100/v1",
+        "http://127.1:59100/v1",
+        "http://user:secret@127.0.0.1:59100/v1",
+        "http://192.0.2.1:59100/v1",
+        "http://127.0.0.1:8789/v1",
+        "http://127.0.0.1:59100/v1?token=secret",
+    ] {
+        assert!(OpenAiCompatEmbedder::new_local(endpoint, "fixture", 2).is_err());
+    }
+    assert!(OpenAiCompatEmbedder::new_local("http://127.0.0.1:59100/v1", "fixture", 2).is_ok());
 }

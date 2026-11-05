@@ -731,6 +731,10 @@ mid_session = "follow-cwd"
 # built-in default named in the comment. Env equivalents:
 # `AI_MEMORY_DREAM__ENABLED=true` and `AI_MEMORY_DREAM__IDLE_WINDOW_SECS=600`.
 # [dream]
+# Local scope markers select restricted full-document compat embedding even
+# when enabled=false. Local dream execution remains a separate port.
+scopes = []
+# scopes = [{ workspace = "workspace", project = "project" }]
 # enabled = false
 # interval_secs = 3600         # how often the scheduler considers a run; 0 uses 3600
 # idle_window_secs = 0         # quiet seconds before a run starts; 0 uses 300

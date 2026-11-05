@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Preserved full-document local compat embeddings with UTF-8 chunks and source-byte pooling whenever `dream.scopes` is nonempty, including with dream disabled (`f3f00446`).
+
 - Restored the configurable compat document deadline, including response-body consumption; queries keep their separate budget (`29549016`).
 
 - Scrubbed complete assistant and native transcript text before byte caps could split secret delimiters (`eebdd33c`, `d6a28c77`).

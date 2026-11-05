@@ -219,6 +219,8 @@ pub struct EmbedderConfig {
     pub query_base_url: Option<String>,
     /// Document-only HTTP deadline in seconds, validated in the constructor.
     pub document_timeout_secs: u64,
+    /// Restricted local-only compat client, selected by nonempty dream scope markers.
+    pub local_only: bool,
     /// `<data_dir>/models/` root, required by the `local` provider.
     pub models_dir: Option<std::path::PathBuf>,
     /// Resolved Copilot auth, required by the `copilot` provider. `None`
@@ -271,6 +273,20 @@ pub fn build_embedder(config: EmbedderConfig) -> LlmResult<Arc<dyn Embedder>> {
         ));
     }
     crate::embedding::embedding_document_timeout(config.document_timeout_secs)?;
+    if config.local_only {
+        if config.provider != EmbedderChoice::OpenAiCompat {
+            return Err(LlmError::NotConfigured(
+                "local_only is restricted to openai-compat".into(),
+            ));
+        }
+        if let Some(url) = config
+            .query_base_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+        {
+            crate::embedding::validate_local_embedding_endpoint(url)?;
+        }
+    }
     let arc: Arc<dyn Embedder> = match config.provider {
         EmbedderChoice::OpenAi => {
             let mut e = OpenAiEmbedder::new(config.api_key, config.model, config.dim)?
@@ -299,8 +315,13 @@ pub fn build_embedder(config: EmbedderConfig) -> LlmResult<Arc<dyn Embedder>> {
                 .base_url
                 .ok_or_else(|| LlmError::NotConfigured("AI_MEMORY_EMBEDDING_BASE_URL".into()))?;
             let api_key = (!config.api_key.expose_secret().is_empty()).then_some(config.api_key);
-            Arc::new(
+            let embedder = if config.local_only {
+                OpenAiCompatEmbedder::new_local(base, config.model, config.dim)?
+            } else {
                 OpenAiCompatEmbedder::new(base, api_key, config.model, config.dim)?
+            };
+            Arc::new(
+                embedder
                     .with_document_timeout_secs(config.document_timeout_secs)?
                     .with_prefixes(config.query_prefix, config.document_prefix)
                     .with_query_base_url(config.query_base_url.unwrap_or_default()),

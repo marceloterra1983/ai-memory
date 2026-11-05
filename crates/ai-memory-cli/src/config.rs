@@ -2013,6 +2013,16 @@ pub struct SessionsSettings {
     pub idle_end_after_hours: u32,
 }
 
+/// Existing local scope marker. Phase A reads the marker to select restricted
+/// full-document embedding; the local dream scheduler is ported separately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamScope {
+    /// Workspace name from the local configuration.
+    pub workspace: String,
+    /// Project name from the local configuration.
+    pub project: String,
+}
+
 /// `[dream]` — the opt-in LLM dream pass (docs/design-memory-aging.md §B2–B4).
 ///
 /// OFF by default (`enabled = false`): the scheduled job is not started, and even
@@ -2022,9 +2032,12 @@ pub struct SessionsSettings {
 ///
 /// Env form: `AI_MEMORY_DREAM__ENABLED=true`,
 /// `AI_MEMORY_DREAM__IDLE_WINDOW_SECS=600`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DreamSettings {
+    /// Local scope markers; a nonempty list selects restricted full-document
+    /// compat embedding even while `enabled` is false.
+    pub scopes: Vec<DreamScope>,
     /// Master switch. `false` (the default) means the job never starts.
     pub enabled: bool,
     /// How often the scheduler CONSIDERS a run (seconds). It still only runs when
@@ -2051,6 +2064,7 @@ pub struct DreamSettings {
 impl Default for DreamSettings {
     fn default() -> Self {
         Self {
+            scopes: Vec::new(),
             enabled: false,
             // A conservative default cadence: the job wakes hourly to check
             // whether the box has been idle long enough to run.
@@ -2067,7 +2081,7 @@ impl Default for DreamSettings {
 impl DreamSettings {
     /// The effective scheduler interval in seconds (never zero).
     #[must_use]
-    pub fn effective_interval_secs(self) -> u64 {
+    pub fn effective_interval_secs(&self) -> u64 {
         if self.interval_secs == 0 {
             3_600
         } else {
@@ -2082,7 +2096,7 @@ impl DreamSettings {
     /// clean no-op even with the flag on (there are no stored vectors).
     #[must_use]
     pub fn dream_config(
-        self,
+        &self,
         embedding: Option<ai_memory_consolidate::EmbeddingCoord>,
     ) -> ai_memory_consolidate::DreamConfig {
         ai_memory_consolidate::DreamConfig {
@@ -2797,6 +2811,10 @@ impl Config {
                 config.llm_timeout_secs
             );
         }
+        ai_memory_llm::embedding::embedding_document_timeout(
+            config.embedding_document_timeout_secs,
+        )?;
+
         // Zero would admit no bootstrap run at all: every request would
         // wait forever for a slot.
         if config.bootstrap_max_concurrent == 0 {
@@ -3361,6 +3379,7 @@ impl Config {
             base_url,
             query_base_url: non_empty(self.embedding_query_base_url.as_deref()).map(str::to_string),
             document_timeout_secs: self.embedding_document_timeout_secs,
+            local_only: provider == EmbedderChoice::OpenAiCompat && !self.dream.scopes.is_empty(),
             models_dir: Some(self.data_dir.join("models")),
             copilot_auth,
             defaulted,
@@ -6596,6 +6615,65 @@ input_token_safety_margin = {margin}
         let embedder = set.embedder_config().unwrap().unwrap();
         assert_eq!(embedder.query_prefix, "query: ");
         assert_eq!(embedder.document_prefix, "passage: ");
+    }
+
+    #[test]
+    fn local_embedding_configuration_reads_query_endpoint_timeout_and_disabled_dream_scope() {
+        const CHILD: &str = "AI_MEMORY_TEST_LOCAL_EMBEDDING_CONFIG_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = PathBuf::from(root);
+            let config =
+                Config::load(Some(&root.join("config.toml")), Some(root.join("data"))).unwrap();
+            assert!(!config.dream.enabled);
+            assert_eq!(config.dream.scopes.len(), 1);
+            assert_eq!(config.dream.scopes[0].workspace, "synthetic");
+            assert_eq!(config.dream.scopes[0].project, "fixture");
+            let embedder = config.embedder_config().unwrap().unwrap();
+            assert_eq!(
+                embedder.base_url.as_deref(),
+                Some("http://127.0.0.1:59102/v1")
+            );
+            assert_eq!(
+                embedder.query_base_url.as_deref(),
+                Some("http://127.0.0.1:59103/v1")
+            );
+            assert_eq!(embedder.document_timeout_secs, 1800);
+            assert!(embedder.local_only);
+            return;
+        }
+        let root = TempDir::new().unwrap();
+        std::fs::write(
+            root.path().join("config.toml"),
+            r#"
+embedding_provider = "openai-compat"
+embedding_model = "fixture"
+embedding_dim = 1024
+embedding_base_url = "http://127.0.0.1:59101/v1"
+embedding_query_base_url = "http://127.0.0.1:59103/v1"
+[dream]
+enabled = false
+scopes = [{ workspace = "synthetic", project = "fixture" }]
+"#,
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "config::tests::local_embedding_configuration_reads_query_endpoint_timeout_and_disabled_dream_scope", "--nocapture"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root.path())
+            .env("AI_MEMORY_HOME", root.path())
+            .env("AI_MEMORY_DATA_DIR", root.path().join("data"))
+            .env("AI_MEMORY_BACKUP_DIR", root.path().join("pre"))
+            .env("AI_MEMORY_EMBEDDING_BASE_URL", "http://127.0.0.1:59102/v1")
+            .env("AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS", "1800")
+            .env(CHILD, root.path())
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// Pure unit tests for `overlay_embedding_prefixes`: no process env or

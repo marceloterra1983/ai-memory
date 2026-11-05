@@ -3562,20 +3562,39 @@ mod tests {
         std::fs::write(&script, format!(
             "let calls = 0; let spoolDrainPromise: Promise<void> | undefined;\nasync function drainHookSpool() {{ calls++; }}\n{}\nrequestSpoolDrain(); await Promise.resolve(); if(calls !== 0) throw new Error('receipt-free drain consumed worker envelopes');\n", &source[start..end]
         )).unwrap();
-        let output = std::process::Command::new("node").arg("--experimental-strip-types").arg(script).output().expect("Node is needed for the delivery contract proof");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("node")
+            .arg("--experimental-strip-types")
+            .arg(script)
+            .output()
+            .expect("Node is needed for the delivery contract proof");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
     #[ignore = "requires Node; phase-A generated integration gate runs it explicitly"]
     fn generated_tool_labels_match_the_closed_rust_grammar() {
         let source = ts_capture_policy_v1("open");
-        let helper = source.lines().find(|line| line.starts_with("function captureToolLabel(")).unwrap();
+        let helper = source
+            .lines()
+            .find(|line| line.starts_with("function captureToolLabel("))
+            .unwrap();
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("label.ts");
         std::fs::write(&script, format!("{helper}\nif(captureToolLabel('Write') !== 'Write' || captureToolLabel('Serena.get_symbol_def') !== 'Serena.get_symbol_def') throw new Error('valid label lost'); for (const value of ['Write\\n', 'x'.repeat(81), '', 'x y', null]) if(captureToolLabel(value) !== undefined) throw new Error('invalid label kept');\n")).unwrap();
-        let output = std::process::Command::new("node").arg("--experimental-strip-types").arg(script).output().expect("Node is needed for the adapter contract proof");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("node")
+            .arg("--experimental-strip-types")
+            .arg(script)
+            .output()
+            .expect("Node is needed for the adapter contract proof");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

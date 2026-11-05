@@ -2603,7 +2603,9 @@ impl Wiki {
             self.ensure_project_workspace(workspace_id, project_id)
                 .await?;
             let abs = self.confined_page_path(workspace_id, project_id, &path, Prepare::Parents)?;
-            let _files = self.lock_page_files(&[(workspace_id, project_id, path.clone())]).await?;
+            let _files = self
+                .lock_page_files(&[(workspace_id, project_id, path.clone())])
+                .await?;
             let installed =
                 replace_file_with_rollback_snapshot(&self.git, &abs, emitted.as_bytes())?;
             match self
@@ -3327,11 +3329,20 @@ impl Wiki {
             let _page_guards = self.lock_pages(&batch_keys).await;
             let _file_locks = self.lock_page_files(&batch_keys).await?;
             if let Some(preconditions) = &preconditions {
-                for (index, ((req, _, _, _), precondition)) in staged.iter().zip(preconditions).enumerate() {
-                    let stored = self.latest_page_head(req.workspace_id, req.project_id, &req.path).await?;
+                for (index, ((req, _, _, _), precondition)) in
+                    staged.iter().zip(preconditions).enumerate()
+                {
+                    let stored = self
+                        .latest_page_head(req.workspace_id, req.project_id, &req.path)
+                        .await?;
                     let current = stored.as_ref().map(|row| row.id);
                     if !precondition_holds(*precondition, current)
-                        || !source_matches_precondition(*precondition, self.read_page(req.workspace_id, req.project_id, &req.path), stored.as_ref())? {
+                        || !source_matches_precondition(
+                            *precondition,
+                            self.read_page(req.workspace_id, req.project_id, &req.path),
+                            stored.as_ref(),
+                        )?
+                    {
                         return Ok(ConditionalBatchWrite::Mismatch { index, current });
                     }
                 }
@@ -3514,10 +3525,20 @@ impl Wiki {
         guards
     }
 
-    async fn latest_page_head(&self, workspace: WorkspaceId, project: ProjectId, path: &PagePath) -> WikiResult<Option<ai_memory_store::StoredPageBody>> {
+    async fn latest_page_head(
+        &self,
+        workspace: WorkspaceId,
+        project: ProjectId,
+        path: &PagePath,
+    ) -> WikiResult<Option<ai_memory_store::StoredPageBody>> {
         match &self.store_reader {
-            Some(reader) => Ok(reader.page_body_by_ids(workspace, project, path.as_str()).await?),
-            None => Ok(self.writer.latest_page_head(workspace, project, path.as_str()).await?),
+            Some(reader) => Ok(reader
+                .page_body_by_ids(workspace, project, path.as_str())
+                .await?),
+            None => Ok(self
+                .writer
+                .latest_page_head(workspace, project, path.as_str())
+                .await?),
         }
     }
 
@@ -3525,11 +3546,21 @@ impl Wiki {
     /// acquisition keeps batch writes deadlock-free across independent handles.
     async fn lock_page_files(&self, keys: &[PageKey]) -> WikiResult<Vec<std::fs::File>> {
         use sha2::{Digest as _, Sha256};
-        let mut paths: Vec<PathBuf> = keys.iter().map(|(ws, proj, path)| {
-            let digest = Sha256::new().chain_update(ws.as_bytes()).chain_update([0])
-                .chain_update(proj.as_bytes()).chain_update([0]).chain_update(path.as_str().as_bytes()).finalize();
-            self.data_dir().join("page-locks").join(format!("{digest:x}"))
-        }).collect();
+        let mut paths: Vec<PathBuf> = keys
+            .iter()
+            .map(|(ws, proj, path)| {
+                let digest = Sha256::new()
+                    .chain_update(ws.as_bytes())
+                    .chain_update([0])
+                    .chain_update(proj.as_bytes())
+                    .chain_update([0])
+                    .chain_update(path.as_str().as_bytes())
+                    .finalize();
+                self.data_dir()
+                    .join("page-locks")
+                    .join(format!("{digest:x}"))
+            })
+            .collect();
         paths.sort();
         paths.dedup();
         tokio::task::spawn_blocking(move || {
@@ -3775,10 +3806,17 @@ impl Wiki {
             self.ensure_project_workspace(workspace_id, project_id)
                 .await?;
             if let Some(precondition) = precondition {
-                let stored = self.latest_page_head(workspace_id, project_id, &path).await?;
+                let stored = self
+                    .latest_page_head(workspace_id, project_id, &path)
+                    .await?;
                 let current = stored.as_ref().map(|row| row.id);
                 if !precondition_holds(precondition, current)
-                    || !source_matches_precondition(precondition, self.read_page(workspace_id, project_id, &path), stored.as_ref())? {
+                    || !source_matches_precondition(
+                        precondition,
+                        self.read_page(workspace_id, project_id, &path),
+                        stored.as_ref(),
+                    )?
+                {
                     return Ok(ConditionalWrite::Mismatch { current });
                 }
             }

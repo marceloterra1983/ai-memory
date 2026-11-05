@@ -5707,16 +5707,14 @@ mod tests {
         assert_eq!(bad.frontmatter["title"], "Bad path page");
     }
 
-    /// A batch page whose path `slugify_page_path` cannot repair (leading
-    /// slash, dot segment, empty segment) is skipped on its own: before the
-    /// fix `PagePath::new` rejected it inside `build_update` and the `?`
-    /// failed the whole batch, losing the sibling valid page (#848).
+    /// Repaired segments stay in the batch; a path with no filename is
+    /// still unrepairable and must not discard its valid siblings (#848).
     #[tokio::test]
     async fn batch_with_unrepairable_path_skips_only_that_page() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, wiki, session, ws, proj) = batch_fixture(tmp.path()).await;
         let response = serde_json::json!({
-            "rationale": "three bad paths, one good",
+            "rationale": "three repaired paths, one good, one without a filename",
             "updates": [
                 {
                     "path": "/concepts/absolute.md",
@@ -5740,6 +5738,14 @@ mod tests {
                     "kind": "fact",
                     "title": "Empty segment page",
                     "body_markdown": "Empty segment body.",
+                    "tags": []
+                },
+                {
+                    "path": "concepts/",
+                    "tier": "semantic",
+                    "kind": "fact",
+                    "title": "Missing filename",
+                    "body_markdown": "This page must be skipped.",
                     "tags": []
                 },
                 {
@@ -5772,7 +5778,15 @@ mod tests {
         .expect("an unrepairable path must not fail the whole batch");
 
         let paths: Vec<&str> = outcomes.iter().map(|o| o.path.as_str()).collect();
-        assert_eq!(paths, vec!["concepts/good.md"]);
+        assert_eq!(
+            paths,
+            vec![
+                "concepts/absolute.md",
+                "concepts/dotdot/escape.md",
+                "concepts/double.md",
+                "concepts/good.md"
+            ]
+        );
         let good = wiki
             .read_page(ws, proj, &PagePath::new("concepts/good.md").unwrap())
             .unwrap();

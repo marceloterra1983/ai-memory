@@ -1012,3 +1012,6 @@ diag-repair-split-local-link = ai-memory: os projetos foram unidos, mas o víncu
 diag-repair-split-bad-id = --project-id { $project_id } não é um id de projeto
 diag-repair-split-bad-from-id = --from-project-id { $from_project_id } não é um id de projeto
 diag-repair-split-reading-summary = lendo o resumo de adopt-project-identity do servidor
+
+diag-resolving-output-symlink = resolvendo link simbólico de saída { $value0 }
+diag-refusing-multiply-linked-output = recusando arquivo de saída com múltiplos hardlinks: { $value0 }

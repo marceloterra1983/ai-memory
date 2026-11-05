@@ -960,10 +960,10 @@ fn source_candidates(explicit: Option<&Path>, sub: &str, exe: Option<PathBuf>) -
     )));
     // Native Linux packages install hook sources under /usr/share.
     v.push(PathBuf::from(format!("/usr/share/ai-memory/hooks/{sub}")));
-    if let Some(exe) = exe.as_ref() {
-        if let Some(dir) = exe.parent() {
-            v.push(dir.join(crate::install_layout::HOOKS_DIR_NAME).join(sub));
-        }
+    if let Some(exe) = exe.as_ref()
+        && let Some(dir) = exe.parent()
+    {
+        v.push(dir.join(crate::install_layout::HOOKS_DIR_NAME).join(sub));
     }
     if let Some(root) = crate::install_layout::repo_root_guess(
         exe.as_deref(),

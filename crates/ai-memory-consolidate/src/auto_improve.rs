@@ -3880,6 +3880,7 @@ mod tests {
             10,
         );
         let page = StoredPageBody {
+            id: ai_memory_core::PageId::new(),
             title: "Large Session Summary".into(),
             body: "# Large Session Summary\n\nThe session audited scalable project isolation."
                 .into(),

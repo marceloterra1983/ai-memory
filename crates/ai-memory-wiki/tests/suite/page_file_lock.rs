@@ -85,8 +85,13 @@ async fn edited_tail_refuses_expected_version_without_truncated_comparison() {
 async fn independent_wiki_waits_for_the_process_file_lock() {
     let (tmp, store, wiki, req) = fixture().await;
     use sha2::{Digest as _, Sha256};
-    let digest = Sha256::new().chain_update(req.workspace_id.as_bytes()).chain_update([0])
-        .chain_update(req.project_id.as_bytes()).chain_update([0]).chain_update(req.path.as_str().as_bytes()).finalize();
+    let digest = Sha256::new()
+        .chain_update(req.workspace_id.as_bytes())
+        .chain_update([0])
+        .chain_update(req.project_id.as_bytes())
+        .chain_update([0])
+        .chain_update(req.path.as_str().as_bytes())
+        .finalize();
     let lock_path = tmp.path().join("page-locks").join(format!("{digest:x}"));
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     let file = std::fs::OpenOptions::new()
@@ -115,7 +120,11 @@ async fn independent_wiki_waits_for_the_process_file_lock() {
 #[tokio::test]
 async fn distinct_page_prefixes_and_long_names_have_independent_locks() {
     let (_tmp, _store, wiki, mut req) = fixture().await;
-    for path in ["foo.md".to_string(), "foo.md.lock/bar.md".to_string(), format!("{}.md", "x".repeat(250))] {
+    for path in [
+        "foo.md".to_string(),
+        "foo.md.lock/bar.md".to_string(),
+        format!("{}.md", "x".repeat(250)),
+    ] {
         req.path = PagePath::new(path).unwrap();
         wiki.write_page(req.clone()).await.unwrap();
     }
@@ -125,11 +134,18 @@ async fn distinct_page_prefixes_and_long_names_have_independent_locks() {
 async fn bare_wiki_verifies_source_through_the_writer() {
     let (tmp, store, _wiki, req) = fixture().await;
     let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
-    let id = match wiki.write_page_if(req.clone(), PagePrecondition::Absent).await.unwrap() {
-        ConditionalWrite::Written(id) => id, other => panic!("{other:?}"),
+    let id = match wiki
+        .write_page_if(req.clone(), PagePrecondition::Absent)
+        .await
+        .unwrap()
+    {
+        ConditionalWrite::Written(id) => id,
+        other => panic!("{other:?}"),
     };
     let abs = wiki.abs_path(req.workspace_id, req.project_id, &req.path);
     std::fs::write(&abs, "external source").unwrap();
-    assert!(matches!(wiki.write_page_if(req, PagePrecondition::Latest(id)).await.unwrap(), ConditionalWrite::Mismatch { current: Some(current) } if current == id));
+    assert!(
+        matches!(wiki.write_page_if(req, PagePrecondition::Latest(id)).await.unwrap(), ConditionalWrite::Mismatch { current: Some(current) } if current == id)
+    );
     assert_eq!(std::fs::read_to_string(abs).unwrap(), "external source");
 }

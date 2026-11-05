@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Aligned integration fixtures with selective handoffs, disabled TS drains and repaired model paths; fixed the embedded dream scope example and translated new archive destination errors.
+
 - Opened automatic handoffs only for typed pending work while preserving turn checkpoints and prompt/render bounds (`0379a6fa`, `9cfa8dc3`).
 
 - Repaired model paths containing dot/empty segments, leading separators or reserved Git names before batching (`f3fb8aac`).

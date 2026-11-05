@@ -15812,7 +15812,7 @@ process.exit(0);
             let run = run_harness(&tmp, extension_under_test(), REDIRECT_HARNESS, &project);
             assert_eq!(run["loginHits"], serde_json::json!([]), "{run}");
             assert!(run["handoff"].is_null(), "{run}");
-            assert_eq!(run["drained"], serde_json::json!(true), "{run}");
+            assert_eq!(run["drained"], serde_json::json!(false), "{run}");
             let spooled = run["spooled"].as_array().expect("spool listing");
             assert!(
                 spooled.contains(&serde_json::json!("0000000000001-1-0000000000000001.json")),

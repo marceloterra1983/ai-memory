@@ -57,20 +57,20 @@ pub fn cargo_manifest_dir() -> Option<&'static Path> {
 /// Order: walk from the executable, then from `cwd`, then from the compile-time
 /// `CARGO_MANIFEST_DIR`. The first ancestor that contains `hooks/` wins.
 pub fn repo_root_guess(exe: Option<&Path>, cwd: Option<&Path>) -> Option<PathBuf> {
-    if let Some(exe) = exe {
-        if let Some(root) = repo_root_from_exe(exe) {
-            return Some(root);
-        }
+    if let Some(exe) = exe
+        && let Some(root) = repo_root_from_exe(exe)
+    {
+        return Some(root);
     }
-    if let Some(cwd) = cwd {
-        if let Some(root) = repo_root_from_dir(cwd) {
-            return Some(root);
-        }
+    if let Some(cwd) = cwd
+        && let Some(root) = repo_root_from_dir(cwd)
+    {
+        return Some(root);
     }
-    if let Some(manifest) = cargo_manifest_dir() {
-        if let Some(root) = repo_root_from_dir(manifest) {
-            return Some(root);
-        }
+    if let Some(manifest) = cargo_manifest_dir()
+        && let Some(root) = repo_root_from_dir(manifest)
+    {
+        return Some(root);
     }
     None
 }

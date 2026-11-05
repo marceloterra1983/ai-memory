@@ -1003,3 +1003,6 @@ diag-repair-split-local-link = ai-memory: the projects were joined, but this che
 diag-repair-split-bad-id = --project-id { $project_id } is not a project id
 diag-repair-split-bad-from-id = --from-project-id { $from_project_id } is not a project id
 diag-repair-split-reading-summary = reading the server's adopt-project-identity summary
+
+diag-resolving-output-symlink = resolving output symlink { $value0 }
+diag-refusing-multiply-linked-output = refusing multiply-linked output file: { $value0 }

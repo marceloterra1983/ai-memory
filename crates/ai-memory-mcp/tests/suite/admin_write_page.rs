@@ -415,7 +415,7 @@ async fn write_page_metadata_roundtrip_and_total_replacement() {
         "body": "# Metadata\n\nFirst version.", "kind": " rule ",
         "entities": ["SQLite", " sqlite ", "Writer\nActor"],
         "abstract": " One-line summary. ",
-        "relations": {"fixes": ["gotchas/build"], "causes": ["other:notes/problem.md"], "contradicts": ["decisions/old.md"]}
+        "relations": {"fixes": ["gotchas/build.md", "gotchas/build"], "causes": ["other:notes/problem.md"], "contradicts": ["decisions/old.md"]}
     });
     let resp = post_json(state.clone(), "/admin/write-page", request.clone()).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -426,6 +426,7 @@ async fn write_page_metadata_roundtrip_and_total_replacement() {
         json!(["sqlite", "writer actor"])
     );
     assert_eq!(md.frontmatter["abstract"], "One-line summary.");
+    // Retain raw declarations; only the exact existing .md path forms an edge.
     assert_eq!(md.frontmatter["relations"], request["relations"]);
     let links = state
         .reader

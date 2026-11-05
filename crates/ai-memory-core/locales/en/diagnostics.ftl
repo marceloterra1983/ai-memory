@@ -2,6 +2,21 @@
 # The English value must equal the source format string: `Localizer::diagnostic`
 # matches rendered text against it at the display boundary.
 
+diag-dream-scopes-local-embedder = DREAM scopes require an available local embedder
+diag-dream-explicit-scope = DREAM requires explicit nonempty --workspace and --project
+diag-dream-exact-scope-names = dream.scopes names must be exact, nonempty, and without surrounding whitespace
+diag-dream-duplicate-scopes = dream.scopes must not contain duplicates
+diag-dream-enabled-scope-allowlist = dream.enabled requires a nonempty dream.scopes allowlist
+diag-dream-trusted-llm-endpoint = dream.llm_endpoint must be a trusted literal loopback endpoint
+diag-dream-endpoint-model-together = dream.llm_endpoint and dream.llm_model must be configured together
+diag-dream-explicit-model-names = DREAM model names must be explicit, nonempty, and at most 200 bytes
+diag-dream-enabled-local-models = dream.enabled requires dedicated local LLM endpoint/model and jev_model
+diag-dream-finite-max-eps = dream.max_eps must be finite and between zero and one
+diag-dream-embedding-dimensions = DREAM embedding dimensions must be between 1 and 8192
+diag-dream-enabled-local-embedding = enabled DREAM requires an explicit local embedding provider
+diag-dream-explicit-embedding-url = DREAM requires an explicit local embedding_base_url
+diag-dream-trusted-embedding-endpoint = DREAM embeddings must use a trusted literal loopback endpoint
+diag-dream-local-embedding-provider = DREAM requires local or local openai-compat embeddings
 diag-preview = { $value0 }  { $value1 }  { $value2 }  PREVIEW
 diag-unknown-llm-task = unknown LLM task llm.{ $name }
 diag-llm-task-provider-empty = { $path }.provider must not be empty

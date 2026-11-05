@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Refused dream drafts with unsupported or lost literals, keep-tokens, negation, exceptions or mixed expiry, using dedicated local semantic relatedness and strict config (`bd524699`, `60593c0b`, `36cba6dc`).
+
 - Guarded dream source snapshots and apply through the existing Wiki funnel with confined checkpoints, content checks, cancellation and rollback (`bd524699`).
 
 - Bounded dream head/vector snapshots and revalidated every source identity, body hash, eligibility input and expiry in one writer transaction (`bd524699`, `36cba6dc`).

@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Restored the bounded per-instance query-vector cache with TTL; document inference and query results remain uncached (`0511bba4`).
+
 - Excluded the normalized scoped project name from entity votes, retaining other matching entities and the installer’s exact fixbrainrank guard (`c4ea6bb3`).
 
 - Preserved full-document local compat embeddings with UTF-8 chunks and source-byte pooling whenever `dream.scopes` is nonempty, including with dream disabled (`f3f00446`).

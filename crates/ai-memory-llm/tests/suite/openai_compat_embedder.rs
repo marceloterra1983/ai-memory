@@ -367,9 +367,22 @@ async fn query_endpoint_is_separate_from_documents_and_identity() {
         .expect(1)
         .mount(&queries)
         .await;
-    let embedder = OpenAiCompatEmbedder::new(documents.uri() + "/v1", None, "fixture", 8)
-        .unwrap()
-        .with_query_base_url(queries.uri() + "/v1");
+    let embedder = build_embedder(EmbedderConfig {
+        provider: EmbedderChoice::OpenAiCompat,
+        model: "fixture".into(),
+        dim: 8,
+        api_key: SecretString::from(String::new()),
+        base_url: Some(documents.uri() + "/v1"),
+        query_base_url: Some(queries.uri() + "/v1"),
+        document_timeout_secs: 120,
+        local_only: false,
+        models_dir: None,
+        copilot_auth: None,
+        defaulted: false,
+        query_prefix: String::new(),
+        document_prefix: String::new(),
+    })
+    .unwrap();
     assert_eq!(embedder.model_identity(), "fixture");
     embedder.embed_document("document").await.unwrap();
     embedder.embed_query("query").await.unwrap();
@@ -472,4 +485,26 @@ fn restricted_local_embedding_refuses_nonliteral_or_credentialed_endpoints() {
         assert!(OpenAiCompatEmbedder::new_local(endpoint, "fixture", 2).is_err());
     }
     assert!(OpenAiCompatEmbedder::new_local("http://127.0.0.1:59100/v1", "fixture", 2).is_ok());
+}
+
+#[tokio::test]
+async fn query_vector_cache_is_per_instance_and_never_caches_documents() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(embedding_body(8)))
+        .expect(6)
+        .mount(&server)
+        .await;
+    let url = server.uri() + "/v1";
+    let embedder = OpenAiCompatEmbedder::new(&url, None, "fixture", 8).unwrap();
+    embedder.embed_query("same text").await.unwrap();
+    embedder.embed_query("same text").await.unwrap();
+    embedder.embed_document("same text").await.unwrap();
+    embedder.embed_document("same text").await.unwrap();
+    embedder.embed_query("Different text").await.unwrap();
+    let second = OpenAiCompatEmbedder::new(&url, None, "fixture", 8).unwrap();
+    second.embed_query("same text").await.unwrap();
+    let embedder = embedder.with_query_base_url(&url);
+    embedder.embed_query("same text").await.unwrap();
 }

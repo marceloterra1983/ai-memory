@@ -500,6 +500,7 @@ pub struct OpenAiCompatEmbedder {
     client: reqwest::Client,
     document_timeout: Duration,
     local_only: bool,
+    query_cache: crate::query_embedding_cache::QueryEmbeddingCache,
     api_key: Option<SecretString>,
     base_url: String,
     query_base_url: Option<String>,
@@ -544,6 +545,7 @@ impl OpenAiCompatEmbedder {
             client,
             document_timeout: Duration::from_secs(DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS),
             local_only: false,
+            query_cache: Default::default(),
             api_key,
             base_url: base_url.into(),
             query_base_url: None,
@@ -711,6 +713,7 @@ impl OpenAiCompatEmbedder {
     /// A blank string clears the override.
     #[must_use]
     pub fn with_query_base_url(mut self, url: impl Into<String>) -> Self {
+        self.query_cache = Default::default();
         let url = url.into();
         self.query_base_url = (!url.trim().is_empty()).then(|| url.trim().to_string());
         self
@@ -731,6 +734,7 @@ impl OpenAiCompatEmbedder {
         query_prefix: impl Into<String>,
         document_prefix: impl Into<String>,
     ) -> Self {
+        self.query_cache = Default::default();
         self.query_prefix = query_prefix.into();
         self.document_prefix = document_prefix.into();
         self
@@ -790,11 +794,22 @@ impl Embedder for OpenAiCompatEmbedder {
 
     async fn embed_query(&self, text: &str) -> LlmResult<Vec<f32>> {
         let prefixed = prepend_prefix(&self.query_prefix, text);
+        if let Some(vector) = self.query_cache.get(&prefixed) {
+            return Ok(vector);
+        }
+        let vector = self.embed_query_uncached(&prefixed).await?;
+        self.query_cache.insert(&prefixed, &vector, self.dim);
+        Ok(vector)
+    }
+}
+
+impl OpenAiCompatEmbedder {
+    async fn embed_query_uncached(&self, prefixed: &str) -> LlmResult<Vec<f32>> {
         if self.local_only {
             return self
                 .local_embed(
                     self.query_base_url.as_deref().unwrap_or(&self.base_url),
-                    &prefixed,
+                    prefixed,
                     Duration::from_secs(120),
                 )
                 .await;
@@ -805,7 +820,7 @@ impl Embedder for OpenAiCompatEmbedder {
             self.api_key.as_ref(),
             &self.model,
             self.dim,
-            &prefixed,
+            prefixed,
             None,
         )
         .await

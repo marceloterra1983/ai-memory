@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Skipped indecodable legacy handoffs without hiding valid items, promoting automatic items, or swallowing SQLite failures (`59873022`).
+
 - Included handoff `from_session_id` in administrative listings and kept malformed legacy origins as null instead of dropping the item (`1d93add8`, `62baa09e`).
 
 - Preserved only closed, bounded tool labels in hook payloads, including metadata-only capture and generated adapters (`c3b5a60e`).

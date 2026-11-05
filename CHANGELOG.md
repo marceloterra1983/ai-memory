@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Restored dedicated, keyless local dream clients with bounded requests, no proxy, redirect or provider fallback (`bd524699`).
+
 - Restored exact typed relation parsing, preserving raw declarations for curation and legitimate sentinel-named `.md` pages (`3a4a8d79`, `5cc3d4eb`).
 
 - Restored complete page readback when `max_chars` is omitted, preserving explicit caps and byte equality for the local reliable-mcp relay (`143ad28a`).

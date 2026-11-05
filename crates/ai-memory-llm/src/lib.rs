@@ -78,6 +78,7 @@ pub mod auth;
 pub mod codex;
 pub mod copilot;
 pub mod cursor_agent;
+pub mod dream_local;
 pub mod embedding;
 pub mod embedding_capacity;
 pub mod error;
@@ -120,6 +121,7 @@ pub use copilot::{
 pub use cursor_agent::{
     CURSOR_DEFAULT_MODEL, CursorAgentProvider, cursor_child_env, cursor_executable,
 };
+pub use dream_local::{DreamLocalClient, DreamLocalProvider, validate_dream_local_endpoint};
 pub use embedding::{
     Embedder, OpenAiCompatEmbedder, OpenAiEmbedder, QueryVector, SyntheticEmbedder, VoyageEmbedder,
     cosine, embed_search_query,

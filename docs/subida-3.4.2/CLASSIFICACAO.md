@@ -762,3 +762,56 @@ fechamento da fase A. O relato final nativo permanece a autoridade do veredito.
 | `bd524699` — atividade/deadline | Clock do tool router e cadência nativa da tag | Clock ganhou reservas/generation para hooks pós-202, tools, embeddings e jobs relevantes; scheduler e manual usam o mesmo runtime serializado e prazo global. Espera de OS locks usa try-lock assíncrono: a revisão reproduziu um worker bloqueante retendo lock após cancelamento; teste vermelho/verde prova a liberação mantendo o segundo lock preso. Shutdown/desconexão drenam apply/rollback antes de fechar o store. |
 | `bd524699`, `585ab238` — manual/allowlist/config | Scheduler da tag e política admin operacional foram mantidos | Foram acrescentados CLI/endpoint manual, allowlist exata compartilhada, config estrita e modelos dedicados. Manual força apenas o seu pass, sem ligar agendamento. `dream.scopes` não vazio continua selecionando embedding `local_only` com `enabled=false`; regressão da fase A e forma de produção estão cobertas. |
 | `3a4a8d79`, `5cc3d4eb` — orçamento de prompt | Piso de entrada, reserva de observações e oracle independente de projeção da tag | `65404ff0`: orientação de relações exatas foi compactada para não consumir o piso existente. O oracle recebe apenas a nova redação estática, mantendo projeção e seleção congeladas; regressões de reserva e equivalência byte a byte foram preservadas. |
+
+### Prova de fechamento da fase B
+
+Foi usado Rust/Cargo 1.95.0, com o diretório da toolchain no início do PATH,
+`TMPDIR=/tmp/x.HTgVMK` fora dos repositórios e HOME/XDG sintéticos nos testes
+completos. O wrapper de testes não executa a suíte de integração CLI.
+
+`cargo build --release --locked`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `git diff --check` e cargo-deny offline passaram.
+Clippy, fmt e diff foram repetidos após todas as mutações negativas.
+
+SHA256 de `target/release/ai-memory`:
+`519e049d5ba736b227dae3218fecdc613c2b18ba6ce01c15f96beb45a00ccec6`.
+Os hashes de todos os fontes restaurados coincidem com os usados no build.
+
+| Crate (`cargo test --locked -p ...`) | passed | failed | ignored |
+|---|---:|---:|---:|
+| ai-memory-cli (somente `--lib`) | 2352 | 0 | 3 |
+| ai-memory-consolidate | 600 | 0 | 7 |
+| ai-memory-core | 385 | 0 | 0 |
+| ai-memory-llm | 463 | 0 | 2 |
+| ai-memory-mcp | 859 | 0 | 2 |
+| ai-memory-store | 975 | 0 | 1 |
+| ai-memory-wiki | 410 | 0 | 1 |
+| ai-memory-hooks | 804 | 0 | 0 |
+
+Total medido: 6.848 passed, 0 failed, 16 ignored. Os ignorados pertencem às
+categorias de modelo/provedor externo, medição manual e execução das integrações
+geradas da fase A; nenhum controle obrigatório da fase B foi ignorado.
+
+Os nove obrigatórios têm 41 pares negativos distintos: cada teste passa antes,
+reprova em runtime com a garantia neutralizada (0 passed/1 failed, exit 101), e
+passa após restaurar os bytes originais (1 passed/0 failed, exit 0). Erro de
+compilação não vale como prova. O resumo com requisitos, comandos, patches,
+hashes dos fontes e logs é `target/evidence-b/negative-summary.json`.
+
+O e2e usou o release acima, `env -i`, HOME/data/pre sob mktemp externo,
+porta alta 61000 e servidores locais sintéticos. Com `enabled=false`,
+o plano não fez inferência nem alterou as fontes; apply reuniu duas cópias
+literais, preservou histórico/evidência e recusou o escopo externo com HTTP 403.
+A forma de produção de `[dream]` foi aceita; campo desconhecido foi recusado.
+O teste de embedding e seu negativo provaram que scopes não vazio mantém
+`local_only` com o scheduler desligado. Evidência: `manual-e2e-result.json`,
+`crate-test-results.json`, `final-gate-results.json` e `built-source-hashes.json`
+em `target/evidence-b/`.
+
+Antes e depois dos testes, `git -C /home/marce/Projects/ai-memory status --short`
+e `ls -la /home/marce/Projects/ai-memory/.claude` produziram exatamente o mesmo
+resultado: as alterações preexistentes de outra frente foram preservadas e
+`.claude` continua sem `settings.local.json`. Snapshots: `main-before.json` e
+`main-after.json` no mesmo diretório de evidências. Não houve migração, alteração
+do relay, uso de dados/serviço/portas protegidos nem push; `80dd19cd` permanece
+excluído. O relato final nativo é a autoridade do veredito.

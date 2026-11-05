@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Repaired model paths containing dot/empty segments, leading separators or reserved Git names before batching (`f3fb8aac`).
+
 - Found hook sources by walking executable, cwd and manifest ancestors across external target and target-triple layouts (`2d26dae5`).
 
 - Preserved topical title candidates, proportional source votes, ties and calibrated scope unions in the new observation-stream ranker, using one snapshot for both FTS windows (`1f0ff776`, `ad3d8c73`, relevant part of `d2a57a10`).

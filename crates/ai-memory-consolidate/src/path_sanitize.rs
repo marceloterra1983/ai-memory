@@ -41,36 +41,40 @@ pub(crate) const PATH_ILLEGAL_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '
 /// it (case-insensitive), which is idempotent: a path already ending in `.md`
 /// is left untouched.
 pub(crate) fn slugify_page_path(raw: &str) -> String {
-    let mut segments: Vec<String> = raw
-        .split('/')
-        .map(|segment| {
-            segment
-                .chars()
-                .map(|c| {
-                    if PATH_ILLEGAL_CHARS.contains(&c) || (c as u32) < 0x20 {
-                        '-'
-                    } else {
-                        c
-                    }
-                })
-                .collect::<String>()
-        })
-        .map(make_component_portable)
-        .collect();
-    // Append the `.md` extension when the model omitted it on the filename
-    // component (#885). The check is case-insensitive so `NAME.MD` is not
-    // double-extended, keeping the whole operation idempotent. Skip an empty
-    // final component: an empty or trailing-slash path has no filename to
-    // extend, and fabricating `.md` there would turn a missing/invalid path
-    // into a plausible-looking one that slips past the callers' own
-    // empty-path rejection (auto-improve reported `unsupported_path_prefix`
-    // instead of `invalid_path`). An empty path stays empty and is rejected
-    // upstream as before.
-    if let Some(last) = segments.last_mut()
-        && !last.is_empty()
-        && !last.to_ascii_lowercase().ends_with(".md")
-    {
-        last.push_str(".md");
+    let parts: Vec<&str> = raw.split('/').collect();
+    let mut segments = Vec::with_capacity(parts.len());
+    for (index, segment) in parts.iter().enumerate() {
+        let last = index + 1 == parts.len();
+        if segment.is_empty() {
+            if last {
+                segments.push(String::new());
+            }
+            continue;
+        }
+        let cleaned: String = segment
+            .chars()
+            .map(|c| {
+                if PATH_ILLEGAL_CHARS.contains(&c) || (c as u32) < 0x20 {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let cleaned = match cleaned.as_str() {
+            "." => "dot".to_string(),
+            ".." => "dotdot".to_string(),
+            s if s.trim_end_matches(['.', ' ']).is_empty() => "blank".to_string(),
+            _ => cleaned,
+        };
+        let mut cleaned = make_component_portable(cleaned);
+        if last && !cleaned.to_ascii_lowercase().ends_with(".md") {
+            cleaned.push_str(".md");
+        }
+        if ai_memory_core::ids::is_git_reserved_component(&cleaned) {
+            cleaned.insert_str(0, "file-");
+        }
+        segments.push(cleaned);
     }
     segments.join("/")
 }
@@ -100,6 +104,23 @@ fn make_component_portable(segment: String) -> String {
 mod tests {
     use super::slugify_page_path;
     use ai_memory_core::ids::PagePath;
+
+    #[test]
+    fn repairs_dot_empty_leading_and_git_components() {
+        for (raw, expected) in [
+            ("../secrets.md", "dotdot/secrets.md"),
+            ("a//b.md", "a/b.md"),
+            ("/leading.md", "leading.md"),
+            ("notes/./x", "notes/dot/x.md"),
+            ("notes/.GIT/x", "notes/file-.GIT/x.md"),
+            ("notes/git~1/x", "notes/file-git~1/x.md"),
+            ("notes/git~1", "notes/git~1.md"),
+        ] {
+            let clean = slugify_page_path(raw);
+            assert_eq!(clean, expected);
+            PagePath::new(clean).unwrap().ensure_portable().unwrap();
+        }
+    }
 
     #[test]
     fn slugify_page_path_repairs_trailing_and_dos_device_components() {

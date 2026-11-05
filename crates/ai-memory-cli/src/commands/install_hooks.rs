@@ -14059,7 +14059,11 @@ model = "gpt-5"
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            output.status.success() && stdout.matches("PASS:").count() == 3,
+            output.status.success()
+                && stdout.matches("PASS:").count() == 4
+                && stdout.contains(
+                    "PASS: spool drain sends zero POSTs and preserves existing envelopes"
+                ),
             "opencode2 host fixture failed ({})\nstdout:\n{stdout}\nstderr:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stderr),

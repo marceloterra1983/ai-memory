@@ -220,6 +220,26 @@ try {
   Date.now = realNow;
 }
 
+// Disposing an idle location still flushes the queue and requests a spool
+// drain. Existing envelopes belong to external/native recovery, even when
+// the server would accept them. The online run above proves capture can POST.
+const backlog = new Map(readdirSync(spool).map((name) => [name, readFileSync(join(spool, name), "utf8")]));
+assert.ok(backlog.size > 0, "the offline run must leave envelopes to protect");
+let spoolPosts = 0;
+globalThis.fetch = async (_url, options = {}) => {
+  if (options.method === "POST") spoolPosts++;
+  return new Response("{}");
+};
+const idle = host(root, records);
+const closeIdle = await plugin.setup(idle.ctx);
+await closeIdle();
+assert.equal(spoolPosts, 0, "the TS drain must not POST existing envelopes");
+assert.deepEqual(readdirSync(spool).sort(), [...backlog.keys()].sort(), "spool filenames must remain intact");
+for (const [name, contents] of backlog) {
+  assert.equal(readFileSync(join(spool, name), "utf8"), contents, `spool envelope must remain intact: ${name}`);
+}
+console.log("PASS: spool drain sends zero POSTs and preserves existing envelopes");
+
 // A server which accepts requests but never answers must not hold plugin unload
 // behind every queued request's individual timeout.
 globalThis.fetch = (_url, { signal } = {}) => new Promise((_resolve, reject) => {

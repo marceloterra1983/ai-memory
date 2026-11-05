@@ -4488,9 +4488,6 @@ impl AiMemoryServer {
                         None,
                     )
                 })?;
-            if !dry {
-                self.reconcile_consolidation_job(session_id).await;
-            }
             ok_json(&serde_json::json!({ "outcomes": outcomes }))
         } else {
             let outcome = consolidator
@@ -4502,9 +4499,6 @@ impl AiMemoryServer {
                         None,
                     )
                 })?;
-            if !dry {
-                self.reconcile_consolidation_job(session_id).await;
-            }
             ok_json(&outcome)
         }
     }

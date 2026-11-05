@@ -26,6 +26,9 @@ use crate::git::{Checkpoint, GitAdapter};
 use crate::markdown::{Markdown, derive_title, emit, parse};
 use crate::watcher::is_pending_path;
 
+mod curation;
+pub use curation::{RelationCurationRequest, RelationCurationResult};
+
 /// A source snapshot whose optional version token describes its exact content.
 #[derive(Debug, Clone)]
 pub struct VersionedPage {

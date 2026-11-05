@@ -43,10 +43,12 @@ frontmatter entirely; nothing else changes.
 The set is deliberately closed: a free-text relation column turns into
 an unqueryable folksonomy. Keys outside the vocabulary are skipped at
 the write boundary (with a warning), so a typo cannot mint a new edge
-kind. Targets use the same grammar as wikilinks: `path`,
-`project:path`, `workspace/project:path`, or `_global:path` (the
-reserved preferences project in the default workspace); extension-less
-targets gain `.md`.
+kind. Targets require an explicit, exact `.md` path: `path.md`,
+`project:path.md`, `workspace/project:path.md`, or `_global:path.md` (the
+reserved preferences project in the default workspace). The target must already
+exist when the page is indexed. Titles, extension-less values and bare
+`None`/`Nenhuma`/`N/A` markers remain raw declarations without typed edges.
+A live `none.md`, `nenhuma.md` or `n/a.md` remains a legitimate target.
 
 ## What typed edges do
 
@@ -80,3 +82,15 @@ targets gain `.md`.
 Storage detail: edges ride the existing `links.link_type` column
 (default `references`), so this needed no schema migration and old
 stores need no rewrite.
+
+
+## Conditional relation cleanup
+
+`POST /admin/curate-relations` previews by default. Supply exact `workspace`,
+`project`, `path`, `expected_head_id` and `expected_body_sha256`; add
+`"dry_run": false` to apply. It removes only exact absence markers, checks
+whether a sentinel `.md` path names a live page, and preserves the body,
+TTL, attribution and evidence. It refuses stale heads, disk/index differences,
+wrong hashes, and admission changes to protected content. Before/after git
+checkpoints and rollback use the ordinary wiki write boundary. The endpoint
+shares the server's bootstrap access and multi-user root policy.

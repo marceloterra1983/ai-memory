@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Restored conditional relation cleanup with head/hash checks, body preservation and recoverable checkpoints; retained raw generated declarations for review (`3a4a8d79`, `5cc3d4eb`).
+
 - Required existing scoped targets for typed relations and preserved metadata, evidence and session ownership through conditional curation (`3a4a8d79`, `5cc3d4eb`).
 
 - Restored dedicated, keyless local dream clients with bounded requests, no proxy, redirect or provider fallback (`bd524699`).

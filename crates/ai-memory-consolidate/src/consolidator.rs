@@ -391,12 +391,10 @@ impl Consolidator {
             page.title = new_title;
         }
 
-        // #1218: a cross-scope link the model invented — body wikilink or
-        // `relations:` entry — must not be written. Resolve each against the
-        // store; de-link unresolved body links and drop unresolved relations,
-        // so the write cannot mint a dangling cross-project edge the lint
-        // pass would flag.
-        let mut frontmatter = build_frontmatter(&page, session_id, agent_kind);
+        // Resolve generated body links before writing. Relation declarations
+        // remain available for curation; the writer admits only exact live targets
+        // into the typed edge index in its own transaction.
+        let frontmatter = build_frontmatter(&page, session_id, agent_kind);
         let unresolved = crate::link_guard::unresolved_generated_links(
             &self.reader,
             ws,
@@ -407,7 +405,6 @@ impl Consolidator {
         page.body_markdown =
             crate::link_guard::delink_body(&page.body_markdown, &path, &unresolved.body)
                 .into_owned();
-        crate::link_guard::prune_relations(&mut frontmatter, &unresolved.relations);
         let id = self
             .wiki
             .write_page(WritePageRequest {
@@ -449,6 +446,7 @@ impl Consolidator {
             page = %id,
             "session consolidated via LLM",
         );
+        self.reconcile_session_state(session_id).await;
         Ok(ConsolidationOutcome {
             path,
             dry_run: false,
@@ -457,6 +455,18 @@ impl Consolidator {
             page_id: Some(id),
             tags: page.tags,
         })
+    }
+
+    async fn reconcile_session_state(&self, session_id: SessionId) {
+        // The consolidator is shared by workers, checkpoints and manual calls.
+        // The writer repairs anchors without disturbing a worker's active lease.
+        if let Err(error) = self
+            .writer
+            .reconcile_session_consolidation_completed(session_id)
+            .await
+        {
+            warn!(%session_id, %error, "failed to reconcile session state after consolidation");
+        }
     }
 
     /// Borrow the underlying writer (used by the MCP tool to ack the
@@ -1061,11 +1071,11 @@ impl Consolidator {
                         .into_owned();
                 req.body = rewritten.clone();
                 outcome.new_body_markdown = rewritten;
-                crate::link_guard::prune_relations(&mut req.frontmatter, &unresolved.relations);
             }
         }
 
         let ids = self.wiki.apply_batch(requests).await?;
+        self.reconcile_session_state(session_id).await;
         let rationale_short = batch.rationale.chars().take(60).collect::<String>();
         let _ = self
             .wiki
@@ -1541,7 +1551,7 @@ fn batch_request_plan(
          - \"kind\"            (string)  required — one of: decision | gotcha | rule | fact\n\
          - \"tags\"            (array of string)  required — may be empty `[]`, but the key must be present\n\
          - \"entities\"        (array of string)  required — may be empty `[]`, but the key must be present; see below\n\
-         - \"relations\"       (object) optional — keys: \"causes\", \"fixes\", \"contradicts\"; each contains an array of existing wiki paths. Declare only evidence-backed edges; empty arrays are normal.\n\
+         - \"relations\"       (object) optional — keys: \"causes\", \"fixes\", \"contradicts\"; each contains exact existing .md wiki paths, optionally [workspace/]project:path.md. Never titles or absence markers (None, Nenhuma, N/A). Do not infer paths; use empty arrays when no exact target is known. Declare only evidence-backed edges.\n\
          - \"slot_kind\"       (string) optional — ONLY for `_slots/*`; one of \"state\" or \"invariant\"; this is the SLOT WRITE REGIME, NOT a tier value\n\
          - \"summary\"         (string) optional — ONE line of plain prose describing the page, shown beside its title. Headings, `- **key:** value` bullets, list items, and repeated titles are discarded. Omit rather than guess.\n\
          Use only the keys listed above. No `body`, no `content`. Field names \
@@ -2124,29 +2134,13 @@ fn build_frontmatter(
     serde_json::Value::Object(map)
 }
 
-fn is_valid_relation_target(relation: ai_memory_core::Relation, target: &str) -> bool {
-    let probe = serde_json::json!({ "relations": { relation.as_str(): [target] } });
-    !ai_memory_wiki::extract_relation_links(&probe).is_empty()
-}
-
 fn insert_relations(map: &mut serde_json::Map<String, serde_json::Value>, relations: &Relations) {
-    // Typed edges (2.0 item 3): only vocabulary keys survive — an LLM
-    // inventing `blames:` must not mint a new edge kind. The wiki write
-    // boundary parses this frontmatter into typed links.
-    // Drop non-page targets up front so raw titles cannot persist in YAML
-    // frontmatter and trigger repeated watcher reconciliation warnings.
-    let mut out = serde_json::Map::new();
-    for (relation, targets) in relations.non_empty() {
-        let valid: Vec<serde_json::Value> = targets
-            .iter()
-            .filter(|t| is_valid_relation_target(relation, t))
-            .map(|t| serde_json::Value::String(t.clone()))
-            .collect();
-        if !valid.is_empty() {
-            let key = relation.as_str().to_string();
-            out.insert(key, serde_json::Value::Array(valid));
-        }
-    }
+    // Retain ambiguous declarations for curation without turning them into claims.
+    // The wiki parser and writer jointly require an explicit existing .md target.
+    let out: serde_json::Map<String, serde_json::Value> = relations
+        .non_empty()
+        .map(|(relation, targets)| (relation.as_str().to_owned(), serde_json::json!(targets)))
+        .collect();
     if !out.is_empty() {
         map.insert("relations".into(), serde_json::Value::Object(out));
     }
@@ -4332,7 +4326,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_relations_drops_non_page_targets() {
+    fn curation_insert_relations_preserves_raw_declarations() {
         let page = ConsolidatedPage {
             title: "T".into(),
             body_markdown: "b".into(),
@@ -4355,10 +4349,10 @@ mod tests {
         };
         let fm = build_frontmatter(&page, SessionId::new(), AgentKind::Cursor);
         let relations = fm["relations"].as_object().unwrap();
-        assert!(relations.get("fixes").is_none());
+        assert_eq!(relations["fixes"], serde_json::json!(page.relations.fixes));
         assert_eq!(
             relations["contradicts"],
-            serde_json::json!(["decisions/0001.md"])
+            serde_json::json!(page.relations.contradicts)
         );
     }
 
@@ -5539,6 +5533,73 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(rows, vec![("session".to_string(), session.to_string())]);
+    }
+
+    /// An empty provider batch records the absent anchor without rewriting the
+    /// captured observations or ending the session again.
+    #[tokio::test]
+    async fn curation_empty_batch_records_no_page_without_rewriting_session_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, wiki, session, ws, proj) = batch_fixture(tmp.path()).await;
+        store.writer.end_session(session, None).await.unwrap();
+        store
+            .writer
+            .enqueue_session_consolidation(ws, proj, session)
+            .await
+            .unwrap();
+        let db = rusqlite::Connection::open(store.db_path()).unwrap();
+        let snapshot = || -> (Option<i64>, Option<i64>, String) {
+            db.query_row(
+                "SELECT ended_at, ended_observation_count, \
+                (SELECT json_group_array(json_object('id', hex(id), 'title', title, 'body', body, \
+                 'kind', kind, 'workspace', hex(workspace_id), 'project', hex(project_id), \
+                 'created_at', created_at)) FROM observations WHERE session_id = ?1) \
+                 FROM sessions WHERE id = ?1",
+                [session.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+        let before = snapshot();
+        let outcomes = Consolidator::new(
+            store.reader.clone(),
+            store.writer.clone(),
+            wiki,
+            Arc::new(ScriptedLlm(
+                serde_json::json!({"rationale": "No additional facts.", "updates": []}),
+            )),
+            ws,
+            proj,
+        )
+        .consolidate_session_multi(
+            session,
+            false,
+            ai_memory_core::ActorContext::anonymous(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(outcomes.is_empty());
+        let (state, reason, summary): (String, Option<String>, Option<Vec<u8>>) = db
+            .query_row(
+                "SELECT j.state, j.last_error, s.summary_page_id FROM sessions s \
+                JOIN session_consolidation_jobs j ON j.session_id = s.id WHERE s.id = ?1",
+                [session.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "completed");
+        assert!(
+            reason.is_some_and(|reason| reason.contains("no_session_page")),
+            "a no-op must not masquerade as a written summary"
+        );
+        assert_eq!(summary, None);
+        assert_eq!(
+            snapshot(),
+            before,
+            "summary reconciliation never changes end time or observations"
+        );
     }
 
     /// The multi-page provider path uses the same provenance contract for its
@@ -6767,7 +6828,7 @@ mod tests {
     /// Typed `relations:` targets must resolve, whether local or cross-scope;
     /// unlike ordinary body links, a local relation may not dangle.
     #[tokio::test]
-    async fn single_page_drops_unresolved_cross_scope_relations() {
+    async fn curation_single_page_retains_raw_relations_but_indexes_only_existing_targets() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, wiki, session, ws, proj) = batch_fixture(tmp.path()).await;
         seed_other_project_page(&store, &wiki, ws, "otherproj", "notes/exists.md").await;
@@ -6819,11 +6880,30 @@ mod tests {
         let stored = wiki.read_page(ws, proj, &path).unwrap();
         assert_eq!(
             stored.frontmatter["relations"]["causes"],
-            serde_json::json!(["otherproj:notes/exists.md", "notes/local.md"]),
+            serde_json::json!([
+                "otherproj:notes/missing.md",
+                "otherproj:notes/exists.md",
+                "notes/local.md",
+                "notes/missing.md"
+            ]),
             "{}",
             stored.frontmatter
         );
-        assert!(stored.frontmatter["relations"].get("fixes").is_none());
+        assert_eq!(
+            stored.frontmatter["relations"]["fixes"],
+            serde_json::json!(["ghostproj:x.md"])
+        );
+        let indexed: Vec<(String, String, bool)> = store.reader.with_conn(move |conn| {
+            Ok(conn.prepare("SELECT link_type,to_path,to_page_id IS NOT NULL FROM links WHERE from_page_id=(SELECT id FROM pages WHERE workspace_id=?1 AND project_id=?2 AND path=?3 AND is_latest=1) AND link_type <> 'references' ORDER BY to_path")?
+                .query_map(rusqlite::params![ws.as_bytes(),proj.as_bytes(),path.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?.collect::<Result<Vec<_>, _>>()?)
+        }).await.unwrap();
+        assert_eq!(
+            indexed,
+            vec![
+                ("causes".into(), "notes/exists.md".into(), true),
+                ("causes".into(), "notes/local.md".into(), true)
+            ]
+        );
         assert!(stored.body.contains("[[notes/missing.md]]"));
     }
 }

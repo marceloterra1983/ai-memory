@@ -12,6 +12,8 @@
 //! which is what makes the equivalence tests independent. The other shared
 //! helpers they call (`count_chars`, the render functions) are the current
 //! ones: their behaviour is pinned by the consolidator unit tests.
+//! The relation-field wording includes the phase-B exact-target contract;
+//! projection, ordering and budget algorithms remain independent frozen copies.
 
 use super::*;
 use crate::consolidator::frozen_projection_oracle::{
@@ -151,7 +153,7 @@ pub(crate) fn oracle_batch_request(
          - \"kind\"            (string)  required — one of: decision | gotcha | rule | fact\n\
          - \"tags\"            (array of string)  required — may be empty `[]`, but the key must be present\n\
          - \"entities\"        (array of string)  required — may be empty `[]`, but the key must be present; see below\n\
-         - \"relations\"       (object) optional — keys: \"causes\", \"fixes\", \"contradicts\"; each contains an array of existing wiki paths. Declare only evidence-backed edges; empty arrays are normal.\n\
+         - \"relations\"       (object) optional — keys: \"causes\", \"fixes\", \"contradicts\"; exact existing .md paths (or [workspace/]project:path.md); no titles/None/Nenhuma/N/A, else [].\n\
          - \"slot_kind\"       (string) optional — ONLY for `_slots/*`; one of \"state\" or \"invariant\"; this is the SLOT WRITE REGIME, NOT a tier value\n\
          - \"summary\"         (string) optional — ONE line of plain prose describing the page, shown beside its title. Headings, `- **key:** value` bullets, list items, and repeated titles are discarded. Omit rather than guess.\n\
          Use only the keys listed above. No `body`, no `content`. Field names \

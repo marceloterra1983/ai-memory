@@ -1551,7 +1551,7 @@ fn batch_request_plan(
          - \"kind\"            (string)  required — one of: decision | gotcha | rule | fact\n\
          - \"tags\"            (array of string)  required — may be empty `[]`, but the key must be present\n\
          - \"entities\"        (array of string)  required — may be empty `[]`, but the key must be present; see below\n\
-         - \"relations\"       (object) optional — keys: \"causes\", \"fixes\", \"contradicts\"; each contains exact existing .md wiki paths, optionally [workspace/]project:path.md. Never titles or absence markers (None, Nenhuma, N/A). Do not infer paths; use empty arrays when no exact target is known. Declare only evidence-backed edges.\n\
+         - \"relations\"       (object) optional — keys: \"causes\", \"fixes\", \"contradicts\"; exact existing .md paths (or [workspace/]project:path.md); no titles/None/Nenhuma/N/A, else [].\n\
          - \"slot_kind\"       (string) optional — ONLY for `_slots/*`; one of \"state\" or \"invariant\"; this is the SLOT WRITE REGIME, NOT a tier value\n\
          - \"summary\"         (string) optional — ONE line of plain prose describing the page, shown beside its title. Headings, `- **key:** value` bullets, list items, and repeated titles are discarded. Omit rather than guess.\n\
          Use only the keys listed above. No `body`, no `content`. Field names \

@@ -3520,17 +3520,16 @@ pub fn admit_hook_session_event(
         agent_kind: session.agent_kind,
         owner,
     };
-    if session_end && ended_at.is_some() {
+    let already_ended = if session_end && ended_at.is_some() {
         let count: u64 = tx.query_row(
             "SELECT COUNT(*) FROM observations WHERE session_id = ?1",
             params![session.id.as_bytes()],
             |r| r.get(0),
         )?;
-        if count <= ended_count {
-            tx.commit()?;
-            return Ok(HookSessionAdmission::AlreadyEnded { session: guard });
-        }
-    }
+        count <= ended_count
+    } else {
+        false
+    };
     let ingest = if let Some(key) = ingest_key {
         tx.execute(
             "DELETE FROM ingest_keys WHERE recovery_retained = 0 AND seen_at < ?1",
@@ -3584,12 +3583,26 @@ pub fn admit_hook_session_event(
                         i64::from(recovery)
                     ],
                 )?;
-                IngestObservationOutcome::Inserted(insert_observation_row(&tx, obs)?)
+                if already_ended {
+                    IngestObservationOutcome::ResumePending
+                } else {
+                    IngestObservationOutcome::Inserted(insert_observation_row(&tx, obs)?)
+                }
             }
         }
+    } else if already_ended {
+        IngestObservationOutcome::ResumePending
     } else {
         IngestObservationOutcome::Inserted(insert_observation_row(&tx, obs)?)
     };
+    // A distinct terminal envelope still needs its own receipt, even when an
+    // earlier end already produced the artifacts. Claim and validate recovery
+    // identity above, then repair effects without duplicating the observation.
+    if already_ended {
+        tx.commit()?;
+        return Ok(HookSessionAdmission::AlreadyEnded { session: guard });
+    }
+
     // Compare-and-set on the source cwd so a stale or out-of-order move never
     // rebinds a newer location. Only the first admission of a keyed move may
     // rebind: a redelivery (complete or resumed) already had its chance in the

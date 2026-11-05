@@ -5880,3 +5880,150 @@ async fn a_refused_link_names_the_holder_only_for_the_runs_own_operator_and_harn
     assert_eq!(holder("mine-new").await, None);
     assert_eq!(holder("never-seen").await, None);
 }
+
+/// A repeated end claims a fresh recovery receipt without losing the modern
+/// provenance fields or accepting the same key for another event identity.
+#[tokio::test]
+async fn repeated_end_recovery_receipt_preserves_identity_and_completion() {
+    use ai_memory_core::{NewObservation, ObservationKind, Sanitized, Sanitizer};
+    use ai_memory_store::HookSessionAdmission;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (ws, project) = scope(&store).await;
+    let sid = SessionId::new();
+    let session = NewSession {
+        id: sid,
+        workspace_id: ws,
+        project_id: project,
+        agent_kind: AgentKind::Codex,
+        cwd: Some("/synthetic".into()),
+        actor_user: None,
+        occurred_at: None,
+    };
+    let observation = |kind, body: &str| {
+        Sanitized::new(
+            NewObservation {
+                session_id: sid,
+                workspace_id: ws,
+                project_id: project,
+                kind,
+                extension: None,
+                source_event: None,
+                title: "synthetic event".into(),
+                body: body.into(),
+                importance: 5,
+                occurred_at: None,
+                file_path: None,
+            },
+            &Sanitizer::builtin(),
+        )
+    };
+    let initial = store
+        .writer
+        .admit_hook_session_event(
+            session.clone(),
+            observation(ObservationKind::UserPrompt, "finish work"),
+            OwnerFilter::Unattributed,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let HookSessionAdmission::Observation {
+        session: admitted, ..
+    } = initial
+    else {
+        panic!("initial event not admitted");
+    };
+    store
+        .writer
+        .end_admitted_session(admitted, None, None)
+        .await
+        .unwrap();
+    let key = format!("recovery_{}", "a".repeat(55));
+    let end = || observation(ObservationKind::SessionEnd, "done");
+    assert!(matches!(
+        store
+            .writer
+            .admit_hook_session_event(
+                session.clone(),
+                end(),
+                OwnerFilter::Unattributed,
+                Some(key.clone()),
+                None,
+            )
+            .await
+            .unwrap(),
+        HookSessionAdmission::AlreadyEnded { .. }
+    ));
+    let key_query = key.clone();
+    let row: (Option<Vec<u8>>, Option<String>, Option<String>, bool, bool) = store.reader.with_conn(move |conn| {
+        Ok(conn.query_row("SELECT session_id, agent_kind, observation_kind, event_identity IS NOT NULL, recovery_retained FROM ingest_keys WHERE key=?1", [key_query], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?)
+    }).await.unwrap();
+    assert_eq!(
+        row,
+        (
+            Some(sid.as_bytes().to_vec()),
+            Some("codex".into()),
+            Some("session-end".into()),
+            true,
+            true
+        )
+    );
+    store
+        .writer
+        .complete_observation_ingest(project, key.clone())
+        .await
+        .unwrap();
+    let completed_before: i64 = store
+        .reader
+        .with_conn(|conn| {
+            Ok(conn.query_row("SELECT completed_at FROM ingest_keys", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .writer
+            .admit_hook_session_event(
+                session.clone(),
+                end(),
+                OwnerFilter::Unattributed,
+                Some(key.clone()),
+                None,
+            )
+            .await
+            .unwrap(),
+        HookSessionAdmission::AlreadyEnded { .. }
+    ));
+    let completed_after: i64 = store
+        .reader
+        .with_conn(|conn| {
+            Ok(conn.query_row("SELECT completed_at FROM ingest_keys", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(completed_after, completed_before);
+    let error = store
+        .writer
+        .admit_hook_session_event(
+            session,
+            observation(ObservationKind::SessionEnd, "changed event"),
+            OwnerFilter::Unattributed,
+            Some(key),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StoreError::SessionCollision));
+    assert_eq!(
+        store
+            .reader
+            .observations_for_session(sid)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

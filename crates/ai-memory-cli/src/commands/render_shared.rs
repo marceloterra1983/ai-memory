@@ -393,9 +393,8 @@ pub(crate) fn ts_string_literal(s: &str) -> String {
 /// Two things it deliberately does not do. It does not suppress the consumer's
 /// routing work around the call (`applyMarkerParams` reads the marker before
 /// `capturePolicy` is even reached), and it does not erase an existing spool
-/// backlog: a consumer that reaches `drainHookQueue` — on dispose, for
-/// instance — still kicks off `requestSpoolDrain`, so events spooled before the
-/// handover can still be delivered.
+/// backlog. Receipt-free TypeScript drains are disabled; existing envelopes
+/// await the external receipt worker or an explicit native drain.
 #[must_use]
 pub(crate) fn ts_capture_policy_v1(capture_mode: &str) -> String {
     const TEMPLATE: &str = r##"// capture-policy-v1 (generated; do not fork between adapters)
@@ -3165,6 +3164,7 @@ function hookStatusRetryable(status: number): boolean {
 let spoolDrainPromise: Promise<void> | undefined;
 
 function requestSpoolDrain(): void {
+  return; // ai-memory-hook-delivery owns the spool; TS drain deletes without receipts.
   if (spoolDrainPromise) return;
   spoolDrainPromise = drainHookSpool().finally(() => {
     spoolDrainPromise = undefined;
@@ -3547,6 +3547,21 @@ mod tests {
             shape,
             HookCommandContext::new(HookCommandPlatform::Posix, "claude-code", None, None),
         )
+    }
+
+    #[test]
+    #[ignore = "requires Node; phase-A delivery gate runs it explicitly"]
+    fn generated_ts_spool_drain_requires_external_receipt() {
+        let source = ts_spool_runtime();
+        let start = source.find("function requestSpoolDrain(): void {").unwrap();
+        let end = start + source[start..].find("\n}").unwrap() + 2;
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("drain.ts");
+        std::fs::write(&script, format!(
+            "let calls = 0; let spoolDrainPromise: Promise<void> | undefined;\nasync function drainHookSpool() {{ calls++; }}\n{}\nrequestSpoolDrain(); await Promise.resolve(); if(calls !== 0) throw new Error('receipt-free drain consumed worker envelopes');\n", &source[start..end]
+        )).unwrap();
+        let output = std::process::Command::new("node").arg("--experimental-strip-types").arg(script).output().expect("Node is needed for the delivery contract proof");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     }
 
     #[test]

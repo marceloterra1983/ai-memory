@@ -20923,6 +20923,125 @@ pub(crate) mod tests {
         assert_eq!(briefing.pending_handoff_count, 1, "the baton is still made");
     }
 
+    /// A distinct valid end needs its own receipt, even when an earlier end
+    /// already wrote the artifacts. A failed repair must leave it resumable.
+    #[tokio::test]
+    async fn already_ended_new_key_repairs_before_receipt_and_replay_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = make_state(&tmp).await;
+        let sid = SessionId::new();
+        let fire = |event: &str, key: Option<&str>| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("codex".into()),
+                    workspace: Some("default".into()),
+                    project: Some("scratch".into()),
+                    ingest_key: key.map(str::to_owned),
+                    ..Default::default()
+                },
+                serde_json::json!({"session_id": sid.to_string(), "prompt": "finish work"}),
+            )
+        };
+        process(&state, fire("user-prompt-submit", None), None, Vec::new())
+            .await
+            .unwrap();
+        process(&state, fire("session-end", None), None, Vec::new())
+            .await
+            .unwrap();
+        let llm = Arc::new(RecordingLlm(Mutex::new(None)));
+        state.consolidator = Some(Arc::new(Consolidator::new(
+            state.reader.clone(),
+            state.writer.clone(),
+            state.wiki.clone(),
+            llm.clone(),
+            state.workspace_id,
+            state.project_id,
+        )));
+        state.consolidate_on_session_end = true;
+        state.session_consolidation_notify = Some(Arc::new(tokio::sync::Notify::new()));
+
+        // This connection alters only the disposable fixture. Refuse the real
+        // queue write to reproduce failure after admission but before receipt.
+        let db = rusqlite::Connection::open(tmp.path().join("db/memory.sqlite")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_end_repair BEFORE INSERT ON session_consolidation_jobs BEGIN SELECT RAISE(ABORT, 'repair failed'); END;").unwrap();
+        assert!(
+            process(
+                &state,
+                fire("session-end", Some("distinct-end")),
+                None,
+                Vec::new()
+            )
+            .await
+            .is_err()
+        );
+        let pending: (u64, u64) = state.reader.with_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*), COUNT(completed_at) FROM ingest_keys WHERE key = 'distinct-end'", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        }).await.unwrap();
+        assert_eq!(
+            pending,
+            (1, 0),
+            "valid end must claim its new key, but never complete a failed repair"
+        );
+        db.execute_batch("DROP TRIGGER fail_end_repair;").unwrap();
+
+        let (first, replay) = tokio::join!(
+            process(
+                &state,
+                fire("session-end", Some("distinct-end")),
+                None,
+                Vec::new()
+            ),
+            process(
+                &state,
+                fire("session-end", Some("distinct-end")),
+                None,
+                Vec::new()
+            ),
+        );
+        first.unwrap();
+        replay.unwrap();
+        let before: i64 = state
+            .reader
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT completed_at FROM ingest_keys WHERE key = 'distinct-end'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        process(
+            &state,
+            fire("session-end", Some("another-end")),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        process(
+            &state,
+            fire("session-end", Some("distinct-end")),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let counts = state.reader.with_conn(|conn| {
+            Ok(conn.query_row("SELECT (SELECT COUNT(*) FROM observations), (SELECT COUNT(*) FROM pages WHERE path GLOB 'sessions/*'), (SELECT COUNT(*) FROM handoffs), (SELECT COUNT(*) FROM session_consolidation_jobs), (SELECT COUNT(completed_at) FROM ingest_keys), (SELECT completed_at FROM ingest_keys WHERE key = 'distinct-end')", [], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?, r.get::<_, u64>(2)?, r.get::<_, u64>(3)?, r.get::<_, u64>(4)?, r.get::<_, i64>(5)?)))?)
+        }).await.unwrap();
+        assert_eq!(
+            counts,
+            (2, 1, 1, 1, 2, before),
+            "new receipts and replays must preserve observations, summary, handoff, queue generation and original completion time"
+        );
+        assert!(
+            llm.0.lock().unwrap().is_none(),
+            "end repair queues work without calling the provider"
+        );
+    }
+
     #[tokio::test]
     async fn session_end_queues_llm_work_without_calling_provider() {
         let tmp = TempDir::new().unwrap();

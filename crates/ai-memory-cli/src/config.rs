@@ -577,6 +577,9 @@ pub struct Config {
     /// Separate `openai-compat` query endpoint; documents keep `embedding_base_url`.
     /// Set via `AI_MEMORY_EMBEDDING_QUERY_BASE_URL` or TOML. Blank is unset.
     pub embedding_query_base_url: Option<String>,
+    /// Document-only compat embedding deadline, including response consumption.
+    /// Set via `AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS`; range 1..=1800.
+    pub embedding_document_timeout_secs: u64,
     /// Optional prefix prepended to every embedding **query** before it is
     /// sent to the `openai` or `openai-compat` embedder, ahead of the
     /// existing truncation. Unset (the default) is a no-op — no behaviour
@@ -1500,6 +1503,7 @@ impl Default for Config {
             embedding_dim: None,
             embedding_base_url: None,
             embedding_query_base_url: None,
+            embedding_document_timeout_secs: 120,
             embedding_query_prefix: None,
             embedding_document_prefix: None,
             decay: DecaySettings::default(),
@@ -3356,6 +3360,7 @@ impl Config {
             api_key,
             base_url,
             query_base_url: non_empty(self.embedding_query_base_url.as_deref()).map(str::to_string),
+            document_timeout_secs: self.embedding_document_timeout_secs,
             models_dir: Some(self.data_dir.join("models")),
             copilot_auth,
             defaulted,

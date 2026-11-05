@@ -30,6 +30,22 @@ use crate::text::{truncate_for_embedding, truncate_with_ellipsis};
 /// (8192 token server limit; we stay well below with head truncation).
 pub(crate) const OPENAI_EMBED_MAX_TOKENS: usize = 5000;
 
+/// Default document embedding request deadline, including response consumption.
+pub const DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS: u64 = 120;
+
+/// Validate the document-only deadline from the configuration boundary.
+///
+/// # Errors
+/// Refuses zero and deadlines above the finite 1800-second ceiling.
+pub fn embedding_document_timeout(seconds: u64) -> LlmResult<Duration> {
+    if !(1..=1800).contains(&seconds) {
+        return Err(LlmError::NotConfigured(
+            "embedding_document_timeout_secs / AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS must be between 1 and 1800".into(),
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
 /// Provider-agnostic embedding API.
 ///
 /// Implementations must be `Send + Sync` (the MCP server / hook
@@ -353,6 +369,7 @@ async fn openai_style_embed(
     model: &str,
     dim: u32,
     text: &str,
+    timeout: Option<Duration>,
 ) -> LlmResult<Vec<f32>> {
     let input = truncate_for_embedding(text, OPENAI_EMBED_MAX_TOKENS);
     let url = normalize_openai_base(base_url, "embeddings");
@@ -370,6 +387,9 @@ async fn openai_style_embed(
     let mut waited = Duration::ZERO;
     loop {
         let mut builder = client.post(&url);
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout);
+        }
         if let Some(key) = api_key {
             builder = builder.bearer_auth(key.expose_secret());
         }
@@ -436,6 +456,7 @@ impl Embedder for OpenAiEmbedder {
             &self.model,
             self.dim,
             text,
+            None,
         )
         .await
     }
@@ -449,6 +470,7 @@ impl Embedder for OpenAiEmbedder {
             &self.model,
             self.dim,
             &prefixed,
+            None,
         )
         .await
     }
@@ -462,6 +484,7 @@ impl Embedder for OpenAiEmbedder {
             &self.model,
             self.dim,
             &prefixed,
+            None,
         )
         .await
     }
@@ -475,6 +498,7 @@ impl Embedder for OpenAiEmbedder {
 /// check treats them as their own family.
 pub struct OpenAiCompatEmbedder {
     client: reqwest::Client,
+    document_timeout: Duration,
     api_key: Option<SecretString>,
     base_url: String,
     query_base_url: Option<String>,
@@ -517,6 +541,7 @@ impl OpenAiCompatEmbedder {
             .build()?;
         Ok(Self {
             client,
+            document_timeout: Duration::from_secs(DEFAULT_EMBEDDING_DOCUMENT_TIMEOUT_SECS),
             api_key,
             base_url: base_url.into(),
             query_base_url: None,
@@ -525,6 +550,15 @@ impl OpenAiCompatEmbedder {
             query_prefix: String::new(),
             document_prefix: String::new(),
         })
+    }
+
+    /// Set the document request deadline; queries keep their 120-second budget.
+    ///
+    /// # Errors
+    /// Refuses seconds outside 1..=1800.
+    pub fn with_document_timeout_secs(mut self, seconds: u64) -> LlmResult<Self> {
+        self.document_timeout = embedding_document_timeout(seconds)?;
+        Ok(self)
     }
 
     /// Override only the query endpoint, leaving document identity unchanged.
@@ -583,6 +617,7 @@ impl Embedder for OpenAiCompatEmbedder {
             &self.model,
             self.dim,
             text,
+            Some(self.document_timeout),
         )
         .await
     }
@@ -596,6 +631,7 @@ impl Embedder for OpenAiCompatEmbedder {
             &self.model,
             self.dim,
             &prefixed,
+            Some(self.document_timeout),
         )
         .await
     }
@@ -609,6 +645,7 @@ impl Embedder for OpenAiCompatEmbedder {
             &self.model,
             self.dim,
             &prefixed,
+            None,
         )
         .await
     }

@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Restored the configurable compat document deadline, including response-body consumption; queries keep their separate budget (`29549016`).
+
 - Scrubbed complete assistant and native transcript text before byte caps could split secret delimiters (`eebdd33c`, `d6a28c77`).
 
 - Reauthorized hook writes and managed-run bindings against their effective project inside the transaction, including retry; private web responses now require grant revalidation (`d6db29ad`).

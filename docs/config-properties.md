@@ -44,6 +44,7 @@ Defaults that come from a named constant or from another crate say so in the Def
 | `embedding_model` | unset | `AI_MEMORY_EMBEDDING_MODEL` | Provider-specific embedding model override. |
 | `embedding_dim` | unset | `AI_MEMORY_EMBEDDING_DIM` | Embedding dimension override. It must match the model. |
 | `embedding_base_url` | unset | `AI_MEMORY_EMBEDDING_BASE_URL` | Embedding endpoint override. Required when `embedding_provider` is `openai-compat`. |
+| `embedding_document_timeout_secs` | `120` | `AI_MEMORY_EMBEDDING_DOCUMENT_TIMEOUT_SECS` | Document-only compat deadline including response body, 1..=1800 seconds. |
 | `embedding_query_base_url` | unset | `AI_MEMORY_EMBEDDING_QUERY_BASE_URL` | Separate query-only endpoint for openai-compat; document vectors retain their identity. |
 | `embedding_query_prefix` | unset | `AI_MEMORY_EMBEDDING_QUERY_PREFIX` | Text prepended to every embedding query for the `openai` and `openai-compat` embedders. Kept verbatim. |
 | `embedding_document_prefix` | unset | `AI_MEMORY_EMBEDDING_DOCUMENT_PREFIX` | Text prepended to every page before embedding. Part of the stored embedding identity. |

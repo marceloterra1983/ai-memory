@@ -316,6 +316,9 @@ log_level = "info"
 #   idle_end_after_hours = 24
 
 # embedding_query_base_url = "http://127.0.0.1:59002/v1" # Query-only compat endpoint; documents keep embedding_base_url.
+# Document-only compat request deadline, including response consumption (1..=1800).
+embedding_document_timeout_secs = 120
+
 [decay]
 lambda = 0.02
 sigma = 0.6

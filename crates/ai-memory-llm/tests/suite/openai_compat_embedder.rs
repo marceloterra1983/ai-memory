@@ -106,6 +106,7 @@ async fn factory_built_compat_embedder_sends_no_request_id_header() {
         api_key: SecretString::from(String::new()),
         base_url: Some(format!("{}/v1", server.uri())),
         query_base_url: None,
+        document_timeout_secs: 120,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -126,6 +127,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         api_key: SecretString::from(String::new()),
         base_url: Some("http://localhost:11434/v1".into()),
         query_base_url: None,
+        document_timeout_secs: 120,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -143,6 +145,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         api_key: SecretString::from(String::new()),
         base_url: None,
         query_base_url: None,
+        document_timeout_secs: 120,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -164,6 +167,7 @@ async fn factory_builds_compat_embedder_and_requires_base_url() {
         api_key: SecretString::from(String::new()),
         base_url: Some("http://localhost:11434/v1".into()),
         query_base_url: None,
+        document_timeout_secs: 120,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -313,6 +317,7 @@ async fn factory_wires_configured_prefixes_into_the_compat_embedder() {
         api_key: SecretString::from(String::new()),
         base_url: Some(format!("{}/v1", server.uri())),
         query_base_url: None,
+        document_timeout_secs: 120,
         models_dir: None,
         copilot_auth: None,
         defaulted: false,
@@ -363,4 +368,32 @@ async fn query_endpoint_is_separate_from_documents_and_identity() {
     assert_eq!(embedder.model_identity(), "fixture");
     embedder.embed_document("document").await.unwrap();
     embedder.embed_query("query").await.unwrap();
+}
+
+#[tokio::test]
+async fn compat_document_timeout_covers_response_body_but_queries_keep_their_budget() {
+    use std::io::{Read, Write};
+    let listener = (59100..59200)
+        .find_map(|port| std::net::TcpListener::bind(("127.0.0.1", port)).ok())
+        .expect("isolated high port");
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request);
+            let body = embedding_body(8).to_string();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            socket.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1150));
+            let _ = socket.write_all(body.as_bytes());
+        }
+    });
+    let embedder = OpenAiCompatEmbedder::new(format!("http://{address}/v1"), None, "fixture", 8)
+        .unwrap()
+        .with_document_timeout_secs(1)
+        .unwrap();
+    assert!(embedder.embed_document("document").await.is_err());
+    assert!(embedder.embed_query("query").await.is_ok());
+    server.join().unwrap();
 }

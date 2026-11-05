@@ -204,6 +204,12 @@ pub(crate) enum WriteCmd {
         pages: Vec<(NewPage, ops::PagePrecondition)>,
         reply: oneshot::Sender<StoreResult<ops::ConditionalBatchUpsert>>,
     },
+    UpsertDreamPageBatch {
+        pages: Vec<NewPage>,
+        heads: Vec<crate::DreamHead>,
+        cancel: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+        reply: oneshot::Sender<StoreResult<Vec<PageId>>>,
+    },
     DeletePage {
         workspace_id: WorkspaceId,
         project_id: ProjectId,
@@ -3178,6 +3184,28 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Apply a dream batch only when every source still matches within the
+    /// same writer transaction. Cancellation before commit rolls back all rows.
+    ///
+    /// # Errors
+    /// Refuses stale/ineligible sources, cancellation, or mismatched coordinates.
+    pub async fn upsert_dream_pages_batch(
+        &self,
+        pages: Vec<NewPage>,
+        heads: Vec<crate::DreamHead>,
+        cancel: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> StoreResult<Vec<PageId>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::UpsertDreamPageBatch {
+            pages,
+            heads,
+            cancel,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Upsert a page (creating it or superseding the existing latest
     /// version when the body has changed).
     ///
@@ -4481,6 +4509,20 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::UpsertPageBatchIf { pages, reply } => {
                 let result = ops::upsert_pages_batch_if(&mut conn, &pages);
                 send_or_warn(reply, result, "upsert_pages_batch_if");
+            }
+            WriteCmd::UpsertDreamPageBatch {
+                pages,
+                heads,
+                cancel,
+                reply,
+            } => {
+                let result = crate::dream::upsert_dream_pages_batch(
+                    &mut conn,
+                    &pages,
+                    &heads,
+                    cancel.as_ref(),
+                );
+                send_or_warn(reply, result, "upsert_dream_pages_batch");
             }
             WriteCmd::BeginSession { session, reply } => {
                 let result = ops::begin_session(&mut conn, &session);

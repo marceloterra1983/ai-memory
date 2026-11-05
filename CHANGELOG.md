@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Excluded the normalized scoped project name from entity votes, retaining other matching entities and the installer’s exact fixbrainrank guard (`c4ea6bb3`).
+
 - Preserved full-document local compat embeddings with UTF-8 chunks and source-byte pooling whenever `dream.scopes` is nonempty, including with dream disabled (`f3f00446`).
 
 - Restored the configurable compat document deadline, including response-body consumption; queries keep their separate budget (`29549016`).

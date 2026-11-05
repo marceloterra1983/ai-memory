@@ -7814,8 +7814,20 @@ impl ReaderPool {
         let cutoff = expiry_cutoff_us.unwrap_or_else(now_us);
         let (kept, kept_params) = filter.sql("pg", anonymous_placeholder);
         self.with_conn(move |conn| {
+            let project_name: Option<String> = conn
+                .query_row(
+                    "SELECT name FROM projects WHERE id = ?1 AND workspace_id = ?2",
+                    params![project_id.as_bytes(), workspace_id.as_bytes()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            // The project name identifies the scope, not a topic within it.
+            let project_entity = project_name
+                .as_deref()
+                .and_then(ai_memory_core::normalize_entity)
+                .unwrap_or_default();
             let mut placeholders = String::with_capacity(tokens.len() * 96);
-            let mut sql_params: Vec<Value> = Vec::with_capacity(tokens.len() * 5 + 7);
+            let mut sql_params: Vec<Value> = Vec::with_capacity(tokens.len() * 5 + 8);
             for (idx, token) in tokens.iter().enumerate() {
                 if idx > 0 {
                     placeholders.push_str(" OR ");
@@ -7840,6 +7852,7 @@ impl ReaderPool {
             }
             sql_params.push(Value::Blob(workspace_id.as_bytes().to_vec()));
             sql_params.push(Value::Blob(project_id.as_bytes().to_vec()));
+            sql_params.push(Value::Text(project_entity));
             match as_of_us {
                 Some(t) => {
                     // freq window + outer window: two params each.
@@ -7870,6 +7883,7 @@ impl ReaderPool {
                    FROM entities e \
                    WHERE ({placeholders}) \
                      AND e.workspace_id = ? AND e.project_id = ? \
+                     AND e.name <> ? \
                  ), \
                  freq AS ( \
                    SELECT m.entity_id, m.name, COUNT(*) AS pages \

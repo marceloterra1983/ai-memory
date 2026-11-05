@@ -1,8 +1,35 @@
 //! Synthetic compatibility fixtures for local runtime variants.
 
-use ai_memory_core::{AgentKind, NewHandoff, NewSession, ProjectId, SessionId, WorkspaceId};
+use ai_memory_core::{
+    AgentKind, NewHandoff, NewPage, NewSession, PagePath, ProjectId, SessionId, Tier, WorkspaceId,
+};
 use ai_memory_store::Store;
 use rusqlite::{Connection, params};
+
+fn page(
+    ws: WorkspaceId,
+    proj: ProjectId,
+    path: &str,
+    title: &str,
+    body: &str,
+    tier: Tier,
+) -> NewPage {
+    NewPage {
+        workspace_id: ws,
+        project_id: proj,
+        path: PagePath::new(path).unwrap(),
+        title: title.into(),
+        body: body.into(),
+        tier,
+        frontmatter_json: serde_json::json!({}),
+        pinned: false,
+        links: Vec::new(),
+        author_id: None,
+        expires_at: None,
+        entities: Vec::new(),
+        evidence: Vec::new(),
+    }
+}
 
 async fn fixture() -> (tempfile::TempDir, Store, WorkspaceId, ProjectId) {
     let tmp = tempfile::tempdir().unwrap();
@@ -308,5 +335,97 @@ async fn unreadable_open_handoff_does_not_hide_a_deliverable_baton() {
             .await
             .is_err(),
         "a SQLite failure must still propagate"
+    );
+}
+
+#[tokio::test]
+async fn recent_summaries_bound_sql_work_and_keep_live_scope_and_order() {
+    let (_tmp, store, ws, proj) = fixture().await;
+    let mut ids = Vec::new();
+    for name in ["old", "a", "b", "expired"] {
+        ids.push(
+            store
+                .writer
+                .upsert_page(page(
+                    ws,
+                    proj,
+                    &format!("notes/{name}.md"),
+                    name,
+                    "text",
+                    Tier::Semantic,
+                ))
+                .await
+                .unwrap(),
+        );
+    }
+    let foreign_ws = store.writer.get_or_create_workspace("other").await.unwrap();
+    let foreign = store
+        .writer
+        .get_or_create_project(foreign_ws, "app", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(page(
+            foreign_ws,
+            foreign,
+            "foreign.md",
+            "Foreign",
+            "text",
+            Tier::Semantic,
+        ))
+        .await
+        .unwrap();
+    let conn = Connection::open(store.db_path()).unwrap();
+    conn.execute(
+        "UPDATE pages SET updated_at = 1, title = zeroblob(1) WHERE id = ?1",
+        [ids[0].as_bytes()],
+    )
+    .unwrap();
+    for id in &ids[1..3] {
+        conn.execute(
+            "UPDATE pages SET updated_at = 2000000 WHERE id = ?1",
+            [id.as_bytes()],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "UPDATE pages SET updated_at = 3000000, expires_at = 1 WHERE id = ?1",
+        [ids[3].as_bytes()],
+    )
+    .unwrap();
+    let recent = store
+        .reader
+        .recent_page_summaries("default", "app", 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        recent.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+        ["notes/a.md", "notes/b.md"]
+    );
+    assert_eq!(
+        store
+            .reader
+            .recent_page_summaries("default", "app", 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .reader
+            .recent_page_summaries("default", "absent", 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .reader
+            .list_unexpired_pages("default", "app")
+            .await
+            .is_err(),
+        "the unreadable older row is a positive control: a full scan must decode it"
     );
 }

@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Applied recent-page limits in SQL before decoding the tail, retaining TTL, timestamp ordering and cursor pagination (`985e96d2`).
+
 - Recognized ASCII `title:` and `body:` FTS field prefixes regardless of case, preserving punctuation, grouping and prefix queries (`b078dcb1`).
 
 - Skipped indecodable legacy handoffs without hiding valid items, promoting automatic items, or swallowing SQLite failures (`59873022`).

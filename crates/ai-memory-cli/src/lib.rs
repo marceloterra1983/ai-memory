@@ -219,6 +219,7 @@ async fn dispatch(
         Command::ForgetSweep(args) => commands::forget_sweep::run(&config, args).await,
         Command::Lint(args) => commands::lint::run(&config, args).await,
         Command::Curator(args) => commands::curator::run(&config, args).await,
+        Command::Dream(args) => commands::dream::run(&config, args).await,
         Command::AutoImproveReport(args) => commands::auto_improve_report::run(&config, args).await,
         Command::AutoImprove(args) => commands::auto_improve::run(&config, args).await,
         Command::FinalizeSession(args) => commands::finalize_session::run(&config, args).await,

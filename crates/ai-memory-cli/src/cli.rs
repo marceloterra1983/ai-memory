@@ -315,6 +315,8 @@ pub enum Command {
     Lint(LintArgs),
     /// Run the rule-based curator report.
     Curator(CuratorArgs),
+    /// Plan local consolidation for one exact allowlisted scope; --apply writes.
+    Dream(DreamArgs),
     /// Run a read-only auto-improvement telemetry report.
     AutoImproveReport(AutoImproveReportArgs),
     /// Run auto-improvement for one completed session.
@@ -3137,6 +3139,23 @@ pub struct EmbedArgs {
     /// same project sessions write into.
     #[arg(long)]
     pub project: Option<String>,
+}
+
+/// Arguments for the thin, explicitly scoped DREAM client.
+#[derive(Debug, Args)]
+pub struct DreamArgs {
+    /// Existing workspace name. Required; cwd/marker defaults are not used.
+    #[arg(long)]
+    pub workspace: String,
+    /// Existing project name within the workspace. Required.
+    #[arg(long)]
+    pub project: String,
+    /// Explicitly admit local inference and guarded writes.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub apply: bool,
+    /// Report the plan without inference or writes (also the default).
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `forget-sweep`.

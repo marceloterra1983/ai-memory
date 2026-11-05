@@ -836,6 +836,7 @@ pub fn admin_router_with_sweep_tuning(
         .route("/admin/merge-workspace", post(handle_merge_workspace))
         .route("/admin/write-page", post(handle_write_page))
         .route("/admin/curate-relations", post(handle_curate_relations))
+        .route("/admin/dream", post(crate::dream::handle_dream))
         .route("/admin/delete-page", post(handle_delete_page));
     let users = Router::new()
         .route("/admin/users", get(handle_list_users))
@@ -12288,6 +12289,77 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
+    #[tokio::test]
+    async fn dream_admin_reuses_bootstrap_access_and_strict_request_without_primary_llm() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("fixture")
+            .await
+            .unwrap();
+        store
+            .writer
+            .get_or_create_project(ws, "app", None)
+            .await
+            .unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone())
+            .unwrap()
+            .with_store_reader(store.reader.clone());
+        let runtime = Arc::new(crate::dream::DreamRuntime::new(
+            store.reader.clone(),
+            wiki.clone(),
+            None,
+            DecayParams::default(),
+            0.0,
+            ai_memory_consolidate::DreamConfig::default(),
+            vec![crate::dream::DreamScope {
+                workspace: "fixture".into(),
+                project: "app".into(),
+            }],
+            ai_memory_consolidate::ActivityClock::default(),
+        ));
+        let auth = Arc::new(crate::auth::AuthState::new(None));
+        let router = admin_router(admin_state_for_store(&tmp, &store, wiki))
+            .layer(axum::Extension(runtime))
+            .layer(axum::middleware::from_fn_with_state(
+                auth,
+                crate::human_auth::require_dual_auth,
+            ));
+        for (payload, expected) in [
+            (
+                serde_json::json!({"workspace":"fixture","project":"app"}),
+                StatusCode::OK,
+            ),
+            (
+                serde_json::json!({"workspace":"fixture","project":"outside"}),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                serde_json::json!({"workspace":"fixture","project":"app","body":"override"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!({"workspace":"fixture","project":"app","apply":true}),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/dream")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
     fn admin_state_for_store(tmp: &TempDir, store: &Store, wiki: Wiki) -> AdminState {
         admin_state_for_store_with_llm(tmp, store, wiki, None)
     }
@@ -15273,7 +15345,16 @@ mod tests {
 
     fn admin_route_samples() -> Vec<(&'static str, &'static str, serde_json::Value)> {
         vec![
-            ("POST", "/admin/curate-relations", serde_json::json!({"workspace":"default", "project":"scratch", "path":"notes/x.md", "expected_head_id":"00000000-0000-0000-0000-000000000000", "expected_body_sha256":"00".repeat(32)})),
+            (
+                "POST",
+                "/admin/dream",
+                serde_json::json!({"workspace":"default", "project":"scratch"}),
+            ),
+            (
+                "POST",
+                "/admin/curate-relations",
+                serde_json::json!({"workspace":"default", "project":"scratch", "path":"notes/x.md", "expected_head_id":"00000000-0000-0000-0000-000000000000", "expected_body_sha256":"00".repeat(32)}),
+            ),
             ("POST", "/admin/backup", serde_json::Value::Null),
             (
                 "POST",

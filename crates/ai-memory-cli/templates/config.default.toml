@@ -731,16 +731,20 @@ mid_session = "follow-cwd"
 # built-in default named in the comment. Env equivalents:
 # `AI_MEMORY_DREAM__ENABLED=true` and `AI_MEMORY_DREAM__IDLE_WINDOW_SECS=600`.
 # [dream]
-# Local scope markers select restricted full-document compat embedding even
-# when enabled=false. Local dream execution remains a separate port.
+# Exact scopes select restricted full-document compat embedding even with
+# enabled=false. Manual plans/apply remain available; enabled controls scheduling.
+# Unknown [dream] keys are rejected. Apply requires these dedicated local models:
 # scopes = []
 #   scopes = [{ workspace = "workspace", project = "project" }]
 # enabled = false
+# llm_endpoint = "http://127.0.0.1:8000/v1"
+# llm_model = "explicit-local-draft-model"
+# jev_model = "explicit-local-semantic-model"  # fixed 127.0.0.1:8787 endpoint
 # interval_secs = 3600         # how often the scheduler considers a run; 0 uses 3600
 # idle_window_secs = 0         # quiet seconds before a run starts; 0 uses 300
 # min_pts = 0                  # DBSCAN density floor; 0 uses 2
 # max_eps = 0.0                # eps ceiling (cosine distance); 0.0 uses 0.15
-# max_clusters_per_run = 0     # clusters rewritten per run; 0 uses 8
+# max_clusters_per_run = 0     # global clusters per round; 0 uses 1
 # min_cold_pages = 0           # cold pages needed before a run works; 0 uses 2
 
 # Ranking signals layered on the RRF fusion in `memory_query`. Only

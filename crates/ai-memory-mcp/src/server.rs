@@ -2309,6 +2309,13 @@ impl AiMemoryServer {
         self.activity_clock.clone()
     }
 
+    /// Share activity reservations with hooks, maintenance and local dream work.
+    #[must_use]
+    pub fn with_activity_clock(mut self, clock: ai_memory_consolidate::ActivityClock) -> Self {
+        self.activity_clock = clock;
+        self
+    }
+
     /// Set an optional conservative context allowance for answer synthesis.
     /// Each UTF-8 byte counts as one estimated input token; the allowance also
     /// reserves the reasoning tier's output limit and 1024 envelope units.
@@ -8050,6 +8057,9 @@ impl ServerHandler for AiMemoryServer {
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
         // rmcp moves params._meta into RequestContext before dispatch.
         attach_native_session(&mut context.extensions, &context.meta);
+        let _active = self
+            .activity_clock
+            .begin(jiff::Timestamp::now().as_microsecond());
         self.record_client_activity(&request.name, &context);
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await

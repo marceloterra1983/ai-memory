@@ -55,6 +55,7 @@ async fn harness() -> Harness {
     // before answering 202 and the spawned task releases it when done.
     let ingest_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
     let hooks = hook_router(HookState {
+        activity_clock: ai_memory_consolidate::ActivityClock::default(),
         ingest_metrics: Arc::new(ai_memory_core::IngestMetrics::default()),
         workspace_id: ws,
         project_id: baked,

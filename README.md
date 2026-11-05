@@ -83,13 +83,13 @@ ai-memory removes those limits.
   or drop content (compaction, dedup, per-tier curves) stay off by default
   until you turn them on.
 
-- **It can also "dream", if you let it.** With an LLM configured, an opt-in
-  background pass rewrites whole clusters of cold notes into single coherent
-  pages while you are idle, and cancels as soon as you come back to work. It
-  never deletes a source (the pre-merge versions stay reachable), it is off
-  by default, and it has to pass a recall eval before it could become
-  default behavior. Unless you ask for more, the zero-LLM path above is what
-  runs.
+- **Local dream can group cold notes on request.** `ai-memory dream` plans
+  an exact allowlisted scope; `--apply` uses dedicated local models and keeps
+  both complete source bodies literally. Manual operations work while
+  `dream.enabled=false`; that switch controls only scheduling. Semantic
+  refusal, lost literals, changed TTL or stale snapshots prevent the merge.
+  Source versions remain recoverable through git and the version chain.
+  See [local dream](docs/dream-local.md).
 
 - **It is honest about itself.** It ships as one self-contained binary.
   Purge commands say exactly what "deleted" means. The write ceiling

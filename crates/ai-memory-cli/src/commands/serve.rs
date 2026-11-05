@@ -901,6 +901,7 @@ struct ProfileWorker {
     llm: Option<Arc<dyn LlmProvider>>,
     settings: ai_memory_core::profile::ProfileSettings,
     trusted_proxy_identity: bool,
+    activity: ai_memory_consolidate::ActivityClock,
 }
 
 /// Harvest and converge the cross-project profile
@@ -931,6 +932,9 @@ async fn run_profile_worker(
             }
         };
         if worker.settings.effective_share(distinguishes).is_some() {
+            let _active = worker
+                .activity
+                .begin(jiff::Timestamp::now().as_microsecond());
             let config = ai_memory_consolidate::profile::ProfilePassConfig {
                 settings: worker.settings.clone(),
                 distinguishes_operators: distinguishes,
@@ -1010,6 +1014,7 @@ async fn run_session_consolidation_worker(
     consolidator: Arc<Consolidator>,
     notify: Arc<tokio::sync::Notify>,
     cancel: CancellationToken,
+    activity: ai_memory_consolidate::ActivityClock,
     #[cfg(test)] completed: Arc<tokio::sync::Notify>,
 ) {
     loop {
@@ -1041,6 +1046,7 @@ async fn run_session_consolidation_worker(
             continue;
         };
 
+        let _active = activity.begin(jiff::Timestamp::now().as_microsecond());
         let session_id = job.session_id();
         let generation = job.generation();
         let attempts = job.attempts();
@@ -1375,7 +1381,16 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
         wiki.with_admission_chain(chain)
     };
     let provider_health = ProviderHealth::default();
-    let (wiki, embedder) = configure_embedder(config, &store, wiki, &provider_health).await?;
+    let activity_clock =
+        ai_memory_consolidate::ActivityClock::new(jiff::Timestamp::now().as_microsecond());
+    let (wiki, embedder) = configure_embedder(
+        config,
+        &store,
+        wiki,
+        &provider_health,
+        activity_clock.clone(),
+    )
+    .await?;
 
     // Make the wiki tree self-describing: write each scope's `_meta.md`
     // (workspace/project name + repo_path) if missing, so the markdown alone
@@ -1448,6 +1463,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
     );
     let decay_params = config.decay.decay_params();
     let mut server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj)
+        .with_activity_clock(activity_clock.clone())
         .with_wiki(wiki.clone())
         .with_decay_params(decay_params)
         .with_decay_breadth_weight(config.decay.breadth_weight)
@@ -1481,6 +1497,13 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
     // it can tell an idle box from a busy one and cancel a run on the operator's
     // return.
     let activity_clock = server.activity_clock();
+    let dream_runtime = configure_dream_runtime(
+        config,
+        &store.reader,
+        &wiki,
+        embedder.as_ref(),
+        activity_clock.clone(),
+    )?;
     let _maintenance_tasks = start_maintenance_scheduler(
         config.maintenance.clone(),
         config.auto_improve.clone(),
@@ -1492,14 +1515,16 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
         config.decay,
         config.sessions,
         config.dream.clone(),
-        activity_clock,
+        activity_clock.clone(),
         config.contradiction_band_min,
         config.contradiction_band_max,
         config.consolidate_on_session_end,
         consolidator.is_some(),
+        dream_runtime.clone(),
     )
     .await;
 
+    let transport_result: Result<()> = async {
     match args.transport {
         TransportKind::Stdio => {
             info!("MCP server ready on stdio (Ctrl-C to stop)");
@@ -1515,6 +1540,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 biased;
                 service = server.serve(stdio()) => Some(service?),
                 signal = shutdown.recv() => {
+                    if let Some(runtime) = &dream_runtime { runtime.begin_shutdown(); }
                     info!(signal, "shutdown signal received before a client connected; stopping");
                     None
                 }
@@ -1529,7 +1555,10 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                         result?;
                         None
                     }
-                    signal = shutdown.recv() => Some(signal),
+                    signal = shutdown.recv() => {
+                        if let Some(runtime) = &dream_runtime { runtime.begin_shutdown(); }
+                        Some(signal)
+                    },
                 };
                 if let Some(signal) = signal {
                     info!(
@@ -1551,6 +1580,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                     }
                 }
             }
+            if let Some(runtime) = &dream_runtime { runtime.shutdown().await; }
             close_store(&store).await;
         }
         TransportKind::Http => {
@@ -1566,6 +1596,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                     llm: profile_llm.clone(),
                     settings: config.profile.clone(),
                     trusted_proxy_identity: trusted_proxy_identity_enabled(&config.auth),
+                    activity: activity_clock.clone(),
                 },
                 profile_notify.clone(),
                 cancel.child_token(),
@@ -1579,6 +1610,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                         consolidator,
                         notify.clone(),
                         cancel.child_token(),
+                        activity_clock.clone(),
                         #[cfg(test)]
                         Arc::new(tokio::sync::Notify::new()),
                     ));
@@ -1653,6 +1685,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
             // while the real counts accumulated somewhere unreachable.
             let ingest_metrics = std::sync::Arc::new(ai_memory_core::IngestMetrics::default());
             let hooks = hook_router(HookState {
+                activity_clock: activity_clock.clone(),
                 ingest_metrics: ingest_metrics.clone(),
                 workspace_id: ws,
                 project_id: proj,
@@ -1749,6 +1782,10 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 config.decay.ledger_retention(),
                 config.decay.compact_cold_episodic,
             );
+            let admin = match dream_runtime.clone() {
+                Some(runtime) => admin.layer(axum::Extension(runtime)),
+                None => admin,
+            };
             // Multi-rung auth assembly:
             //   - rung 0 (no bearer_token configured) → AuthState::new
             //     stays as-is, middleware injects anonymous actor.
@@ -2004,6 +2041,9 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
             } else {
                 router
             };
+            let router = router.layer(axum::middleware::from_fn_with_state(
+                activity_clock.clone(), ai_memory_mcp::dream::record_http_activity,
+            ));
             let router = apply_host_layer(router, config.allowed_hosts.clone());
             // Host the entire surface under the configured base path. Empty
             // base = root (unchanged). The auth/host layers are already
@@ -2093,6 +2133,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
             }
             let listener = keepalive_listener(listener, config.tcp_keepalive_secs);
             let shutdown_cancel = cancel.clone();
+            let shutdown_dream = dream_runtime.clone();
             let serve_result = {
                 let serve = axum::serve(
                     listener,
@@ -2100,6 +2141,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 )
                 .with_graceful_shutdown(async move {
                     let signal = shutdown.recv().await;
+                    if let Some(runtime) = &shutdown_dream { runtime.begin_shutdown(); }
                     info!(signal, "shutdown signal received; draining");
                     shutdown_cancel.cancel();
                 })
@@ -2153,6 +2195,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                     ),
                 }
             }
+            if let Some(runtime) = &dream_runtime { runtime.shutdown().await; }
             close_store(&store).await;
             if let Some(serve_result) = serve_result {
                 serve_result?;
@@ -2160,6 +2203,54 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
         }
     }
     Ok(())
+    }.await;
+    if let Some(runtime) = &dream_runtime {
+        runtime.shutdown().await;
+    }
+    transport_result
+}
+
+fn configure_dream_runtime(
+    config: &Config,
+    reader: &ReaderPool,
+    wiki: &Wiki,
+    embedder: Option<&Arc<dyn Embedder>>,
+    activity: ai_memory_consolidate::ActivityClock,
+) -> Result<Option<Arc<ai_memory_mcp::dream::DreamRuntime>>> {
+    config.dream.validate()?;
+    if config.dream.scopes.is_empty() {
+        return Ok(None);
+    }
+    let embedder = embedder
+        .ok_or_else(|| anyhow::anyhow!("DREAM scopes require an available local embedder"))?;
+    let embedding = ai_memory_consolidate::EmbeddingCoord {
+        provider: embedder.provider().to_owned(),
+        model: embedder.model_identity(),
+        dim: embedder.dim(),
+    };
+    let mut pass_config = config.dream.dream_config(Some(embedding));
+    let llm: Option<Arc<dyn LlmProvider>> =
+        match (&config.dream.llm_endpoint, &config.dream.llm_model) {
+            (Some(endpoint), Some(model)) => Some(Arc::new(
+                ai_memory_llm::DreamLocalProvider::new(endpoint, model.clone())?,
+            )),
+            _ => None,
+        };
+    if let Some(model) = &config.dream.jev_model {
+        pass_config.semantic_gate = Some(Arc::new(
+            ai_memory_consolidate::dream_semantics::LocalJevGate::new(model.clone())?,
+        ));
+    }
+    Ok(Some(Arc::new(ai_memory_mcp::dream::DreamRuntime::new(
+        reader.clone(),
+        wiki.clone(),
+        llm,
+        config.decay.decay_params(),
+        config.decay.breadth_weight,
+        pass_config,
+        config.dream.scopes.clone(),
+        activity,
+    ))))
 }
 
 /// Checkpoint the WAL and close the store's connections on the way out.
@@ -2205,6 +2296,7 @@ async fn start_maintenance_scheduler(
     contradiction_band_max: f32,
     consolidate_on_session_end: bool,
     has_session_consolidator: bool,
+    dream_runtime: Option<Arc<ai_memory_mcp::dream::DreamRuntime>>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let maintenance_enabled = settings.enabled;
     if !maintenance_enabled {
@@ -2232,6 +2324,7 @@ async fn start_maintenance_scheduler(
         let writer = writer.clone();
         let wiki = wiki.clone();
         let dedup_embedding = dedup_embedding.clone();
+        let activity = activity_clock.clone();
         tasks.push(tokio::spawn(async move {
             let interval = std::time::Duration::from_secs(forget_sweep_interval_secs);
             run_persisted_maintenance_job(
@@ -2258,7 +2351,9 @@ async fn start_maintenance_scheduler(
                     let wiki = wiki.clone();
                     let decay = decay;
                     let dedup_embedding = dedup_embedding.clone();
+                    let activity = activity.clone();
                     async move {
+                        let _active = activity.begin(jiff::Timestamp::now().as_microsecond());
                         let started = std::time::Instant::now();
                         let outcome = run_scheduled_sweep_tick(
                             &reader,
@@ -2346,6 +2441,7 @@ async fn start_maintenance_scheduler(
         let writer = writer.clone();
         let wiki = wiki.clone();
         let llm = llm_providers.get(LlmWorkload::Lint).cloned();
+        let activity = activity_clock.clone();
         tasks.push(tokio::spawn(async move {
             let interval = std::time::Duration::from_secs(lint_interval_secs);
             run_persisted_maintenance_job(
@@ -2371,7 +2467,9 @@ async fn start_maintenance_scheduler(
                     let wiki = wiki.clone();
                     let llm = llm.clone();
                     let decay_lambda = decay.decay_params().lambda;
+                    let activity = activity.clone();
                     async move {
+                        let _active = activity.begin(jiff::Timestamp::now().as_microsecond());
                         let started = std::time::Instant::now();
                         let outcome = run_scheduled_lint_tick(
                             &reader,
@@ -2413,7 +2511,9 @@ async fn start_maintenance_scheduler(
         let reader = reader.clone();
         let writer = writer.clone();
         let wiki = wiki.clone();
+        let activity = activity_clock.clone();
         tasks.push(tokio::spawn(async move {
+            let _active = activity.begin(jiff::Timestamp::now().as_microsecond());
             let started = std::time::Instant::now();
             match run_scheduled_embedding_backfill_tick(&reader, &writer, &wiki, &embedder).await {
                 Ok(outcome) if outcome.embedded > 0 || outcome.failed > 0 || outcome.errors > 0 => {
@@ -2438,10 +2538,12 @@ async fn start_maintenance_scheduler(
             let reader = reader.clone();
             let writer = writer.clone();
             let wiki = wiki.clone();
+            let activity = activity_clock.clone();
             tasks.push(tokio::spawn(async move {
                 let interval = std::time::Duration::from_secs(embedding_backfill_interval_secs);
                 loop {
                     tokio::time::sleep(interval).await;
+                    let _active = activity.begin(jiff::Timestamp::now().as_microsecond());
                     let started = std::time::Instant::now();
                     match run_scheduled_embedding_backfill_tick(&reader, &writer, &wiki, &embedder)
                         .await
@@ -2493,6 +2595,7 @@ async fn start_maintenance_scheduler(
                 }
             }),
         };
+        let activity = activity_clock.clone();
         match ai_memory_consolidate::initialize_auto_improve_scheduler_scopes(&reader, &writer)
             .await
         {
@@ -2513,6 +2616,7 @@ async fn start_maintenance_scheduler(
             // still-running one.
             loop {
                 tokio::time::sleep(interval).await;
+                let _active = activity.begin(jiff::Timestamp::now().as_microsecond());
                 let started = std::time::Instant::now();
                 match run_auto_improve_scheduler_tick(
                     &reader,
@@ -2542,41 +2646,13 @@ async fn start_maintenance_scheduler(
         info!("auto-improve scheduler enabled but no LLM provider is configured; job not started");
     }
 
-    // B2/B3/B4 — the opt-in LLM dream pass. OFF by default; it starts only when
-    // `[dream] enabled` is set AND a provider AND an embedder are configured (a
-    // provider-less store keeps the zero-LLM A3 path, invariant #13). It never
-    // contends with live work: it runs only after `idle_window_secs` of quiet and
-    // cancels the moment activity resumes (invariant #5, cancellable + bounded).
+    // Both scheduler and manual work use one exact-scope driver and allowance.
     if dream.enabled {
-        match (
-            llm_providers.get(LlmWorkload::Dream).cloned(),
-            dedup_embedding.clone(),
-        ) {
-            (Some(llm), Some(embedding)) => {
-                let reader = reader.clone();
-                let wiki = wiki.clone();
-                let activity_clock = activity_clock.clone();
-                let interval = std::time::Duration::from_secs(dream.effective_interval_secs());
-                tasks.push(tokio::spawn(async move {
-                    run_dream_scheduler_loop(
-                        reader,
-                        wiki,
-                        llm,
-                        decay,
-                        dream,
-                        embedding,
-                        activity_clock,
-                        interval,
-                    )
-                    .await;
-                }));
-            }
-            (None, _) => info!(
-                "dream pass enabled but no LLM provider is configured; job not started (the zero-LLM A3 path is unaffected)"
-            ),
-            (_, None) => info!(
-                "dream pass enabled but no embedder is configured; job not started (nothing to cluster)"
-            ),
+        if let Some(runtime) = dream_runtime {
+            let interval = Duration::from_secs(dream.effective_interval_secs());
+            tasks.push(tokio::spawn(run_dream_scheduler_loop(runtime, interval)));
+        } else {
+            tracing::error!("DREAM enabled without its validated local runtime");
         }
     }
 
@@ -2592,6 +2668,7 @@ async fn start_maintenance_scheduler(
         let writer = writer.clone();
         let reader = reader.clone();
         let wiki = wiki.clone();
+        let activity = activity_clock.clone();
         tasks.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                 ai_memory_hooks::IDLE_END_INTERVAL_SECS,
@@ -2646,6 +2723,7 @@ async fn start_maintenance_scheduler(
                 if idle.is_empty() {
                     continue;
                 }
+                let _active = activity.begin(jiff::Timestamp::now().as_microsecond());
                 match ai_memory_hooks::run_idle_end_tick(&ai_memory_hooks::IdleEndTickInput {
                     writer: &writer,
                     reader: &reader,
@@ -2674,105 +2752,16 @@ async fn start_maintenance_scheduler(
     tasks
 }
 
-/// The B3 dream scheduler loop: on its interval, run the dream pass across every
-/// scope ONLY when the operator has been idle for the configured window, and
-/// cancel the in-flight run the moment activity resumes. A cheap watcher task
-/// flips the shared [`ai_memory_consolidate::DreamCancel`] when the activity
-/// clock advances past the run's start; `run_dream_pass` polls it between
-/// clusters.
-#[allow(clippy::too_many_arguments)]
+/// Reuse the native cadence with the same serialized runtime as manual work.
 async fn run_dream_scheduler_loop(
-    reader: ReaderPool,
-    wiki: Wiki,
-    llm: Arc<dyn LlmProvider>,
-    decay: crate::config::DecaySettings,
-    dream: crate::config::DreamSettings,
-    embedding: ai_memory_consolidate::EmbeddingCoord,
-    activity_clock: ai_memory_consolidate::ActivityClock,
-    interval: std::time::Duration,
+    runtime: Arc<ai_memory_mcp::dream::DreamRuntime>,
+    interval: Duration,
 ) {
-    /// How often the cancel watcher samples the activity clock during a run.
-    const DREAM_ACTIVITY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-    let cfg = dream.dream_config(Some(embedding));
-    let decay_params = decay.decay_params();
     loop {
         tokio::time::sleep(interval).await;
-        let now_us = jiff::Timestamp::now().as_microsecond();
-        if !ai_memory_consolidate::dream_idle_ready(&cfg, activity_clock.last_activity_us(), now_us)
-        {
-            continue;
+        if let Err((status, reason)) = runtime.scheduled().await {
+            tracing::warn!(%status, reason, "DREAM scheduler round refused");
         }
-
-        // Cancel-on-activity: snapshot the last activity, then spawn a watcher
-        // that flips the cancel as soon as the clock moves past that snapshot.
-        let cancel = ai_memory_consolidate::DreamCancel::new();
-        let run_start_activity = activity_clock.last_activity_us();
-        let watcher = {
-            let cancel = cancel.clone();
-            let activity_clock = activity_clock.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(DREAM_ACTIVITY_POLL).await;
-                    if activity_clock.last_activity_us() > run_start_activity {
-                        cancel.cancel();
-                        return;
-                    }
-                }
-            })
-        };
-
-        let started = std::time::Instant::now();
-        let scopes = match reader.list_all_scopes().await {
-            Ok(scopes) => scopes,
-            Err(error) => {
-                tracing::warn!(%error, "dream scheduler: could not list scopes; skipping tick");
-                watcher.abort();
-                continue;
-            }
-        };
-        let mut merged = 0usize;
-        let mut superseded = 0usize;
-        let mut cancelled = false;
-        for scope in scopes {
-            if cancel.is_cancelled() {
-                cancelled = true;
-                break;
-            }
-            match ai_memory_consolidate::run_dream_pass(
-                &reader,
-                &wiki,
-                Some(llm.as_ref()),
-                scope.workspace_id,
-                scope.project_id,
-                &decay_params,
-                decay.breadth_weight,
-                &cfg,
-                &cancel,
-                false,
-            )
-            .await
-            {
-                Ok(report) => {
-                    merged += report.clusters_merged;
-                    superseded += report.pages_superseded;
-                    cancelled |= report.cancelled;
-                }
-                Err(error) => tracing::warn!(
-                    workspace = %scope.workspace_name,
-                    project = %scope.project_name,
-                    %error,
-                    "dream pass failed for scope"
-                ),
-            }
-        }
-        watcher.abort();
-        info!(
-            merged,
-            superseded,
-            cancelled,
-            elapsed_ms = started.elapsed().as_millis(),
-            "dream pass tick completed"
-        );
     }
 }
 
@@ -3046,6 +3035,7 @@ async fn configure_embedder(
     store: &Store,
     wiki: Wiki,
     provider_health: &ProviderHealth,
+    activity: ai_memory_consolidate::ActivityClock,
 ) -> Result<(Wiki, Option<Arc<dyn Embedder>>)> {
     // M9 — pluggable embedder. Stored rows carry provider/model/dim so
     // query paths can ignore stale vectors after an embedding config change.
@@ -3172,6 +3162,8 @@ async fn configure_embedder(
         }
         None => embedder,
     };
+    let embedder: Arc<dyn Embedder> =
+        Arc::new(ai_memory_consolidate::dream_activity::ActivityEmbedder::new(embedder, activity));
     Ok((wiki.with_embedder(embedder.clone()), Some(embedder)))
 }
 
@@ -4620,6 +4612,7 @@ mod tests {
             ai_memory_consolidate::DEFAULT_CONTRADICTION_SIM_HIGH,
             false,
             false,
+            None,
         )
         .await;
         assert!(tasks.is_empty());
@@ -4675,6 +4668,7 @@ mod tests {
                 ai_memory_consolidate::DEFAULT_CONTRADICTION_SIM_HIGH,
                 false,
                 false,
+                None,
             )
             .await;
             assert_eq!(
@@ -4724,6 +4718,7 @@ mod tests {
                 ai_memory_consolidate::DEFAULT_CONTRADICTION_SIM_HIGH,
                 false,
                 false,
+                None,
             )
             .await;
             // One enabled lint/sweep job plus the independent hollow-project job.
@@ -4764,6 +4759,7 @@ mod tests {
             ai_memory_consolidate::DEFAULT_CONTRADICTION_SIM_HIGH,
             false,
             false,
+            None,
         )
         .await;
         assert_eq!(tasks.len(), 2);
@@ -4791,6 +4787,7 @@ mod tests {
             ai_memory_consolidate::DEFAULT_CONTRADICTION_SIM_HIGH,
             false,
             false,
+            None,
         )
         .await;
         assert_eq!(tasks.len(), 3);
@@ -4821,6 +4818,7 @@ mod tests {
             ai_memory_consolidate::DEFAULT_CONTRADICTION_SIM_HIGH,
             true,
             true,
+            None,
         )
         .await;
         assert!(tasks.is_empty());
@@ -4895,6 +4893,7 @@ mod tests {
             ai_memory_consolidate::DEFAULT_CONTRADICTION_SIM_HIGH,
             true,
             true,
+            None,
         )
         .await;
 
@@ -5538,6 +5537,7 @@ mod tests {
             consolidator,
             notify.clone(),
             cancel.child_token(),
+            ai_memory_consolidate::ActivityClock::default(),
             completed.clone(),
         ));
         notify.notify_one();
@@ -5645,6 +5645,7 @@ mod tests {
             consolidator,
             notify.clone(),
             cancel.child_token(),
+            ai_memory_consolidate::ActivityClock::default(),
             completed.clone(),
         ));
         notify.notify_one();
@@ -5751,6 +5752,7 @@ mod tests {
             consolidator,
             notify.clone(),
             cancel.child_token(),
+            ai_memory_consolidate::ActivityClock::default(),
             completed.clone(),
         ));
         notify.notify_one();
@@ -5852,6 +5854,7 @@ mod tests {
             consolidator,
             notify.clone(),
             cancel.child_token(),
+            ai_memory_consolidate::ActivityClock::default(),
             completed.clone(),
         ));
         notify.notify_one();
@@ -6021,6 +6024,7 @@ mod tests {
             consolidator,
             notify.clone(),
             cancel.child_token(),
+            ai_memory_consolidate::ActivityClock::default(),
             completed.clone(),
         ));
         notify.notify_one();
@@ -6223,6 +6227,7 @@ mod tests {
             consolidator,
             notify.clone(),
             cancel.child_token(),
+            ai_memory_consolidate::ActivityClock::default(),
             completed.clone(),
         ));
         notify.notify_one();
@@ -7722,9 +7727,15 @@ mod tests {
         let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
 
         let provider_health = ProviderHealth::default();
-        let (_wiki, embedder) = configure_embedder(&cfg, &store, wiki, &provider_health)
-            .await
-            .unwrap();
+        let (_wiki, embedder) = configure_embedder(
+            &cfg,
+            &store,
+            wiki,
+            &provider_health,
+            ai_memory_consolidate::ActivityClock::default(),
+        )
+        .await
+        .unwrap();
 
         let embedder = embedder.expect("configured embedder should be enabled");
         assert_eq!(embedder.provider(), "openai");

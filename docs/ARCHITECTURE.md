@@ -698,33 +698,36 @@ terminal for the decay pass (never re-compacted, never re-evicted, never
 re-reported as cold). Zero-LLM, off by default; the R2 recall no-regression
 proof gates any future default-on.
 
-**LLM "dream" pass (B2/B3/B4, opt-in LLM, OFF by default, R2-gated before
-default-on).** Where A3 collapses near-duplicate cold clusters *extractively*
-(zero-LLM, keep-token union), the dream pass
-(`ai-memory-consolidate::dream::run_dream_pass`) hands each cold cluster to the
-configured provider to be rewritten into ONE coherent page, a prose-coherent
-merge that extraction cannot do. It reuses A3's clustering math (`adaptive_eps` /
-`dbscan`) over the *same* bounded cold set the forget sweep materialises
-(`sweep::materialize_cold_set`, invariant #2). It runs only when `[dream]
-enabled` is set AND a provider AND an embedder are configured; a provider-less
-store keeps the zero-LLM A3 path (invariant #13). It **never deletes a source**
-(invariant #16): the highest-retention member is rewritten and every merged-away
-member is *superseded* with a merge-note stub, so the full pre-merge body stays
-reachable (git + supersession chain; `restore-page` recovers it), and
-`page_evidence` (`reconsolidation` + `b2_dream:<id>`) records which members fed
-each merge (the hallucinated-merge guard). The rewrite routes through the gated
-apply path (`preflight_admission(Consolidate)` before the LLM, then
-`Wiki::apply_batch` on the single-writer actor, invariant #2) with **`dry_run`
-first** (returns the plan, calls neither the LLM nor the writer) and
-**JSON-schema structured output only** (invariant #7). Scheduling (B3, in
-`serve.rs`) starts a run only after `[dream] idle_window_secs` of no client
-activity (read from the tool router's shared `ActivityClock`) and **cancels it
-the moment activity resumes** (a cheap `DreamCancel` flag polled between
-clusters), bounded to `max_clusters_per_run` clusters per run (invariant #5).
-Work is ordered **surprisal-first** (B4): the most-novel clusters, farthest in
-embedding space from the nearest existing (non-cold) page, first. Every run
-returns an observable `DreamReport` so a bad run is never silent. No new
-migration (reuses `page_evidence` + supersession); no new MCP tool.
+**Local dream pass (B2/B3/B4, scheduling OFF by default).** Default-on remains
+gated by an R2 recall no-regression proof. The shared
+`ai-memory-consolidate::dream::run_dream_pass` reuses A3's clustering math
+(`adaptive_eps` / `dbscan`) over a bounded cold set. Both scheduled and manual
+runs resolve only the exact `(workspace, project)` pairs in `[dream].scopes`,
+without creating missing scopes. `enabled = false` stops scheduling; explicit
+`ai-memory dream --workspace <name> --project <name>` planning and `--apply`
+remain available. The default plan performs no inference or writes. Apply
+requires the dedicated local clients configured by
+`dream.llm_endpoint`, `dream.llm_model` and `dream.jev_model`; it never inherits
+the main LLM's credentials or fallback chain.
+
+The local semantic gate checks whether complete source bodies concern the same
+subject. A JSON-schema draft must then copy both complete bodies verbatim, with
+only their order and the separator allowed to vary; its title must also come
+from a source. Missing keep-tokens, changed negation, added prose, unsupported
+evidence and incompatible TTLs cause refusal. The survivor and merge-note stubs
+supersede their predecessors: no source is deleted, and complete versions remain
+reachable through git and the supersession chain (invariant #16).
+Reconsolidation evidence records the source ids, update times and body hashes.
+
+Activity reservations cover live requests and embedding work. Scheduled runs
+also require the configured idle window; returning activity or the shared round
+deadline cancels further inference and writes. Snapshot checks compare source
+bodies and metadata with their indexed heads. Apply repeats head/hash CAS under
+wiki locks and in the single-writer transaction, preserving concurrent edits
+without a partial cluster write. Work remains surprisal-first and bounded by
+`max_clusters_per_run` across the allowlist. Every run returns a `DreamReport`.
+The port reuses the existing evidence and supersession schema and adds no MCP
+tool. `POST /admin/dream` serves the thin CLI through the operational admin gate.
 
 Pinned pages (`pinned: true` in frontmatter) are exempt from all
 decay paths. Pages under `_slots/` are pinned automatically and surfaced
@@ -1051,6 +1054,7 @@ restore                     reindex              install-hooks
 hook                        install-mcp          commit
 checkpoints                 restore-page         llm-test
 forget-sweep                lint                 curator
+dream
 auto-improve-report         auto-improve         finalize-session
 recover                     pending-writes       embed
 generate-auth-token         setup-agent          bootstrap
@@ -1535,19 +1539,22 @@ observation_stream = true         # R1 observation-evidence stream: FTS over obs
                                   #   "nao", "não", "voce", "você",
                                   # ]
 
-[dream]                           # B2/B3/B4 opt-in LLM "dream" pass. OFF by default,
-                                  # R2-gated before it may default on. Never deletes a source.
-enabled = false                   # true starts the scheduled pass — but ONLY if a provider AND
-                                  # an embedder are also configured. A provider-less store keeps
-                                  # the zero-LLM A3 path untouched (invariant #13).
+[dream]                           # Guarded local consolidation. Scheduling is OFF by default.
+enabled = false                   # Controls scheduling only; manual plan/apply remains available.
+scopes = []                       # Exact existing workspace/project pairs; no scope discovery.
+# scopes = [{ workspace = "default", project = "dev" }]
+# llm_endpoint = "http://127.0.0.1:8000/v1"  # dedicated keyless loopback draft endpoint
+# llm_model = "local-model"       # explicit draft model; no main LLM fallback
+# jev_model = "local-jev"         # semantic model at the fixed local Jev endpoint
 interval_secs = 3600              # how often the scheduler CONSIDERS a run (0 ⇒ 3600)
-idle_window_secs = 300            # operator must be quiet this long before a run starts; returning
-                                  # activity CANCELS an in-flight run at the next cluster boundary
-                                  # (B3). 0 ⇒ default 300.
+idle_window_secs = 300            # scheduled idle window (0 ⇒ default 300); returning activity
+                                  # cancels inference and guarded writes in either mode
 # min_pts = 2                     # DBSCAN density floor (0 ⇒ default 2)
-# max_eps = 0.15                  # conservative eps ceiling (cosine distance; 0 ⇒ default)
-# max_clusters_per_run = 8        # bounded fan-out per run (invariant #5; 0 ⇒ default 8)
-# min_cold_pages = 2             # events-accrued gate: skip a run below this many cold pages
+# max_eps = 0.08                  # cosine distance ceiling; 0 selects the conservative default
+# max_clusters_per_run = 1        # limit for the whole allowlisted round (0 ⇒ default 1)
+# min_cold_pages = 2             # skip scopes below this many cold pages (0 ⇒ default 2)
+                                  # Nonempty scopes also select restricted full-document compat
+                                  # embedding when enabled=false. Unknown [dream] fields fail load.
 
 [hook_spool]
 max_attempts = 8                  # failed drain passes before dropping an event; 0 disables
@@ -1730,6 +1737,8 @@ without a table, the shared default chain. A task chain never appends the
 global fallbacks or inherits the global endpoint, and a task table works with
 no global provider without enabling the other tasks. Health reports each task
 chain under `llm_task_chains`.
+The guarded local dream pass uses its dedicated `[dream]` endpoint and models,
+so it does not select a main or per-workload provider chain.
 
 `GET /admin/status` (`ai-memory status`) reports an `llm_candidates` list
 alongside the existing `llm`/`embedding` roles: each candidate's

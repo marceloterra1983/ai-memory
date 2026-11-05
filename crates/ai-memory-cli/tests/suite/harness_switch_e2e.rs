@@ -31,12 +31,12 @@ const PROJECT: &str = "harness-switch";
 /// The cut-off OpenCode session's native id, and its last prompt and tool
 /// result: where the work stopped.
 const OPENCODE_SESSION: &str = "ses_cut_off_by_quota";
-const LAST_PROMPT: &str = "now disable router advertisements on the BE800";
+const LAST_PROMPT: &str = "how do we disable router advertisements on the BE800?";
 const LAST_TOOL_OUTPUT: &str = "default via fe80::42ae:30ff:fe6e:7380 dev enp16s0";
 
 /// The Claude Code session the user resumes, and its days-old work.
 const CLAUDE_SESSION: &str = "0f3c8a52-1d4e-4b7a-9c2e-5a6b7c8d9e01";
-const OLD_CLAUDE_PROMPT: &str = "pair the 8BitDo controller";
+const OLD_CLAUDE_PROMPT: &str = "which step remains to pair the 8BitDo controller?";
 
 struct Fixture {
     _server: ServerGuard,

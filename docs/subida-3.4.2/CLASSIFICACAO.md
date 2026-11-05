@@ -568,3 +568,110 @@ Lição: Valide contratos e configuração efetiva antes de substituir um fork p
 5. Adiar o restante macOS se o alvo continuar sendo somente o servidor Linux; aproveitar os testes e scripts locais após adaptação.
 
 VERMELHO
+
+
+## Porte fase A — execução nesta worktree
+
+A classificação acima é o relatório anterior ao porte. Suas afirmações de árvore limpa, ausência de arquivos e reprovação da tag pura são históricas. Esta seção registra a implementação atual; o relato final nativo continua sendo a autoridade do veredito.
+
+Base: `v3.4.2` / `b9453c96`; ramo `subida/porte-3.4.2`. A classificação foi incluída no primeiro commit, `36e17769`. Nenhuma migração aplicada foi reescrita, nenhuma nova migração foi necessária e a política de `.serve.lock`/receipt pré-migração ficou como na tag. Em serve.rs, somente o clone das configurações dream foi necessário porque scopes deixou de ser Copy.
+
+O primeiro ensaio HTTP, com o release em HOME/data/pre sintéticos e porta
+59123, confirmou create_only novo, page_not_found, scope_not_found e
+expected_page_id obsoleto recusado sem escrever. Também identificou a leitura
+truncada: o relay imutável omite max_chars e recebeu 12038 caracteres de um
+corpo de 70015. O dono decidiu preservar o contrato do fork: max_chars omitido
+retorna o corpo integral, truncated=false e nenhum marcador; um valor explícito
+mantém os limites 500–64000 e o marcador da tag.
+
+Essa correção está em `d8ec45c8`. O teste HTTP
+`stateless_read_page_preserves_large_body_without_max_chars` grava 70015
+caracteres UTF-8 (140015 bytes), verifica os limites explícitos e compara os
+bytes completos na leitura sem parâmetro. Retirando somente o novo tratamento
+do parâmetro omitido, falhou com 24038 bytes recebidos; restaurado o porte,
+passou. As descrições MCP, a ajuda, a skill distribuída e a documentação do
+SDK refletem o contrato. O relay não foi alterado nesta continuação.
+
+Os pendentes herdados foram conservados: `12e2e599` documenta os endpoints,
+timeout, embedding integral e redirects; `34e923a3` prova que o drain TS não
+envia POSTs nem altera envelopes existentes no spool.
+
+As três dúvidas de ranking foram medidas: título procedural afogado, força relativa de streams, empates e união de scopes com observation_stream=false/true. Portaram-se os comportamentos faltantes e o snapshot comum; extrações de módulos sem efeito adicional não foram copiadas. O teste de snapshot executa um writer SQLite entre as janelas e compara a versão capturada com a leitura posterior. A tentativa extra de mutação negativa desse snapshot foi cancelada antes de executar; não é contada como prova.
+
+### Fora do binário: decisão individual
+
+| Commit local | Destino ou motivo |
+|---|---|
+| `bb48faa8` | 87941aeb: runtime Python, launcher, modelos de units e patch consumido pelo staging; sem instalar units. |
+| `d7d01799` | 87941aeb: contratos ativos do relay; patch antigo do backend omitido porque a correção está no servidor. |
+| `c4d99deb` | 87941aeb: validação de envelopes/schema no runtime Python. |
+| `18903744` | 87941aeb: protocolo e patch lido pelo staging; nenhuma aplicação no instalador real. |
+| `4a9564e5` | 87941aeb: validação de argumentos no runtime Python. |
+| `b753a938` | Documento histórico não copiado; guia do contrato atual escrito em d3b5c794, incluindo o bloqueante de leitura integral. |
+| `30ce45eb` | Não portado: corrige patch Python/backend histórico; o servidor foi corrigido diretamente em d3b5c794. |
+| `67e370b8` | 87941aeb: correção de título no runtime protocol.py; teste de binário legado não é runtime e ficou fora. |
+| `26c60382` | Não portado: fixture histórica do instalador não é consumida pelo runtime instalado e não representa a tag. |
+| `613d5b02` | 87941aeb: patch lido pelo staging conservado, sem aplicar o procedimento antigo. |
+| `6fe382f3` | 87941aeb: patch de staging conservado; fixture/testes/procedimento antigos não são runtime. |
+| `8c107fa4` | Não portado: documentação histórica de bootstrap, sem consumidor no runtime instalado. |
+| `d25ef35f` | Não portado: changelog local histórico; seções publicadas da tag ficaram intactas. |
+| `63cfcb2d` | Não copiado: inventário histórico; guards atuais documentados com seus testes em docs/security-boundaries.md. |
+| `c34c2c99` | 87941aeb: fsync e persistência do outbox em outbox.py. |
+| `3b38f76b` | 87941aeb: recuperação offline condicionada ao head em deliver.py. |
+| `a9735837` | Não portado: teste de partida de binário legado, não consumido pelo runtime instalado. |
+| `00a7b77a` | 87941aeb: worker, recibos completed_at e modelo de unit; ensaio sintético com SQLite. |
+| `be5b467b` | 87941aeb: mesmo FD do drain lock durante toda a vida do worker. |
+| `c2b0a77d` | Não copiado: teste legado sem consumidor runtime; CAS atual tem recusa de ID de outro projeto e controle legítimo. |
+| `d625cb55` | Não portado: procedimento de release/cargo-deny, não usado na execução do servidor instalado. |
+| `49ed49e5` | Não portado: helper manual de registro de manifest; não é lido no startup e não atualiza automaticamente o manifest. |
+| `ff4682e6` | Não portado: supressões de lint de traits, sem comportamento runtime; gate atual decide a necessidade. |
+| `0b9f2599` | Não portado: sintaxe de helper de teste antigo, sem consumidor runtime. |
+| `e4624c25` | Não portado: changelog histórico; extensão atual documentada no Unreleased e em a988bb90. |
+| `2c24edda` | Não portado: precisão de assert de teste antigo; não muda parser/runtime. |
+| `59a33000` | Não copiado: comentários/docs históricos, sem consumidor runtime; aviso de drain desabilitado está no README local atual. |
+| `1542b29f` | Não copiado: documentação histórica; retenção nativa de sete dias continua da tag e está no README local atual. |
+| `ebb36881` | Não portado: cobertura adicional de lápide, não código runtime; os guards equivalentes da tag foram preservados. |
+
+### Reconciliação final de portar/duvida
+
+| Commit local | Classe | Commit novo ou motivo |
+|---|---|---|
+| `c4ea6bb3` | portar | `b8409e4a` |
+| `bd524699` | portar | Adiado expressamente para fase B: dream local. |
+| `585ab238` | portar | Adiado expressamente para fase B: dream local. |
+| `60593c0b` | portar | Adiado expressamente para fase B: dream local. |
+| `36cba6dc` | portar | Adiado expressamente para fase B: dream local. |
+| `3a4a8d79` | portar | Adiado expressamente para fase B: curadoria local. |
+| `5cc3d4eb` | portar | Adiado expressamente para fase B: curadoria local. |
+| `d6db29ad` | portar | `09c36478` |
+| `4cfbdf60` | portar | `36e17769` |
+| `80dd19cd` | portar | Excluído expressamente desta fase: somente macOS. |
+| `143ad28a` | portar | `d3b5c794`, `d8ec45c8`: fonte/ID/guards e leitura integral sem max_chars portados; limites explícitos preservados. |
+| `d0eb4754` | portar | `d3b5c794` |
+| `f3f00446` | portar | `05006c8b` |
+| `eb1ba452` | portar | `87941aeb` |
+| `1f0ff776` | duvida | `32808d2e` |
+| `ad3d8c73` | duvida | `32808d2e` |
+| `d2a57a10` | duvida | `32808d2e`; somente snapshot/centralização necessários, sem as extrações rrf.rs/fts_windows.rs. |
+| `0511bba4` | portar | `31067278` |
+| `0379a6fa` | portar | `e75a95ee` |
+| `9cfa8dc3` | portar | `e75a95ee` |
+| `eebdd33c` | portar | `3c72db2b` |
+| `d6a28c77` | portar | `3c72db2b`, `4b91ecf5` |
+| `a032e4c6` | duvida | Não portado: clippy 1.95 com -D warnings decide a necessidade; não copiar supressões de dream/curadoria ou helpers SHA antigos. Resultado global registrado na validação. |
+| `29549016` | portar | `3581a6fd` |
+| `1d93add8` | portar | `a988bb90` |
+| `62baa09e` | portar | `a988bb90` |
+| `59873022` | portar | `fd11ef8c` |
+| `985e96d2` | portar | `c89826fa` |
+| `f3fb8aac` | portar | `d949cd0a` |
+| `b078dcb1` | portar | `23cd7ee7` |
+| `c3b5a60e` | portar | `55158975` |
+| `2d26dae5` | portar | `5fe0e7cc` |
+| `d009b152` | portar | `87941aeb` |
+| `21b7879c` | portar | `4b91ecf5` |
+| `d0d13651` | portar | `4b91ecf5` |
+| `404fa8a0` | portar | `4b91ecf5` |
+| `8f272d97` | portar | `e88899c4` |
+| `b1389f55` | portar | `e88899c4` |
+| `56758c2c` | portar | `e88899c4` |

@@ -134,6 +134,80 @@ async fn body_string(resp: axum::response::Response) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+#[tokio::test]
+async fn stateless_read_page_preserves_large_body_without_max_chars() {
+    async fn call(router: &Router, name: &str, args: serde_json::Value) -> serde_json::Value {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args},
+        });
+        let response = router
+            .clone()
+            .oneshot(post_to("/mcp", request.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let message: serde_json::Value =
+            serde_json::from_str(&body_string(response).await).unwrap();
+        assert!(message.get("error").is_none(), "{message}");
+        assert_ne!(message["result"]["isError"], true, "{message}");
+        serde_json::from_str(message["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let (router, _store) = make_router(&tmp, false).await;
+    let body = "α".repeat(70_000) + " synthetic-tail";
+    let written = call(
+        &router,
+        "memory_write_page",
+        serde_json::json!({"path": "notes/large.md", "body": body, "create_only": true}),
+    )
+    .await;
+    assert!(written["page_id"].is_string());
+
+    for (requested, cap) in [
+        (0, 500),
+        (500, 500),
+        (12_000, 12_000),
+        (64_000, 64_000),
+        (99_999, 64_000),
+    ] {
+        let page = call(
+            &router,
+            "memory_read_page",
+            serde_json::json!({"path": "notes/large.md", "max_chars": requested}),
+        )
+        .await;
+        let returned = page["body"].as_str().unwrap();
+        let prefix: String = body.chars().take(cap).collect();
+        assert!(returned.starts_with(&prefix));
+        assert!(returned.ends_with(&format!(
+            "[body truncated; {} chars omitted]",
+            body.chars().count() - cap
+        )));
+        assert_eq!(page["truncated"], true);
+        assert_eq!(page["total_chars"], body.chars().count());
+        assert_eq!(page["page_id"], written["page_id"]);
+    }
+
+    let page = call(
+        &router,
+        "memory_read_page",
+        serde_json::json!({"path": "notes/large.md"}),
+    )
+    .await;
+    let returned = page["body"].as_str().unwrap();
+    assert_eq!(
+        returned.len(),
+        body.len(),
+        "an omitted cap must preserve every byte"
+    );
+    assert_eq!(returned.as_bytes(), body.as_bytes());
+    assert_eq!(page["truncated"], false);
+    assert_eq!(page["total_chars"], body.chars().count());
+    assert_eq!(page["page_id"], written["page_id"]);
+}
+
 /// The fix: in the default stateless mode, a `tools/call` arriving with no
 /// prior session and no `Mcp-Session-Id` header is serviced and returns a
 /// JSON-RPC result — not a 422 / "Session not found".

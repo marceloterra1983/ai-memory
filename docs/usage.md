@@ -328,9 +328,10 @@ same-path local and global pages remain distinct.
 ### Keep a lookup cheap
 
 `memory_read_session_observations` defaults to 20 rows of up to 1000 characters
-each, and `memory_read_page` defaults to a 12,000-character cap. Both are
-read-only, and both accept a bigger `limit`, `body_max_chars` or `max_chars`
-when you need the full transcript or page. For a question like "what did this
+each. `memory_read_page` returns the complete body when `max_chars` is omitted;
+pass an explicit `max_chars` (500–64000) to cap a lookup. Both tools are
+read-only. Increase `limit` or `body_max_chars` when you need more of a
+transcript. For a question like "what did this
 session do" or "where did it stop", a narrow `order: "desc"` read with a `kinds`
 filter such as `["user-prompt", "stop", "session-end"]` is usually enough.
 

@@ -431,7 +431,8 @@ should be proposed from a completed session, or at explicit wrap-up \
   the client-aware project-scope rule above; session-aware clients add \
   explicit scope when reading a page from a named sibling workspace/project. Use \
   this instead of memory_query when the user wants the complete text, \
-  not just snippets. The body is capped by `max_chars` (default 12000); \
+  not just snippets. Omit `max_chars` for the entire body; an explicit \
+  value caps it (500–64000 characters). \
   the response's `truncated`/`total_chars` tell you the real size. Pass \
   `include_related: true` (with an optional `related_depth`, default 1, \
   max 3) to also walk the link graph outward and get a `related` array of \
@@ -1845,11 +1846,10 @@ struct ReadPageArgs {
     /// Ignored when `include_related` is false.
     #[serde(default)]
     related_depth: Option<u8>,
-    /// Cap the returned body at this many characters (default 12000, min
-    /// 500, max 64000). Longer bodies end with a visible truncation marker
-    /// and the response adds `truncated: true` and `total_chars`. Raise
-    /// this only when you actually need the whole page; most callers should
-    /// keep the default.
+    /// Optional body cap in characters (min 500, max 64000). Omit for the
+    /// entire body with `truncated: false` and no marker. An explicit cap
+    /// adds a visible marker when exceeded; `total_chars` always reports
+    /// the full length.
     #[serde(default)]
     max_chars: Option<usize>,
 }
@@ -1876,11 +1876,8 @@ struct PatchPageArgs {
     workspace: Option<String>,
 }
 
-/// Bounds for `memory_read_page`'s `max_chars`. The default keeps a typical
-/// page read well under a context window while staying large enough that
-/// most pages never truncate; the ceiling still lets a caller read a long
-/// page whole by raising it explicitly.
-const READ_PAGE_DEFAULT_MAX_CHARS: usize = 12_000;
+/// Bounds for an explicit `memory_read_page` body cap. An omitted cap keeps
+/// complete readback compatible with clients comparing source bytes for CAS.
 const READ_PAGE_MIN_MAX_CHARS: usize = 500;
 const READ_PAGE_MAX_MAX_CHARS: usize = 64_000;
 
@@ -5853,12 +5850,12 @@ impl AiMemoryServer {
         served from the DB fallback, and `expired: true` when the page's \
         `expires_at` TTL has passed: an exact-path read still returns such a \
         page, which `memory_query` and `memory_recent` no longer surface). \
-        The body is capped at `max_chars` \
-        (default 12000, max 64000) with a visible truncation marker when it \
-        is cut; the response always also carries `truncated` (bool) and \
+        Omit `max_chars` to return the entire body without a marker and with \
+        `truncated: false`. An explicit `max_chars` is clamped to 500–64000 \
+        characters, with a visible truncation marker when exceeded. \
+        The response always also carries `truncated` (bool) and \
         `total_chars` (the untruncated length) so you know the real size \
-        even when it wasn't cut. Raise `max_chars` only when you need the \
-        whole page. \
+        even when it wasn't cut. \
         Set `scope: \"global\"` to read the reserved cross-project global \
         scope; do not combine it with `workspace`/`project`. \
         For an exact existing destination, pass `workspace` + stable \
@@ -5970,8 +5967,8 @@ impl AiMemoryServer {
                 .is_none_or(|s| s.trim().is_empty());
         let max_chars = args
             .max_chars
-            .unwrap_or(READ_PAGE_DEFAULT_MAX_CHARS)
-            .clamp(READ_PAGE_MIN_MAX_CHARS, READ_PAGE_MAX_MAX_CHARS);
+            .map(|cap| cap.clamp(READ_PAGE_MIN_MAX_CHARS, READ_PAGE_MAX_MAX_CHARS))
+            .unwrap_or(usize::MAX);
 
         // A blank fill is not a supplied argument: an empty/whitespace `path`
         // would otherwise fail as "invalid path: empty path" with `query` never
@@ -17337,9 +17334,8 @@ mod tests {
         assert_eq!(page["total_chars"], "a short body".chars().count() as u64);
     }
 
-    /// A body over `max_chars` is cut with a visible marker (default cap
-    /// 12000; this test passes an explicit small `max_chars` so it does not
-    /// depend on the exact default), and `truncated`/`total_chars` report
+    /// A body over an explicit `max_chars` is cut with a visible marker,
+    /// and `truncated`/`total_chars` report
     /// the real size so a caller knows to raise `max_chars` if it needs more.
     #[tokio::test]
     async fn memory_read_page_truncates_a_long_body_with_marker() {

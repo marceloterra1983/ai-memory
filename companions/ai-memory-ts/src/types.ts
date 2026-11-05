@@ -277,7 +277,7 @@ export interface ReadPageBase extends ScopedArgs {
   includeRelated?: boolean;
   /** Hops to walk with `includeRelated` (default 1, capped at 3 by the server). */
   relatedDepth?: number;
-  /** Cap the returned body at this many characters (default 12000, 500 to 64000). */
+  /** Optional body cap (500 to 64000 characters); omitted returns the entire body. */
   maxChars?: number;
 }
 

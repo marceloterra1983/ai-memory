@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Restored complete page readback when `max_chars` is omitted, preserving explicit caps and byte equality for the local reliable-mcp relay (`143ad28a`).
+
 - Aligned integration fixtures with selective handoffs, disabled TS drains and repaired model paths; fixed the embedded dream scope example and translated new archive destination errors.
 
 - Opened automatic handoffs only for typed pending work while preserving turn checkpoints and prompt/render bounds (`0379a6fa`, `9cfa8dc3`).

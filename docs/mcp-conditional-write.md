@@ -4,4 +4,8 @@
 
 An explicit page miss returns `error.data.code = "page_not_found"`; an existing-scope lookup miss returns `"scope_not_found"`. Authorization, malformed input, parse and IO failures keep their own errors. A read attaches `page_id` only when that exact source matches the indexed version. External edits remain readable without a version token; reindexing establishes their new version. Missing files use one indexed content-and-id snapshot.
 
-`max_chars` retains the upstream default 12000 and range 500–64000. The version check always uses complete content. A truncated response is not proof of full body equality; clients must inspect `truncated`. The immutable reliable-mcp client does not negotiate this bound; compatibility for larger pages needs an explicit decision about unbounded reads.
+Omitting `max_chars` returns the complete body, with `truncated: false` and no
+marker, preserving byte-for-byte readback for the immutable reliable-mcp client.
+An explicit `max_chars` retains the upstream range 500–64000 and visible
+truncation marker. The version check always uses complete content.
+`total_chars` reports the full character count in either case.

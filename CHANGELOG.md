@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Preserved only closed, bounded tool labels in hook payloads, including metadata-only capture and generated adapters (`c3b5a60e`).
+
 - Neutralized received workstream/lease names, upgrade tags, doctor hook hints and finalize-session errors as single-line terminal text (`8f272d97`, `b1389f55`, `56758c2c`).
 
 - Refused every provider/admission/CLI redirect, including builder failure paths, and preserved output symlinks while refusing multiply-linked archive targets (`21b7879c`, `d0d13651`, `404fa8a0`, `d6a28c77`).

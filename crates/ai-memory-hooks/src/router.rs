@@ -42,7 +42,7 @@ use crate::brief_tiers;
 use crate::capture_policy::{
     CaptureConfig, CaptureDisposition, CapturePolicy, CaptureProtocol, CaptureSource,
     ExtractionState, PolicyState, ToolFamily, inspection_sentinel, metadata_only_body,
-    tool_observation_outcome, valid_call_id,
+    tool_observation_outcome, valid_call_id, valid_tool_label,
 };
 use crate::log;
 use crate::payload::{
@@ -1419,6 +1419,9 @@ fn metadata_only_protocol_envelope(
         || !object
             .get("tool_call_id")
             .is_none_or(valid_metadata_call_id)
+        || !object
+            .get("tool_label")
+            .is_none_or(|value| value.as_str().is_some_and(valid_tool_label))
         || object.get("tool_family") != Some(&serde_json::json!(protocol.tool_family()))
         || object.get("tool_name")
             != Some(&serde_json::json!(canonical_tool_name(
@@ -1429,7 +1432,7 @@ fn metadata_only_protocol_envelope(
     }
 
     let mut raw = serde_json::Map::new();
-    for key in ["session_id", "cwd", "tool_call_id"] {
+    for key in ["session_id", "cwd", "tool_call_id", "tool_label"] {
         if let Some(value) = object.get(key) {
             raw.insert(key.into(), value.clone());
         }
@@ -1447,6 +1450,7 @@ fn metadata_only_protocol_envelope(
     env.body_excerpt = metadata_summary_with_outcome(
         env.event,
         protocol.tool_family(),
+        object.get("tool_label"),
         object.get("tool_call_id"),
         "unknown",
     );
@@ -1549,6 +1553,7 @@ fn metadata_envelope(
     env.body_excerpt = metadata_summary_with_outcome(
         env.event,
         protocol.tool_family(),
+        raw.get("tool_label"),
         raw.get("tool_call_id"),
         outcome.as_str(),
     );
@@ -1560,6 +1565,7 @@ fn metadata_envelope(
 fn metadata_summary_with_outcome(
     event: HookEvent,
     family: ToolFamily,
+    label: Option<&serde_json::Value>,
     call_id: Option<&serde_json::Value>,
     outcome: &str,
 ) -> Option<String> {
@@ -1567,6 +1573,10 @@ fn metadata_summary_with_outcome(
         return None;
     }
     let mut body = format!("tool_family: {}", canonical_tool_name(family));
+    if let Some(label) = label.and_then(serde_json::Value::as_str) {
+        body.push_str("\ntool_label: ");
+        body.push_str(label);
+    }
     if let Some(id) = call_id.and_then(serde_json::Value::as_str) {
         body.push_str("\ntool_call_id: ");
         body.push_str(id);
@@ -25016,7 +25026,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(
                 pre.body,
-                "tool_family: non-file\ntool_call_id: call-native-1"
+                "tool_family: non-file\ntool_label: Bash\ntool_call_id: call-native-1"
             );
             let post = observations
                 .iter()
@@ -25025,7 +25035,7 @@ pub(crate) mod tests {
             assert_eq!(
                 post.body,
                 format!(
-                    "tool_family: non-file\ntool_call_id: call-native-1\noutcome: unknown\n---\n{project}: [REDACTED:custom]"
+                    "tool_family: non-file\ntool_label: Bash\ntool_call_id: call-native-1\noutcome: unknown\n---\n{project}: [REDACTED:custom]"
                 )
             );
             assert!(
@@ -25285,6 +25295,8 @@ pub(crate) mod tests {
         })
         .unwrap();
         let secret = format!("SECRET{}", "Z".repeat(30));
+        let header =
+            "tool_family: file\ntool_label: Read\ntool_call_id: call-1114\noutcome: unknown\n---\n";
         let sid = SessionId::new();
         let env = HookEnvelope::from_query_and_body(
             HookQuery {
@@ -25297,7 +25309,7 @@ pub(crate) mod tests {
                 "cwd": "/repo",
                 "tool_name": "Read",
                 "tool_use_id": "call-1114",
-                "tool_response": format!("{} {secret}", "x".repeat(1_920)),
+                "tool_response": format!("{} {secret}", "x".repeat(crate::payload::TOOL_EXCERPT_MAX_BYTES - header.len() - 14)),
             }),
         );
         process(&state, env, None, Vec::new()).await.unwrap();
@@ -25388,7 +25400,9 @@ pub(crate) mod tests {
             assert_eq!(safe.agent, AgentKind::Codex);
             assert_eq!(
                 safe.body_excerpt.as_deref(),
-                Some("tool_family: file\ntool_call_id: call-patch\noutcome: unknown")
+                Some(
+                    "tool_family: file\ntool_label: apply_patch\ntool_call_id: call-patch\noutcome: unknown"
+                )
             );
             assert!(!safe.raw.to_string().contains("PRIVATE_CONTENT"));
             assert!(!safe.raw.to_string().contains("private.txt"));
@@ -25415,7 +25429,7 @@ pub(crate) mod tests {
         assert_eq!(env.title_hint.as_deref(), Some("file"));
         assert_eq!(
             env.body_excerpt.as_deref(),
-            Some("tool_family: file\noutcome: unknown")
+            Some("tool_family: file\ntool_label: Write\noutcome: unknown")
         );
         assert!(!env.raw.to_string().contains("SENTINEL_SECRET"));
         assert_eq!(env.raw["tool_name"], "file");
@@ -25835,6 +25849,79 @@ pub(crate) mod tests {
         );
     }
 
+    /// Row 11b of security-boundaries.md: `tool_label` is the one optional
+    /// scalar a stripped body may carry past the historical allowlist. A
+    /// valid label survives the rebuild while `tool_name` stays the canonical
+    /// family; a label that breaks the shape drops the whole event rather
+    /// than being truncated or retained; a body with no label renders today's
+    /// byte-identical summary, so older clients are unchanged.
+    #[test]
+    fn capture_protocol_metadata_tool_label_survives_rebuild_and_invalid_label_drops_event() {
+        let base = serde_json::json!({
+            "session_id": "label-metadata", "cwd": "/repo",
+            "tool_family": "file", "tool_name": "file", "tool_label": "Write",
+            "_ai_memory_capture": capture_protocol("metadata-only", "invalid", "file", 1, "extracted"),
+        });
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "post-tool-use".into(),
+                agent: Some("claude-code".into()),
+                ..Default::default()
+            },
+            base.clone(),
+        );
+        let env = inspect_capture_envelope(env).expect("valid label is retained");
+        assert_eq!(env.raw["tool_label"], "Write");
+        assert_eq!(env.raw["tool_name"], "file");
+        assert_eq!(
+            env.body_excerpt.as_deref(),
+            Some("tool_family: file\ntool_label: Write\noutcome: unknown")
+        );
+        assert!(!env.raw.to_string().contains("tool_input"));
+        assert!(!env.raw.to_string().contains("SENTINEL"));
+        // An unallowlisted label value — illegal characters, oversized, or an
+        // argument-shaped object — drops the stripped event whole.
+        for attack in [
+            serde_json::json!("memory query"),
+            serde_json::json!("tool=\"x\""),
+            serde_json::json!("x".repeat(81)),
+            serde_json::json!({"file_path": "SENTINEL_SECRET"}),
+        ] {
+            let mut raw = base.clone();
+            raw.as_object_mut()
+                .unwrap()
+                .insert("tool_label".into(), attack.clone());
+            let env = HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: "post-tool-use".into(),
+                    agent: Some("claude-code".into()),
+                    ..Default::default()
+                },
+                raw,
+            );
+            assert!(
+                inspect_capture_envelope(env).is_none(),
+                "invalid tool_label must drop the stripped event: {attack}"
+            );
+        }
+        // Control: a stripped body with no label keeps today's exact summary.
+        let mut bare = base;
+        bare.as_object_mut().unwrap().remove("tool_label");
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "post-tool-use".into(),
+                agent: Some("claude-code".into()),
+                ..Default::default()
+            },
+            bare,
+        );
+        let env = inspect_capture_envelope(env).unwrap();
+        assert_eq!(
+            env.body_excerpt.as_deref(),
+            Some("tool_family: file\noutcome: unknown")
+        );
+    }
+
     #[test]
     fn capture_protocol_generated_metadata_shape_is_rebuilt() {
         let env = HookEnvelope::from_query_and_body(
@@ -26241,7 +26328,7 @@ pub(crate) mod tests {
         assert_eq!(env.title_hint.as_deref(), Some("file"));
         assert_eq!(
             env.body_excerpt.as_deref(),
-            Some("tool_family: file\noutcome: unknown")
+            Some("tool_family: file\ntool_label: Write\noutcome: unknown")
         );
         assert!(!env.raw.to_string().contains("SENTINEL_SECRET"));
         assert_eq!(env.raw["_ai_memory_capture"]["policy_state"], "invalid");
@@ -26793,11 +26880,9 @@ pub(crate) mod tests {
             "{}",
             stored[0].1
         );
+        assert!(stored[2].1.contains("tool_label: Bash"));
         for (title, body) in &stored[1..] {
-            assert!(
-                !body.contains("tool_name") && !body.contains("Bash"),
-                "{title}: {body}"
-            );
+            assert!(!body.contains("tool_name:"), "{title}: {body}");
         }
         assert!(
             stored

@@ -1109,6 +1109,10 @@ fn safe_tool_body(
             .ok()?
             .trim_matches('"')
     );
+    if let Some(label) = &metadata.tool_label {
+        summary.push_str("\ntool_label: ");
+        summary.push_str(label);
+    }
     if let Some(id) = &metadata.tool_call_id {
         summary.push_str("\ntool_call_id: ");
         summary.push_str(id);
@@ -1617,6 +1621,7 @@ mod tests {
         for family in every_variant {
             let written = safe_tool_title(&ToolObservationMetadata {
                 tool_family: family,
+                tool_label: None,
                 tool_call_id: None,
                 mcp_tool: None,
             });
@@ -2799,12 +2804,12 @@ mod tests {
             (
                 "pre-tool-use",
                 "pre_tool_call",
-                "tool_family: unknown\ntool_call_id: call_00_2m0e\nmcp_server: aim\nmcp_tool: memory_query",
+                "tool_family: unknown\ntool_label: mcp__aim__memory_query\ntool_call_id: call_00_2m0e\nmcp_server: aim\nmcp_tool: memory_query",
             ),
             (
                 "post-tool-use",
                 "post_tool_call",
-                "tool_family: unknown\ntool_call_id: call_00_2m0e\nmcp_server: aim\nmcp_tool: memory_query\noutcome: success",
+                "tool_family: unknown\ntool_label: mcp__aim__memory_query\ntool_call_id: call_00_2m0e\nmcp_server: aim\nmcp_tool: memory_query\noutcome: success",
             ),
         ] {
             let raw = serde_json::json!({
@@ -2880,7 +2885,7 @@ mod tests {
                 env.body_excerpt.as_deref(),
                 Some(
                     format!(
-                        "tool_family: unknown\ntool_call_id: call-1\nmcp_server: {server}\nmcp_tool: {tool}"
+                        "tool_family: unknown\ntool_label: {tool_name}\ntool_call_id: call-1\nmcp_server: {server}\nmcp_tool: {tool}"
                     )
                     .as_str()
                 ),
@@ -2889,11 +2894,10 @@ mod tests {
         }
     }
 
-    /// A name that is not exactly the documented MCP shape keeps no name at
-    /// all, as before: an older Hermes `mcp_<server>_<tool>` cannot be split,
-    /// and free text, over-long names and empty halves are refused.
+    /// An unrecognized MCP spelling must not invent server/tool descriptors.
+    /// It may still carry a separately validated label.
     #[test]
-    fn names_outside_the_mcp_shape_keep_no_tool_identity() {
+    fn names_outside_the_mcp_shape_keep_no_mcp_identity() {
         for tool_name in [
             "mcp_github_create_issue",
             "mcp__server",
@@ -2916,11 +2920,14 @@ mod tests {
                 },
                 serde_json::json!({"tool_name": tool_name, "tool_input": {}, "tool_use_id": "call-1"}),
             );
-            assert_eq!(
-                env.body_excerpt.as_deref(),
-                Some("tool_family: unknown\ntool_call_id: call-1"),
-                "{tool_name:?}"
-            );
+            let body = env.body_excerpt.unwrap();
+            assert!(!body.contains("mcp_server:") && !body.contains("mcp_tool:"));
+            assert!(body.ends_with("tool_call_id: call-1"));
+            if crate::capture_policy::valid_tool_label(tool_name) {
+                assert!(body.contains(&format!("tool_label: {tool_name}\n")));
+            } else {
+                assert!(!body.contains("tool_label:"));
+            }
         }
     }
 
@@ -3530,7 +3537,9 @@ mod tests {
             }),
         );
         let excerpt = env.body_excerpt.unwrap();
-        assert!(excerpt.starts_with("tool_family: non-file\noutcome: unknown\n---\n"));
+        assert!(
+            excerpt.starts_with("tool_family: non-file\ntool_label: Bash\noutcome: unknown\n---\n")
+        );
         let capped = truncate_utf8_bytes(&excerpt, durable_body_cap(HookEvent::PostToolUse));
         assert!(capped.ends_with('…'));
     }
@@ -3695,7 +3704,7 @@ mod tests {
         assert_eq!(
             timeout.body_excerpt.as_deref(),
             Some(
-                "tool_family: non-file\ntool_call_id: abc123\noutcome: error\n---\n\
+                "tool_family: non-file\ntool_label: Shell\ntool_call_id: abc123\noutcome: error\n---\n\
                  Command timed out after 30s"
             )
         );
@@ -4274,7 +4283,7 @@ outcome: unknown
                 assert_eq!(env.title_hint, Some(format!("tool {family}")));
                 let body = env.body_excerpt.unwrap();
                 assert!(body.starts_with(&format!(
-                    "tool_family: {family}\ntool_call_id: call-native-1"
+                    "tool_family: {family}\ntool_label: {tool}\ntool_call_id: call-native-1"
                 )));
                 assert!(!body.contains("private-input"));
                 if event == "PostToolUse" {
@@ -4344,7 +4353,7 @@ outcome: unknown
                 env.body_excerpt.as_deref(),
                 Some(
                     format!(
-                        "tool_family: unknown\ntool_call_id: call-unknown{identity}\noutcome: unknown"
+                        "tool_family: unknown\ntool_label: {tool}\ntool_call_id: call-unknown{identity}\noutcome: unknown"
                     )
                     .as_str()
                 )
@@ -4375,7 +4384,9 @@ outcome: unknown
             );
             assert_eq!(
                 post.body_excerpt.as_deref(),
-                Some("tool_family: non-file\noutcome: unknown\n---\n(no output captured)")
+                Some(
+                    "tool_family: non-file\ntool_label: Bash\noutcome: unknown\n---\n(no output captured)"
+                )
             );
         }
     }
@@ -4443,7 +4454,7 @@ outcome: unknown
     }
 
     #[test]
-    fn unknown_closed_tool_post_never_includes_output_or_name() {
+    fn unknown_closed_tool_post_keeps_a_valid_label_without_output() {
         let env = HookEnvelope::from_query_and_body(
             HookQuery {
                 event: "post-tool-use".into(),
@@ -4456,7 +4467,7 @@ outcome: unknown
         assert!(body.contains("tool_family: unknown"));
         assert!(body.contains("tool_call_id: unknown-1"));
         assert!(body.contains("outcome: unknown"));
-        assert!(!body.contains("ARBITRARY_TOOL_SENTINEL"));
+        assert!(body.contains("tool_label: ARBITRARY_TOOL_SENTINEL"));
         assert!(!body.contains("OUTPUT_SENTINEL"));
     }
 
@@ -4768,7 +4779,9 @@ outcome: unknown
             );
             assert_eq!(
                 env.body_excerpt.as_deref(),
-                Some("tool_family: unknown\noutcome: unknown")
+                Some(
+                    format!("tool_family: unknown\ntool_label: {tool}\noutcome: unknown").as_str()
+                )
             );
         }
 
@@ -4952,7 +4965,7 @@ outcome: unknown
         assert_eq!(pre.title_hint.as_deref(), Some("tool non-file"));
         assert_eq!(
             pre.body_excerpt.as_deref(),
-            Some("tool_family: non-file\ntool_call_id: omp-1")
+            Some("tool_family: non-file\ntool_label: bash\ntool_call_id: omp-1")
         );
 
         let post = HookEnvelope::from_query_and_body(
@@ -4966,7 +4979,9 @@ outcome: unknown
         assert_eq!(post.title_hint.as_deref(), Some("tool non-file"));
         assert_eq!(
             post.body_excerpt.as_deref(),
-            Some("tool_family: non-file\ntool_call_id: omp-1\noutcome: unknown\n---\ntests passed")
+            Some(
+                "tool_family: non-file\ntool_label: bash\ntool_call_id: omp-1\noutcome: unknown\n---\ntests passed"
+            )
         );
     }
 
@@ -5000,7 +5015,9 @@ outcome: unknown
         assert_eq!(env.title_hint.as_deref(), Some("tool non-file: Bash"));
         let body = env.body_excerpt.as_deref().unwrap();
         assert!(
-            body.starts_with("tool_family: non-file\ntool_name: Bash\ntool_call_id: toolu_1\n"),
+            body.starts_with(
+                "tool_family: non-file\ntool_name: Bash\ntool_label: Bash\ntool_call_id: toolu_1\n"
+            ),
             "{body}"
         );
         assert!(
@@ -5175,6 +5192,42 @@ outcome: unknown
         for not_ours in ["tool file: two words", "tool nope: Bash", "Tool file: Edit"] {
             assert!(!is_safe_tool_title(not_ours), "{not_ours}");
             assert_eq!(tool_family_from_title(not_ours), None, "{not_ours}");
+        }
+    }
+
+    #[test]
+    fn closed_tool_labels_are_bounded_and_never_record_arguments_or_output() {
+        let envelope = |name: &str| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: "post-tool-use".into(),
+                    agent: Some("claude-code".into()),
+                    ..Default::default()
+                },
+                serde_json::json!({"tool_name": name, "tool_input": {"query": "PRIVATE_ARGUMENT"}, "tool_response": "PRIVATE_OUTPUT"}),
+            )
+        };
+        for name in [
+            "memory_query".to_string(),
+            "Serena.get_symbol_def".into(),
+            "a".repeat(80),
+        ] {
+            let body = envelope(&name).body_excerpt.unwrap();
+            assert!(body.contains(&format!("tool_label: {name}")), "{body}");
+            assert!(!body.contains("PRIVATE_ARGUMENT") && !body.contains("PRIVATE_OUTPUT"));
+        }
+        for name in [
+            "memory query".to_string(),
+            "x\u{1b}".into(),
+            "ação".into(),
+            "a".repeat(81),
+        ] {
+            let body = envelope(&name).body_excerpt.unwrap();
+            assert!(
+                !body.contains("tool_label:"),
+                "invalid label retained: {body}"
+            );
+            assert!(!body.contains("PRIVATE_ARGUMENT") && !body.contains("PRIVATE_OUTPUT"));
         }
     }
 }

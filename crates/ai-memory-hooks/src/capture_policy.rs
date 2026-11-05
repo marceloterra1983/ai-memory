@@ -19,6 +19,7 @@ pub const MAX_MATCH_WORK: usize = 1_000_000;
 /// Longest argv element kept whole as a path; longer ones are scripts.
 const MAX_ARGV_PATH_CHARS: usize = 256;
 const MAX_CALL_ID_CHARS: usize = 128;
+const MAX_TOOL_LABEL_CHARS: usize = 80;
 const CAPTURE_PROTOCOL_VERSION: u8 = 1;
 
 /// Minimal decoded `[capture]` marker configuration.
@@ -143,6 +144,8 @@ pub enum ToolFamily {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ToolObservationMetadata {
     pub(crate) tool_family: ToolFamily,
+    /// Validated real tool name, without arguments or output.
+    pub(crate) tool_label: Option<String>,
     pub(crate) tool_call_id: Option<String>,
     /// Set only for an unknown-family call whose name is a strictly
     /// validated MCP tool name; see [`mcp_tool_name`].
@@ -458,6 +461,7 @@ pub(crate) fn tool_observation_metadata(
         let tool_family = agent_family(agent, name);
         ToolObservationMetadata {
             tool_family,
+            tool_label: valid_tool_label(name).then(|| name.to_owned()),
             tool_call_id: id.filter(|id| valid_call_id(id)).map(str::to_owned),
             mcp_tool: if tool_family == ToolFamily::Unknown {
                 mcp_tool_name(name)
@@ -762,12 +766,13 @@ enum Flavor {
     Windows,
 }
 
-/// Safe inspection result; it never retains raw arguments, paths, or arbitrary tool names.
+/// Safe inspection result; only a validated tool label survives beside the family.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureDecision {
     protocol: CaptureProtocol,
     identity: CanonicalTool,
     call_id: Option<String>,
+    label: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1028,6 +1033,7 @@ impl CapturePolicy {
             ),
             identity: canonical(extracted.family),
             call_id: extracted.call_id,
+            label: extracted.label,
         }
     }
     fn match_paths(&self, paths: &[String], cwd: &str) -> Result<bool, ()> {
@@ -1231,6 +1237,9 @@ pub fn metadata_only_body(
     }
     body.insert("tool_family".into(), json!(decision.protocol.tool_family()));
     body.insert("tool_name".into(), json!(decision.identity));
+    if let Some(label) = &decision.label {
+        body.insert("tool_label".into(), json!(label));
+    }
     if let Some(value) = &decision.call_id {
         body.insert("tool_call_id".into(), Value::String(value.clone()));
     }
@@ -1326,6 +1335,7 @@ struct Extracted<'a> {
     /// A non-file tool whose input is program source ([`INLINE_CODE_TOOL_NAMES`]).
     inline_code: bool,
     call_id: Option<String>,
+    label: Option<String>,
     state: ExtractionState,
 }
 
@@ -1520,6 +1530,7 @@ fn extract(agent: AgentKind, raw: &Value) -> Extracted<'_> {
         inline_code: family == ToolFamily::NonFile
             && INLINE_CODE_TOOL_NAMES.contains(&name.to_ascii_lowercase().as_str()),
         call_id,
+        label: valid_tool_label(name).then(|| name.to_owned()),
         state,
     }
 }
@@ -1864,6 +1875,15 @@ fn canonical(family: ToolFamily) -> CanonicalTool {
         ToolFamily::NonFile => CanonicalTool::NonFile,
         ToolFamily::Unknown => CanonicalTool::Unknown,
     }
+}
+
+/// A label is recorded whole or omitted: truncation could name another tool.
+pub(crate) fn valid_tool_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= MAX_TOOL_LABEL_CHARS
+        && label
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b':'))
 }
 
 /// Whether a native tool call id may be stored: the only call id the server

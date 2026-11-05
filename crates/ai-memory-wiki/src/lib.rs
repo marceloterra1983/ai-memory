@@ -38,8 +38,8 @@ pub use okf_index::okf_directory_listing;
 pub use watcher::{DEBOUNCE_WINDOW, RECONCILE_INTERVAL, WatcherHandle};
 pub use wiki::{
     ConditionalBatchWrite, ConditionalWrite, EventLedgerFile, MergeProjectFile, MoveSessionOutcome,
-    PAGE_CHECKPOINT_WALK_LIMIT, PurgeSessionOutcome, SessionPageFile, VersionedPage, Wiki,
-    WritePageRequest,
+    PAGE_CHECKPOINT_WALK_LIMIT, PurgeSessionOutcome, RelationCurationRequest,
+    RelationCurationResult, SessionPageFile, VersionedPage, Wiki, WritePageRequest,
 };
 
 // Integration tests compile into this crate's test harness instead of a

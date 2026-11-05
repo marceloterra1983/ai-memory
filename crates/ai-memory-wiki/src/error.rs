@@ -12,6 +12,14 @@ pub type WikiResult<T> = Result<T, WikiError>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum WikiError {
+    /// A metadata update no longer matches the scoped indexed or disk head.
+    #[error("page head or body hash changed; rerun the dry-run")]
+    StalePageHead,
+
+    /// Metadata-only curation would alter protected content.
+    #[error("metadata-only operation would change protected content")]
+    ProtectedPageContent,
+
     /// Filesystem I/O failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

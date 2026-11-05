@@ -2025,6 +2025,34 @@ mod tests {
     }
 
     #[test]
+    fn strip_mcp_muse_clears_a_settings_file_with_both_maps() {
+        let content = serde_json::json!({
+            "mcp_servers": {
+                "ai-memory": {"transport": "streamable_http", "url": "http://127.0.0.1:49374/mcp"},
+            },
+            "mcpServers": {
+                "ai-memory": {"transport": "streamable_http", "url": "http://127.0.0.1:49374/mcp"},
+                "other": {"transport": "stdio", "command": "my-mcp-server"},
+            },
+        })
+        .to_string();
+
+        let (out, removed) = strip_mcp_json(
+            &content,
+            McpClient::Muse,
+            Some("ai-memory"),
+            "http://127.0.0.1:49374/mcp",
+        )
+        .unwrap();
+
+        assert_eq!(removed, vec!["ai-memory".to_string(); 2]);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("mcp_servers").is_none(), "emptied map pruned: {out}");
+        assert!(v["mcpServers"].get("ai-memory").is_none(), "{out}");
+        assert!(v["mcpServers"].get("other").is_some(), "{out}");
+    }
+
+    #[test]
     fn strip_mcp_by_endpoint_under_custom_name() {
         let content = r#"{"mcpServers":{"my-mem":{"url":"http://127.0.0.1:49374/mcp"}}}"#;
         let (out, removed) = strip_mcp_json(

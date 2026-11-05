@@ -845,7 +845,11 @@ async fn admit_hook(
     // Consume the opt-in `_ai_memory_assistant` marker and, when both opt-ins are
     // on for a supported Stop, populate the Stop body with the sanitized excerpt.
     // Any gate failure leaves an empty Stop with the same 202 "queued" response.
-    crate::assistant_capture::apply_assistant_backstop(&mut env, state.capture_assistant_enabled);
+    crate::assistant_capture::apply_assistant_backstop(
+        &mut env,
+        state.capture_assistant_enabled,
+        &state.sanitizer,
+    );
     if env.aliases_invalid {
         HookProcessingOutcome::DroppedInvalid.record(&state.ingest_metrics);
         return (StatusCode::ACCEPTED, "invalid marker aliases");
@@ -1131,6 +1135,7 @@ async fn handle_hook_batch(
         crate::assistant_capture::apply_assistant_backstop(
             &mut env,
             state.capture_assistant_enabled,
+            &state.sanitizer,
         );
         if env.aliases_invalid {
             HookProcessingOutcome::DroppedInvalid.record(&state.ingest_metrics);
@@ -17304,7 +17309,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
             let mut stop = opencode_turn_event(&session.to_string(), "stop", text);
-            crate::assistant_capture::apply_assistant_backstop(&mut stop, true);
+            crate::assistant_capture::apply_assistant_backstop(&mut stop, true, &state.sanitizer);
             process(&state, stop, None, Vec::new()).await.unwrap();
             let pages = state
                 .reader
@@ -17653,7 +17658,7 @@ pub(crate) mod tests {
                     "_ai_memory_assistant": { "version": 1, "excerpt": "Found two bugs" },
                 }),
             );
-            crate::assistant_capture::apply_assistant_backstop(&mut env, true);
+            crate::assistant_capture::apply_assistant_backstop(&mut env, true, &state.sanitizer);
             process(&state, env, None, Vec::new()).await.unwrap();
         }
         let handoff = state
@@ -17707,7 +17712,7 @@ pub(crate) mod tests {
             let mut stop =
                 opencode_turn_event(&session, "stop", &format!("Assistant-only result {secret}"));
             stop.capture_assistant_requested = client;
-            crate::assistant_capture::apply_assistant_backstop(&mut stop, server);
+            crate::assistant_capture::apply_assistant_backstop(&mut stop, server, &state.sanitizer);
             process(&state, stop, None, Vec::new()).await.unwrap();
             let handoff = state
                 .reader
@@ -17755,7 +17760,11 @@ pub(crate) mod tests {
                         opencode_turn_event(&session, event, &format!("{project}-{turn}"));
                     env.workspace_override = Some("checkpoint-workspace".into());
                     env.project_override = Some(project.into());
-                    crate::assistant_capture::apply_assistant_backstop(&mut env, true);
+                    crate::assistant_capture::apply_assistant_backstop(
+                        &mut env,
+                        true,
+                        &state.sanitizer,
+                    );
                     process(&state, env, None, Vec::new()).await.unwrap();
                 }
             }
@@ -17806,7 +17815,11 @@ pub(crate) mod tests {
         for (session, text) in [(&alpha, "alpha work"), (&beta, "beta work")] {
             for event in ["user-prompt", "stop"] {
                 let mut env = opencode_turn_event(session, event, text);
-                crate::assistant_capture::apply_assistant_backstop(&mut env, true);
+                crate::assistant_capture::apply_assistant_backstop(
+                    &mut env,
+                    true,
+                    &state.sanitizer,
+                );
                 process(&state, env, None, Vec::new()).await.unwrap();
             }
         }
@@ -19562,7 +19575,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
         let mut stop = opencode_turn_event(&session.to_string(), "stop", text);
-        crate::assistant_capture::apply_assistant_backstop(&mut stop, true);
+        crate::assistant_capture::apply_assistant_backstop(&mut stop, true, &state.sanitizer);
         process(&state, stop, None, Vec::new()).await.unwrap();
         assert!(
             !session_pages(&state).await.is_empty(),
@@ -19665,7 +19678,7 @@ pub(crate) mod tests {
                 "_ai_memory_assistant": { "version": 1, "excerpt": text },
             }),
         );
-        crate::assistant_capture::apply_assistant_backstop(&mut stop, true);
+        crate::assistant_capture::apply_assistant_backstop(&mut stop, true, &state.sanitizer);
         process(&state, stop, None, Vec::new()).await.unwrap();
         assert!(!session_pages(&state).await.is_empty());
         assert!(
@@ -26005,6 +26018,7 @@ pub(crate) mod tests {
         crate::assistant_capture::apply_assistant_backstop(
             &mut assistant,
             state.capture_assistant_enabled,
+            &state.sanitizer,
         );
         process(&state, assistant, None, Vec::new()).await.unwrap();
 

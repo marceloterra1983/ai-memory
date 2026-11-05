@@ -3763,6 +3763,15 @@ fn push_event(
     if content.trim().is_empty() {
         return;
     }
+    // Preserve complete delimiters for scrub before the transport cap. Short
+    // events still reach the server's configured sanitizer without alteration.
+    let scrubbed;
+    let content = if content.len() > MAX_EVENT_BYTES {
+        scrubbed = Sanitizer::builtin().scrub(content);
+        scrubbed.as_str()
+    } else {
+        content
+    };
     let content = truncate_utf8(content, MAX_EVENT_BYTES);
     let seed = format!(
         "{}\0{session}\0{record_id}\0{block}\0{}\0{content}",
@@ -6235,6 +6244,43 @@ fn deduplicate_losses(losses: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_event_cap_scrubs_pem_before_truncation() {
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_CONTENT{}\n-----END PRIVATE KEY-----",
+            "A".repeat(MAX_EVENT_BYTES)
+        );
+        let mut events = Vec::new();
+        push_event(
+            &mut events,
+            AgentKind::Codex,
+            "native-1",
+            "record-1",
+            0,
+            WorkstreamEventKind::Message,
+            Some("user"),
+            &pem,
+            None,
+            json!({}),
+        );
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].content.contains("SYNTHETIC_PRIVATE_CONTENT"));
+        assert!(events[0].content.len() <= MAX_EVENT_BYTES);
+        push_event(
+            &mut events,
+            AgentKind::Codex,
+            "native-1",
+            "record-2",
+            0,
+            WorkstreamEventKind::Message,
+            Some("user"),
+            "ordinary context",
+            None,
+            json!({}),
+        );
+        assert_eq!(events[1].content, "ordinary context");
+    }
 
     #[test]
     fn checkout_path_comparison_fails_closed_when_canonicalization_fails() {

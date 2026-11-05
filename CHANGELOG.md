@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Scrubbed complete assistant and native transcript text before byte caps could split secret delimiters (`eebdd33c`, `d6a28c77`).
+
 - Reauthorized hook writes and managed-run bindings against their effective project inside the transaction, including retry; private web responses now require grant revalidation (`d6db29ad`).
 
 - Completed receipts for repeated SessionEnd deliveries and disabled generated TypeScript drains that could delete the receipt worker’s envelopes (`eb1ba452`, `d009b152`); retained the separately installed relay/worker sources.

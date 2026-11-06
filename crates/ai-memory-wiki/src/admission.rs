@@ -387,7 +387,7 @@ impl AdmissionChain {
         }
 
         let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(refuse_webhook_redirects())
             .build()
             .map_err(|e| {
                 WikiError::Io(std::io::Error::other(format!("admission http client: {e}")))
@@ -930,6 +930,24 @@ fn is_supported_webhook_url(url: &str) -> bool {
     }
     let lower = trimmed.to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// Refuse every redirect, preserving the target-origin diagnosis for operators.
+/// Same-origin responses remain ordinary 3xx refusals; no payload is replayed.
+fn refuse_webhook_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous()
+            .last()
+            .is_some_and(|previous| previous.origin() == attempt.url().origin());
+        if same_origin {
+            return attempt.stop();
+        }
+        let target = attempt.url().origin().ascii_serialization();
+        attempt.error(format!(
+            "refused a redirect to another origin ({target}); set the endpoint to its final URL"
+        ))
+    })
 }
 
 /// Format a `reqwest::Error` together with its `Error::source` chain so

@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Restored admission redirect refusals with the target-origin diagnosis while continuing to refuse same-origin redirects (`C5`, cross-review of `404fa8a0`).
+
 - Routed backfill session closes through the claim server profile and refused closes lacking both scope and cwd (`F2`, `N1`, cross-review of `c0daec8d`).
 
 - Left persisted shell and PowerShell hook envelopes to the receipt worker or native lock-aware drain, matching generated TypeScript ownership (`C3`, cross-review of `d009b152`).

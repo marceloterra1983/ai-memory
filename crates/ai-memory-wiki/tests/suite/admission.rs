@@ -770,8 +770,12 @@ async fn cross_origin_redirect_is_refused_without_forwarding_payload_or_mutating
         .expect_err("cross-origin redirect must fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("307"),
+        msg.contains("refused a redirect to another origin"),
         "expected cross-origin refusal in error: {msg}"
+    );
+    assert!(
+        msg.contains(&foreign_base),
+        "missing redirect target origin: {msg}"
     );
     assert!(
         !seen.load(Ordering::SeqCst),
@@ -787,14 +791,21 @@ async fn cross_origin_redirect_is_refused_without_forwarding_payload_or_mutating
         .notify(Some(path.as_str()), &delete_ctx)
         .await
         .expect_err("cross-origin redirect must fail notify");
+    // The request error preserves the target origin while refusing to replay
+    // the notification, just as it does for page admission.
     let notify_msg = notify_err.to_string();
     assert!(
-        notify_msg.contains("307"),
+        notify_msg.contains("refused a redirect to another origin"),
         "expected cross-origin refusal in notify error: {notify_msg}"
     );
     assert!(
         !seen.load(Ordering::SeqCst),
         "foreign origin must not receive the delete notification"
+    );
+
+    assert!(
+        notify_msg.contains(&foreign_base),
+        "missing redirect target origin: {notify_msg}"
     );
 
     let ignore_chain = AdmissionChain::new(vec![WebhookConfig {

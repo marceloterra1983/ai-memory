@@ -1020,8 +1020,9 @@ executável, depois do cwd e depois do manifesto
 (`crates/ai-memory-cli/src/install_layout.rs:63`).
 
 **Assimetria.** Com o binário fora de checkout, os dois resolvedores
-concordam: o prefixo vence os caminhos de sistema, o data dir e o checkout do
-cwd. Com o binário dentro de um checkout, discordam. O `install-hooks` põe o
+concordam: o prefixo vence os caminhos de sistema e o checkout do cwd. O data
+dir é candidato só do `install-hooks` (`:6981`); `source_candidates` não o
+consulta. Com o binário dentro de um checkout, discordam. O `install-hooks` põe o
 checkout primário antes de tudo. O `setup-agent` põe qualquer bundle
 instalado antes dele: o prefixo e também `/usr/local/share` e `/usr/share`.
 Isso vale mesmo sem prefixo, como no binário em `<checkout>/target/debug/`
@@ -1038,17 +1039,27 @@ checkout.
 
 **Avaliação: aceitável, não insegura.**
 
-- Nenhum candidato cruza fronteira de privilégio. Os hooks rodam como o
-  usuário que roda o comando. Os caminhos de sistema são de root, e o
-  checkout e o prefixo são do próprio usuário.
+- Nenhum candidato eleva privilégio: os hooks rodam como o usuário que roda
+  o comando. Os resolvedores não conferem o dono do diretório.
+  `repo_root_from_dir` (`crates/ai-memory-cli/src/install_layout.rs:21`–`:36`)
+  só olha os marcadores. O recuo pelo cwd (`install_layout.rs:69`–`:73`)
+  pode achar o checkout de outro usuário quando nenhum bundle instalado
+  existe; é a mesma confiança de rodar `cargo run` naquele diretório.
+- Os caminhos de sistema vêm antes desse checkout nos dois resolvedores. Com
+  o binário dentro de um checkout, a origem é um ancestral do próprio
+  executável.
 - O risco é misturar versões de binário e hooks. É o mesmo custo aceito em
   N1, e `--hooks-dir` e `--source` fixam a origem.
-- A assimetria vem do upstream. Em `v3.4.2`, `hook_source_candidates` punha
-  qualquer raiz de repositório em primeiro lugar, inclusive a do cwd
-  (`git show v3.4.2:crates/ai-memory-cli/src/commands/install_hooks.rs`).
-  O porte restringiu essa prioridade ao checkout primário, em `4b97ced0` e
-  `412c00c7`, e assim reduziu os casos de divergência. `setup_agent.rs` não
-  mudou em relação ao upstream nesse trecho.
+- A ordem vem do upstream. Em `v3.4.2`, `hook_source_candidates` punha em
+  primeiro lugar a raiz três níveis acima do executável, sem conferir
+  marcadores, e `source_candidates` punha a mesma raiz por último (`git show
+  v3.4.2:crates/ai-memory-cli/src/commands/install_hooks.rs` e
+  `setup_agent.rs`). Nenhum dos dois consultava o cwd. O porte trocou essa
+  raiz por `install_layout::repo_root_guess`, com marcadores e recuo pelo
+  cwd, em `5fe0e7cc` (N1). Depois, `4b97ced0` e `412c00c7` deixaram em
+  primeiro lugar no `install-hooks` só o checkout primário e mandaram o do
+  cwd para o fim. No `setup-agent`, a ordem dos candidatos segue a do
+  upstream; só a origem do checkout mudou.
 - Nos dois resolvedores, um checkout achado só pelo cwd fica por último.
 
 **Testes.** Cada arquivo tem dois testes. Eles copiam o harness para um

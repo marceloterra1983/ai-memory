@@ -3656,8 +3656,11 @@ impl Wiki {
         }
     }
 
-    /// Acquire stable OS locks outside the rename-based wiki tree. Sorted
-    /// acquisition keeps batch writes deadlock-free across independent handles.
+    /// Acquire stable OS locks outside the rename-based wiki tree. A fixed
+    /// 1024-slot pool bounds disk growth even for reads of absent paths. Hash
+    /// collisions serialize unrelated pages; sorted, deduplicated acquisition
+    /// keeps batch writes deadlock-free across independent handles. Legacy
+    /// per-path files stay untouched and are no longer acquired.
     async fn lock_page_files(&self, keys: &[PageKey]) -> WikiResult<Vec<std::fs::File>> {
         use sha2::{Digest as _, Sha256};
         let mut paths: Vec<PathBuf> = keys
@@ -3670,9 +3673,10 @@ impl Wiki {
                     .chain_update([0])
                     .chain_update(path.as_str().as_bytes())
                     .finalize();
+                let slot = u16::from_be_bytes([digest[0], digest[1]]) % 1024;
                 self.data_dir()
                     .join("page-locks")
-                    .join(format!("{digest:x}"))
+                    .join(format!("pool-v1-{slot:04}"))
             })
             .collect();
         paths.sort();

@@ -753,23 +753,35 @@ async fn dream_cancel_before_second_admission_hook_prevents_new_request() {
 async fn dream_cancelled_file_lock_wait_releases_already_acquired_locks() {
     use sha2::{Digest, Sha256};
     let (tmp, store, wiki, ws, proj) = fixture().await;
-    let heads = store.reader.dream_heads_bounded(ws, proj, 2).await.unwrap();
-    let mut paths: Vec<_> = ["a.md", "b.md"]
-        .iter()
-        .map(|path| {
-            let hash = Sha256::new()
-                .chain_update(ws.as_bytes())
-                .chain_update([0])
-                .chain_update(proj.as_bytes())
-                .chain_update([0])
-                .chain_update(path.as_bytes())
-                .finalize();
-            tmp.path().join("page-locks").join(format!(
-                "pool-v1-{:04}",
-                u16::from_be_bytes([hash[0], hash[1]]) % 1024
-            ))
-        })
-        .collect();
+    let mut heads = store.reader.dream_heads_bounded(ws, proj, 2).await.unwrap();
+    let lock_path = |path: &str| {
+        let hash = Sha256::new()
+            .chain_update(ws.as_bytes())
+            .chain_update([0])
+            .chain_update(proj.as_bytes())
+            .chain_update([0])
+            .chain_update(path.as_bytes())
+            .finalize();
+        tmp.path().join("page-locks").join(format!(
+            "pool-v1-{:04}",
+            u16::from_be_bytes([hash[0], hash[1]]) % 1024
+        ))
+    };
+    let mut paths = vec![lock_path("a.md"), lock_path("b.md")];
+    // Pool collisions are legitimate. This cancellation probe specifically
+    // needs two slots: one already acquired and another still held externally.
+    if paths[0] == paths[1] {
+        let alternate = (0..1024)
+            .map(|i| format!("lock-control-{i}.md"))
+            .find(|path| lock_path(path) != paths[0])
+            .expect("a different lock slot for the cancellation fixture");
+        wiki.write_page(page(ws, proj, &alternate, "fact C\n"))
+            .await
+            .unwrap();
+        heads = store.reader.dream_heads_bounded(ws, proj, 3).await.unwrap();
+        heads.retain(|head| head.candidate.path.as_str() != "b.md");
+        paths[1] = lock_path(&alternate);
+    }
     paths.sort();
     let first = std::fs::OpenOptions::new()
         .read(true)

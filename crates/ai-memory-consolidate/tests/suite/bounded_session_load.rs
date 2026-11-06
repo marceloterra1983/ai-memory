@@ -2095,3 +2095,79 @@ mod slow {
         }
     }
 }
+
+/// Reconciliation also runs inside the automatic worker, before its claim is
+/// completed. A newer checkpoint must keep its own turn through the provider.
+#[tokio::test]
+async fn automatic_reconcile_preserves_newer_pending_generation() {
+    let tmp = TempDir::new().unwrap();
+    let (store, wiki, ws, proj, sid) = seeded_fixture(tmp.path(), 1, false, false).await;
+    store
+        .writer
+        .enqueue_session_checkpoint(ws, proj, sid)
+        .await
+        .unwrap();
+    let now = jiff::Timestamp::now().as_microsecond();
+    let a = store
+        .writer
+        .claim_session_consolidation(now, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.generation(), 1);
+    let conn = rusqlite::Connection::open(db_file(tmp.path())).unwrap();
+    conn.execute(
+        "INSERT INTO observations (id, session_id, workspace_id, project_id, kind, title, body, importance, created_at) VALUES (?1, ?2, ?3, ?4, 'user-prompt', 'new evidence', 'new evidence', 5, ?5)",
+        rusqlite::params![SessionId::new().as_bytes(), sid.as_bytes(), ws.as_bytes(), proj.as_bytes(), now],
+    ).unwrap();
+    store
+        .writer
+        .enqueue_session_checkpoint(ws, proj, sid)
+        .await
+        .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let consolidator = Consolidator::new(
+        store.reader.clone(),
+        store.writer.clone(),
+        wiki,
+        Arc::new(CapturingLlm {
+            requests: requests.clone(),
+        }),
+        ws,
+        proj,
+    );
+    let outcome = consolidator
+        .consolidate_session(sid, false, ActorContext::anonymous(), None, None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .complete_session_consolidation(a)
+        .await
+        .unwrap();
+    let b = store
+        .writer
+        .claim_session_consolidation(jiff::Timestamp::now().as_microsecond(), 0)
+        .await
+        .unwrap()
+        .expect("newer pending generation must still run");
+    assert_eq!(b.generation(), 2);
+    let summary: Vec<u8> = conn
+        .query_row(
+            "SELECT summary_page_id FROM sessions WHERE id = ?1",
+            [sid.as_bytes()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(summary, outcome.page_id.unwrap().as_bytes());
+    consolidator
+        .consolidate_session(sid, false, ActorContext::anonymous(), None, None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .complete_session_consolidation(b)
+        .await
+        .unwrap();
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}

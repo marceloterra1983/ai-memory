@@ -459,7 +459,8 @@ impl Consolidator {
 
     async fn reconcile_session_state(&self, session_id: SessionId) {
         // The consolidator is shared by workers, checkpoints and manual calls.
-        // The writer repairs anchors without disturbing a worker's active lease.
+        // The writer repairs anchors and old failures without consuming a newer
+        // generation or disturbing a worker's active lease.
         if let Err(error) = self
             .writer
             .reconcile_session_consolidation_completed(session_id)

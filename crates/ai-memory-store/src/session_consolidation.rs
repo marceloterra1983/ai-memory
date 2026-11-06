@@ -387,7 +387,9 @@ pub fn release(conn: &mut Connection, job: &SessionConsolidationJob) -> StoreRes
 /// never touches this queue, so the session's job row can sit in a terminal
 /// `failed` (or `pending`/`superseded`) state for a session that is, in fact,
 /// consolidated — a two-sources-of-truth inconsistency the operator sees. This
-/// flips those rows to `completed`.
+/// flips those rows to `completed`, capped at the oldest running generation
+/// when called from an automatic attempt. Newer pending work may not have been
+/// read by that attempt and must keep its own turn through the provider.
 ///
 /// It deliberately never touches a `running` row: that state is an active
 /// worker lease, and stomping it would violate the single-writer/collaboration
@@ -412,6 +414,10 @@ pub fn reconcile_session_consolidation_completed(
         "UPDATE session_consolidation_jobs \
          SET state = 'completed', completed_at = ?1, claim_id = NULL, last_error = ?3 \
          WHERE session_id = ?2 \
+           AND generation <= COALESCE(( \
+               SELECT MIN(generation) FROM session_consolidation_jobs \
+               WHERE session_id = ?2 AND state = 'running' \
+           ), 9223372036854775807) \
            AND (state IN ('failed', 'pending', 'superseded') \
                 OR (state = 'completed' AND last_error IS NOT ?3))",
         params![now, session_id.as_bytes(), reason],

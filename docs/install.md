@@ -436,6 +436,11 @@ ai-memory install-mcp   --client claude-code --apply
 ai-memory install-hooks --agent  claude-code --apply
 ```
 
+`install-hooks` prefers the hook sources in the nearest checkout containing
+its executable, including builds under `target-host/`, `build/` or a nested
+worktree. For an installed binary, installed bundles precede a checkout found
+only through cwd or the build manifest. `--hooks-dir` selects a source explicitly.
+
 That wires the hooks user-wide (`~/.claude/settings.json`), so every Claude
 Code session is captured. To opt in per repository instead, run from inside
 the checkout:

@@ -6937,11 +6937,14 @@ fn hook_source_candidates(
     data_dir: Option<PathBuf>,
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::with_capacity(6);
-    // Only a binary built inside this checkout makes its source bundle primary.
+    // The executable's nearest checkout owns the source bundle, regardless
+    // of CARGO_TARGET_DIR. An outer checkout containing a worktree cannot win.
     let dev_checkout = repo_root.as_ref().is_some_and(|root| {
         exe_dir
+            .as_deref()
+            .and_then(crate::install_layout::repo_root_from_dir)
             .as_ref()
-            .is_some_and(|dir| dir.starts_with(root.join("target")))
+            == Some(root)
     });
     if dev_checkout && let Some(root) = &repo_root {
         candidates.push(root.join(crate::install_layout::HOOKS_DIR_NAME).join(sub));
@@ -13110,6 +13113,102 @@ model = "gpt-5"
             .unwrap(),
             explicit.join("claude-code")
         );
+    }
+
+    #[test]
+    fn checkout_hooks_precede_installed_bundle_with_custom_target_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("checkout");
+        let source = repo.join("hooks/claude-code");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
+        let data = tmp.path().join("data");
+        fs::create_dir_all(data.join("hooks/claude-code")).unwrap();
+
+        for build_dir in ["target-host/debug", "target-x/release", "build/debug"] {
+            let exe = repo.join(build_dir).join("ai-memory");
+            fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            let candidates = hook_source_candidates(
+                "claude-code",
+                crate::install_layout::repo_root_guess(Some(&exe), Some(&repo)),
+                exe.parent().map(Path::to_path_buf),
+                Some(data.clone()),
+            );
+            let chosen = candidates
+                .iter()
+                .find(|p| p.starts_with(tmp.path()) && p.is_dir())
+                .unwrap();
+            assert_eq!(chosen, &source, "checkout must be primary for {build_dir}");
+            assert_eq!(candidates[0], source);
+        }
+    }
+
+    #[test]
+    fn nested_executable_checkout_precedes_the_main_cwd_and_installed_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        let nested = main.join(".worktrees/x");
+        for repo in [&main, &nested] {
+            fs::create_dir_all(repo.join("hooks/claude-code")).unwrap();
+            fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
+        }
+        let exe = nested.join("target-host/release/ai-memory");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let data = tmp.path().join("data");
+        let bundle = data.join("hooks/claude-code");
+        fs::create_dir_all(&bundle).unwrap();
+        let root = crate::install_layout::repo_root_guess(Some(&exe), Some(&main));
+        assert_eq!(root, Some(nested.clone()));
+        let candidates = hook_source_candidates(
+            "claude-code",
+            root,
+            exe.parent().map(Path::to_path_buf),
+            Some(data.clone()),
+        );
+        assert_eq!(candidates[0], nested.join("hooks/claude-code"));
+
+        // A caller's outer checkout must not gain priority just because it
+        // contains the executable's separate, closer checkout.
+        let candidates = hook_source_candidates(
+            "claude-code",
+            Some(main),
+            exe.parent().map(Path::to_path_buf),
+            Some(data),
+        );
+        let chosen = candidates
+            .iter()
+            .find(|p| p.starts_with(tmp.path()) && p.is_dir())
+            .unwrap();
+        assert_eq!(chosen, &bundle);
+    }
+
+    #[test]
+    fn installed_runtime_hooks_precede_a_cwd_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("checkout");
+        fs::create_dir_all(repo.join("hooks/claude-code")).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
+        let data = tmp.path().join("data");
+        let bundle = data.join("hooks/claude-code");
+        fs::create_dir_all(&bundle).unwrap();
+        for installed in [
+            "home/.local/share/ai-memory-runtime/sha/ai-memory",
+            "home/.local/bin/ai-memory",
+            "usr/bin/ai-memory",
+        ] {
+            let exe = tmp.path().join(installed);
+            let candidates = hook_source_candidates(
+                "claude-code",
+                crate::install_layout::repo_root_guess(Some(&exe), Some(&repo)),
+                exe.parent().map(Path::to_path_buf),
+                Some(data.clone()),
+            );
+            let chosen = candidates
+                .iter()
+                .find(|p| p.starts_with(tmp.path()) && p.is_dir())
+                .unwrap();
+            assert_eq!(chosen, &bundle, "installed executable: {installed}");
+        }
     }
 
     #[test]

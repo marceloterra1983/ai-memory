@@ -36,11 +36,11 @@ pub fn repo_root_from_dir(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Walk up from the binary's directory until an ancestor contains a `hooks/`
-/// directory. Replaces the old fixed `parent×3` guess, which broke under
-/// `target/<triple>/<profile>/` and when `CARGO_TARGET_DIR` points outside the
-/// checkout (the walk then correctly returns `None`; callers fall through to
-/// cwd / manifest probes and the binary-sibling candidate).
+/// Find the binary's nearest checkout using the same workspace and hook
+/// markers as [`repo_root_from_dir`]. Build directory names are unrestricted
+/// (`target/`, `target-host/`, `build/`, or a cross-compile layout). An external
+/// `CARGO_TARGET_DIR` has no checkout ancestor; callers rank cwd / manifest
+/// fallbacks after installed bundles.
 pub fn repo_root_from_exe(exe: &Path) -> Option<PathBuf> {
     repo_root_from_dir(exe.parent()?)
 }

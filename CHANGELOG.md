@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Kept the executable's nearest checkout hook bundle primary with custom build directories such as `target-host/` and `build/`, including nested worktrees (`D1`, cross-review of `4b97ced0`).
+
 - Restored admission redirect refusals with the target-origin diagnosis while continuing to refuse same-origin redirects (`C5`, cross-review of `404fa8a0`).
 
 - Routed backfill session closes through the claim server profile and refused closes lacking both scope and cwd (`F2`, `N1`, cross-review of `c0daec8d`).

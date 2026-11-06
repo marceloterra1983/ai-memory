@@ -13211,81 +13211,17 @@ model = "gpt-5"
         }
     }
 
-    #[test]
-    fn prefix_share_hooks_precede_system_paths_and_cwd_checkout() {
-        let exe = std::env::current_exe().unwrap();
-        let binary_name = crate::install_layout::shipped_binary_name();
-        // Re-exec the harness from a real prefix so resolve_hooks_dir uses
-        // current_exe, rather than a candidate list supplied by this test.
-        if exe.file_name().unwrap() == binary_name {
-            let prefix = exe.parent().unwrap().parent().unwrap();
-            let source = prefix.join("share/ai-memory/hooks/claude-code");
-            let checkout = std::env::current_dir().unwrap();
-            let data = prefix.parent().unwrap().join("data");
-            assert_eq!(repo_root_guess(), Some(checkout.clone()));
-            let resolved = resolve_hooks_dir(None, AgentChoice::ClaudeCode, &data).unwrap();
-            assert_eq!(resolved, source);
-            assert_eq!(
-                fs::read_to_string(resolved.join("session-start.sh")).unwrap(),
-                "# prefix bundle\n"
-            );
-
-            // The fixed system paths need no host writes: check their order
-            // in the same production builder used by the resolver above.
-            let candidates = hook_source_candidates(
-                "claude-code",
-                repo_root_guess(),
-                exe_dir_guess(),
-                Some(data),
-            );
-            let position = |path: &Path| candidates.iter().position(|p| p == path).unwrap();
-            for rival in [
-                PathBuf::from("/usr/local/share/ai-memory/hooks/claude-code"),
-                PathBuf::from("/usr/share/ai-memory/hooks/claude-code"),
-                checkout.join("hooks/claude-code"),
-            ] {
-                assert!(
-                    position(&source) < position(&rival),
-                    "prefix must precede {}: {candidates:?}",
-                    rival.display()
-                );
-            }
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        let prefix = tmp.path().join("prefix");
-        let checkout = tmp.path().join("checkout");
-        let data = tmp.path().join("data");
-        for (bundle, content) in [
-            (
-                prefix.join("share/ai-memory/hooks/claude-code"),
-                "# prefix bundle\n",
-            ),
-            (checkout.join("hooks/claude-code"), "# checkout bundle\n"),
-            (data.join("hooks/claude-code"), "# staged bundle\n"),
-        ] {
-            fs::create_dir_all(&bundle).unwrap();
-            fs::write(bundle.join("session-start.sh"), content).unwrap();
-        }
-        fs::write(checkout.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
-        let installed = prefix.join("bin").join(binary_name);
+    /// Re-run `test` from a copy of this harness at `installed`, so the
+    /// resolvers derive every path from a real `current_exe` rather than
+    /// from a candidate list supplied by the test.
+    fn rerun_installed_harness(installed: &Path, cwd: &Path, test: &str) {
         fs::create_dir_all(installed.parent().unwrap()).unwrap();
-        fs::copy(exe, &installed).unwrap();
+        fs::copy(std::env::current_exe().unwrap(), installed).unwrap();
+        let filter = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
         let mut command = std::process::Command::new(installed);
         command
-            .args([
-                "--exact",
-                concat!(
-                    module_path!(),
-                    "::prefix_share_hooks_precede_system_paths_and_cwd_checkout"
-                )
-                .split_once("::")
-                .unwrap()
-                .1,
-                "--nocapture",
-            ])
-            .current_dir(checkout);
+            .args(["--exact", &filter, "--nocapture"])
+            .current_dir(cwd);
         // Like the version probe, allow a freshly copied executable to stop
         // being busy under parallel load. Assertion failures are never retried.
         let mut busy_attempts = 0;
@@ -13303,11 +13239,142 @@ model = "gpt-5"
         };
         assert!(
             output.status.success(),
-            "prefix resolver subprocess failed:\n{}\n{}",
+            "{test} subprocess failed:\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    }
+
+    fn write_hook_bundles(bundles: &[(PathBuf, &str)]) {
+        for (bundle, content) in bundles {
+            fs::create_dir_all(bundle).unwrap();
+            fs::write(bundle.join("session-start.sh"), content).unwrap();
+        }
+    }
+
+    #[test]
+    fn binary_outside_checkout_uses_prefix_share_before_system_and_cwd_checkout() {
+        let exe = std::env::current_exe().unwrap();
+        let binary_name = crate::install_layout::shipped_binary_name();
+        if exe.file_name().unwrap() == binary_name {
+            let prefix = exe.parent().unwrap().parent().unwrap();
+            let source = prefix.join("share/ai-memory/hooks/claude-code");
+            let checkout = std::env::current_dir().unwrap();
+            let data = prefix.parent().unwrap().join("data");
+            // The checkout is found from cwd only, so it is not primary.
+            assert_eq!(crate::install_layout::repo_root_from_exe(&exe), None);
+            assert_eq!(repo_root_guess(), Some(checkout.clone()));
+            let resolved = resolve_hooks_dir(None, AgentChoice::ClaudeCode, &data).unwrap();
+            assert_eq!(resolved, source);
+            assert_eq!(
+                fs::read_to_string(resolved.join("session-start.sh")).unwrap(),
+                "# prefix bundle\n"
+            );
+
+            // The fixed system paths need no host writes: check their order
+            // in the same production builder used by the resolver above.
+            let candidates = hook_source_candidates(
+                "claude-code",
+                repo_root_guess(),
+                exe_dir_guess(),
+                Some(data.clone()),
+            );
+            let position = |path: &Path| candidates.iter().position(|p| p == path).unwrap();
+            for rival in [
+                PathBuf::from("/usr/local/share/ai-memory/hooks/claude-code"),
+                PathBuf::from("/usr/share/ai-memory/hooks/claude-code"),
+                data.join("hooks/claude-code"),
+                checkout.join("hooks/claude-code"),
+            ] {
+                assert!(
+                    position(&source) < position(&rival),
+                    "prefix must precede {}: {candidates:?}",
+                    rival.display()
+                );
+            }
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().join("prefix");
+        let checkout = tmp.path().join("checkout");
+        write_hook_bundles(&[
+            (
+                prefix.join("share/ai-memory/hooks/claude-code"),
+                "# prefix bundle\n",
+            ),
+            (checkout.join("hooks/claude-code"), "# checkout bundle\n"),
+            (
+                tmp.path().join("data/hooks/claude-code"),
+                "# staged bundle\n",
+            ),
+        ]);
+        fs::write(checkout.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
+        rerun_installed_harness(
+            &prefix.join("bin").join(binary_name),
+            &checkout,
+            "binary_outside_checkout_uses_prefix_share_before_system_and_cwd_checkout",
+        );
+    }
+
+    #[test]
+    fn binary_inside_checkout_uses_checkout_hooks_before_prefix_share() {
+        let exe = std::env::current_exe().unwrap();
+        let binary_name = crate::install_layout::shipped_binary_name();
+        if exe.file_name().unwrap() == binary_name {
+            let prefix = exe.parent().unwrap().parent().unwrap();
+            let checkout = prefix.parent().unwrap();
+            let share = prefix.join("share/ai-memory/hooks/claude-code");
+            let checkout_hooks = checkout.join("hooks/claude-code");
+            let data = checkout.parent().unwrap().join("data");
+            // cwd is outside the checkout: only the executable discovers it,
+            // which makes it the primary checkout (N1).
+            assert_eq!(
+                crate::install_layout::repo_root_from_exe(&exe).as_deref(),
+                Some(checkout)
+            );
+            let resolved = resolve_hooks_dir(None, AgentChoice::ClaudeCode, &data).unwrap();
+            assert_eq!(resolved, checkout_hooks);
+            assert_eq!(
+                fs::read_to_string(resolved.join("session-start.sh")).unwrap(),
+                "# checkout bundle\n"
+            );
+
+            let candidates = hook_source_candidates(
+                "claude-code",
+                repo_root_guess(),
+                exe_dir_guess(),
+                Some(data.clone()),
+            );
+            let position = |path: &Path| candidates.iter().position(|p| p == path).unwrap();
+            assert!(
+                position(&checkout_hooks) < position(&share),
+                "primary checkout must precede the prefix share: {candidates:?}"
+            );
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("checkout");
+        let prefix = checkout.join("prefix");
+        write_hook_bundles(&[
+            (
+                prefix.join("share/ai-memory/hooks/claude-code"),
+                "# prefix bundle\n",
+            ),
+            (checkout.join("hooks/claude-code"), "# checkout bundle\n"),
+            (
+                tmp.path().join("data/hooks/claude-code"),
+                "# staged bundle\n",
+            ),
+        ]);
+        fs::write(checkout.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
+        rerun_installed_harness(
+            &prefix.join("bin").join(binary_name),
+            tmp.path(),
+            "binary_inside_checkout_uses_checkout_hooks_before_prefix_share",
+        );
     }
 
     #[test]

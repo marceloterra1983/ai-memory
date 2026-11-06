@@ -1678,11 +1678,9 @@ impl LlmProvider for FakeGhostLinkLlm {
     }
 }
 
-/// #1218: a cross-scope link in the merged body must be de-linked before the
-/// survivor is written, exactly as the consolidator and bootstrap writes
-/// already do. Otherwise the dream pass mints a dangling cross-project edge
-/// that `dangling_cross_project_links` reports on every later lint run and
-/// nothing in the pipeline can clear.
+/// A dream draft inventing a cross-scope link is refused before any source
+/// changes. Literal preservation forbids silently de-linking the draft; the
+/// original pages must survive intact for another attempt.
 #[tokio::test]
 async fn dream_merge_refuses_an_invented_cross_scope_link() {
     let fx = seed_fixture(true).await;

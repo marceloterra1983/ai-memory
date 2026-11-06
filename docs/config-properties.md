@@ -321,7 +321,7 @@ Defined by `SanitizeConfig` in `ai-memory-core`. Built-in redaction patterns alw
 | `drop_tool_use_id_prefixes` | `[]` | `AI_MEMORY_INGEST__DROP_TOOL_USE_ID_PREFIXES` | Drop a tool event whose `tool_use_id` starts with one of these. |
 | `drop_tool_names` | `[]` | `AI_MEMORY_INGEST__DROP_TOOL_NAMES` | Drop a tool event whose tool name equals one of these exactly. |
 | `drop_events` | `[]` | `AI_MEMORY_INGEST__DROP_EVENTS` | Drop whole hook event kinds. `session-start` and `session-end` are rejected at load. |
-| `record_tool_names` | `false` | `AI_MEMORY_INGEST__RECORD_TOOL_NAMES` | Name each tool call in its observation (`tool non-file: Bash`, plus a Claude Code skill or subagent type) instead of only its family. Never a tool's arguments. |
+| `record_tool_names` | `false` | `AI_MEMORY_INGEST__RECORD_TOOL_NAMES` | Include the tool name in the observation title (`tool non-file: Bash`, plus a Claude Code skill or subagent type) instead of only its family. Independently of this flag, bodies record a validated `tool_label` by default, including metadata-only capture: 1–80 ASCII letters, digits, `_`, `-`, `.`, `:`; invalid names are omitted whole. Never a tool's arguments. |
 | `index_file_paths` | `false` | `AI_MEMORY_INGEST__INDEX_FILE_PATHS` | Store the checkout-relative path of the one file a kept file-tool call named (native hook client and generated TypeScript integrations), and count in `file_path_*` why the others got none ([design](design-file-path-index.md)). |
 
 ## `[hook_spool]`

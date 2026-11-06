@@ -3595,7 +3595,10 @@ mod tests {
                 None,
             );
         }
-        assert!(!hook_spool::spool_dir(tmp.path()).exists(), "rejected close must not create a spool");
+        assert!(
+            !hook_spool::spool_dir(tmp.path()).exists(),
+            "rejected close must not create a spool"
+        );
         let candidate = BackfillCandidate {
             session_id: "old-session".into(),
             agent_kind: AgentKind::Cursor,

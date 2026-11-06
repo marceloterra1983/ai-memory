@@ -257,7 +257,7 @@ fn build_plugin(
 
 import {{ definePluginEntry }} from "openclaw/plugin-sdk/plugin-entry";
 import {{ execFileSync }} from "node:child_process";
-import {{ closeSync, existsSync, mkdirSync, opendirSync, openSync, readFileSync as readMarkerText, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync }} from "node:fs";
+import {{ closeSync, existsSync, mkdirSync, opendirSync, openSync, readFileSync as readMarkerText, readSync, readdirSync, renameSync, statSync, writeFileSync }} from "node:fs";
 import {{ basename, dirname, join, resolve, sep }} from "node:path";
 import {{ homedir }} from "node:os";
 
@@ -531,23 +531,19 @@ mod tests {
     #[test]
     fn openclaw_plugin_spools_failed_deliveries() {
         // #580: OpenClaw's fire-and-forget postHook must persist failures
-        // in the CLI hook-spool format and drain the backlog on success.
+        // in the CLI hook-spool format; the receipt worker owns the backlog.
         let plugin = build_plugin("http://127.0.0.1:49374", Some("tok"), None, "denylist");
         assert!(plugin.contains("function spoolFailedHook("));
-        assert!(plugin.contains("async function drainHookSpool()"));
+        assert!(plugin.contains("function requestSpoolDrain(): void"));
+        assert!(!plugin.contains("async function drainHookSpool()"));
+        assert!(!plugin.contains("unlinkSync"));
         assert!(plugin.contains(
             "if (!resp || hookStatusRetryable(resp.status)) spoolFailedHook(url, policy.payload);"
         ));
         assert!(plugin.contains("else requestSpoolDrain();"));
         crate::commands::render_shared::assert_shared_ts_delivery_runtime("openclaw", &plugin);
         assert!(plugin.contains(r#"return join(env, "hook-spool");"#));
-        for f in [
-            "mkdirSync",
-            "writeFileSync",
-            "renameSync",
-            "readdirSync",
-            "unlinkSync",
-        ] {
+        for f in ["mkdirSync", "writeFileSync", "renameSync", "readdirSync"] {
             assert!(
                 plugin.contains(&format!("{f},")) || plugin.contains(&format!("{f} }}")),
                 "node:fs import missing {f}"

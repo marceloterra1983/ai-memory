@@ -5258,7 +5258,7 @@ fn add_hook_spooling(source: String) -> Result<String> {
     }
     out = out.replacen(
         import_anchor,
-        "import { closeSync, existsSync, mkdirSync, opendirSync, openSync, readFileSync as readMarkerText, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from \"node:fs\";",
+        "import { closeSync, existsSync, mkdirSync, opendirSync, openSync, readFileSync as readMarkerText, readSync, readdirSync, renameSync, statSync, writeFileSync } from \"node:fs\";",
         1,
     );
     Ok(out)
@@ -13356,7 +13356,15 @@ model = "gpt-5"
             );
             // The spool runtime is present and CLI-compatible.
             assert!(source.contains("function spoolFailedHook("), "{name}");
-            assert!(source.contains("async function drainHookSpool()"), "{name}");
+            assert!(
+                source.contains("function requestSpoolDrain(): void"),
+                "{name}"
+            );
+            assert!(
+                !source.contains("async function drainHookSpool()"),
+                "{name}"
+            );
+            assert!(!source.contains("unlinkSync"), "{name}");
             assert!(
                 source.contains(r#"return join(env, "hook-spool");"#),
                 "{name}: spool dir must honour AI_MEMORY_DATA_DIR"
@@ -13376,13 +13384,7 @@ model = "gpt-5"
                 "{name}: an aborted drain must not keep pacing"
             );
             // The runtime's fs needs made it into the import line.
-            for f in [
-                "mkdirSync",
-                "writeFileSync",
-                "renameSync",
-                "readdirSync",
-                "unlinkSync",
-            ] {
+            for f in ["mkdirSync", "writeFileSync", "renameSync", "readdirSync"] {
                 assert!(
                     source.contains(&format!("{f},")) || source.contains(&format!("{f} }}")),
                     "{name}: node:fs import missing {f}"

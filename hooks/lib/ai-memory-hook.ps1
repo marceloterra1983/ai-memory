@@ -753,9 +753,8 @@ function Write-AiMemorySpoolEvent {
         }
         $entry["attempts"] = 0
         # PS 5.1 escapes a few ASCII characters (`<`, `&`, …) as \uXXXX. The
-        # emitted JSON stays a valid SpoolEntry; the shell drain leaves such
-        # entries to `ai-memory hook-drain` by design, and the native
-        # drainer and ConvertFrom-Json decode them.
+        # emitted JSON stays a valid SpoolEntry; the receipt worker and native
+        # hook-drain decode them without changing the envelope.
         $json = ConvertTo-Json -InputObject $entry -Compress
         $tmp = Join-Path $dir "$name.tmp"
         $final = Join-Path $dir $name
@@ -771,124 +770,16 @@ function Write-AiMemorySpoolEvent {
     }
 }
 
-# Deliver the queued backlog, oldest first (name order is enqueue order).
-# Mirrors `ai_memory_drain_spool`: bounded by count so a pass never becomes
-# an unbounded upload, a 2xx or a 4xx retires the entry (delivered, or a
-# permanent rejection that must not be retried), and anything else stops
-# the pass and keeps the remainder for the next one. The per-entry timeout
-# is this bundle's own POST budget. ConvertFrom-Json reads every escape
-# either serializer emits, so entries written by the shell bundle or the
-# native binary drain here too, except OIDC entries that need native auth.json
-# credential resolution.
+# Persisted envelopes belong to the receipt worker. Keep old script entry
+# points compatible, without POST, deletion or a detached receipt-free drain.
+# Without the worker, the native hook-drain handles its lock/receipt contract.
 function Invoke-AiMemoryDrainSpool {
     param([int] $Max = 64)
-    try {
-        $dir = Get-AiMemorySpoolDir
-        if (-not (Test-Path $dir -PathType Container)) { return }
-        # -Filter alone can match 8.3 short names on Windows; the extension
-        # re-check keeps a writer's in-flight `*.json.tmp` out of the pass.
-        $files = @(
-            Get-ChildItem -LiteralPath $dir -Filter "*.json" -File -ErrorAction Stop |
-                Where-Object { $_.Extension -eq ".json" } |
-                Sort-Object Name
-        )
-    } catch {
-        return
-    }
-    $count = 0
-    foreach ($file in $files) {
-        if ($count -ge $Max) { break }
-        $count = $count + 1
-        try {
-            $entry = [IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json -ErrorAction Stop
-        } catch {
-            continue
-        }
-        # OIDC entries have no inline bearer. The native drain resolves/refreshes
-        # auth.json; an anonymous POST here can retire the event without it.
-        if ($entry.auth_mode -eq "oidc") { continue }
-        if (-not $entry.url) { continue }
-        $headers = @{}
-        $headers["X-AI-Memory-Client"] = "hook-ps"
-        if ($entry.auth_mode -eq "static" -and $entry.token) {
-            $headers["Authorization"] = "Bearer $($entry.token)"
-        }
-        $code = 0
-        $NoProxy = Get-AiMemoryNoProxy
-        try {
-            $Response = Invoke-WebRequest @NoProxy `
-                -UseBasicParsing `
-                -TimeoutSec 3 `
-                -Method Post `
-                -Uri ([string]$entry.url) `
-                -Headers $headers `
-                -ContentType "application/json" `
-                -Body ([Text.Encoding]::UTF8.GetBytes([string]$entry.body))
-            $code = Get-AiMemoryResponseStatus $Response
-        } catch {
-            $response = $_.Exception.Response
-            if ($response) {
-                try { $code = [int]$response.StatusCode } catch { $code = 0 }
-            }
-        }
-        if ($code -eq 408 -or $code -eq 425 -or $code -eq 429) {
-            break
-        } elseif (($code -ge 200 -and $code -lt 300) -or ($code -ge 400 -and $code -lt 500)) {
-            Remove-Item -Force -LiteralPath $file.FullName -ErrorAction SilentlyContinue
-        } else {
-            break
-        }
-    }
+    return
 }
 
-# Piggyback drain: a delivery that just succeeded proves the server is
-# reachable, so flush the backlog behind it — detached, so the agent never
-# waits, and a no-op when nothing is queued (every call on a healthy
-# install).
-#
-# Detach idiom: this bundle had no background-job or Start-Process pattern
-# to copy (each hook script is already its own short-lived process), so the
-# kick re-runs the running engine on this same lib file in drain mode
-# through System.Diagnostics.Process:
-# - CreateNoWindow with UseShellExecute=$false never flashes a console
-#   window on Windows and behaves identically under pwsh on Linux/macOS;
-# - RedirectStandardOutput/Error keep the child off THIS hook's stdout
-#   pipe — the agent reads that pipe to EOF, and a detached child holding
-#   the inherited handle would stall the hook's own completion (the shell
-#   bundle's `( ... >/dev/null 2>&1 &)` is that same protection). Drain
-#   mode writes nothing, so the unread redirected pipes never fill.
 function Invoke-AiMemoryKickDrain {
-    try {
-        $dir = Get-AiMemorySpoolDir
-        if (-not (Test-Path $dir -PathType Container)) { return }
-        $queued = @(
-            Get-ChildItem -LiteralPath $dir -Filter "*.json" -File -ErrorAction Stop |
-                Where-Object { $_.Extension -eq ".json" } |
-                Select-Object -First 1
-        )
-        if (-not $queued.Count) { return }
-        if (-not $script:AiMemoryLibFile) { return }
-        # Re-invoke the engine already running this hook; fall back to any
-        # PowerShell on PATH if the current process's binary cannot be
-        # resolved.
-        $engine = $null
-        try { $engine = (Get-Process -Id $PID -ErrorAction Stop).Path } catch { }
-        if (-not $engine) {
-            $cmd = Get-Command pwsh -ErrorAction SilentlyContinue
-            if (-not $cmd) { $cmd = Get-Command powershell -ErrorAction SilentlyContinue }
-            if ($cmd) { $engine = $cmd.Source }
-        }
-        if (-not $engine) { return }
-        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = $engine
-        $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" --ai-memory-drain-spool 64' -f $script:AiMemoryLibFile
-        $startInfo.UseShellExecute = $false
-        $startInfo.CreateNoWindow = $true
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError = $true
-        $null = [System.Diagnostics.Process]::Start($startInfo)
-    } catch {
-    }
+    return
 }
 
 function Get-AiMemorySessionIdPath {

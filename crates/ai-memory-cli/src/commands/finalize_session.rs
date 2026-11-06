@@ -361,6 +361,58 @@ mod tests {
     use ai_memory_store::Store;
     use tempfile::TempDir;
 
+    #[tokio::test]
+    async fn terminal_error_body_is_single_line_and_control_free() {
+        for body in [
+            "plain error",
+            "plain error\n\r\t\u{1b}[31mred\u{7}\u{7f}\u{85}",
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = ServerEndpoint::from_pair(
+                Some(format!("http://{}", listener.local_addr().unwrap())),
+                None,
+            );
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    axum::Router::new().route(
+                        "/hook/batch",
+                        axum::routing::post(move || async move {
+                            (axum::http::StatusCode::BAD_GATEWAY, body)
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            });
+            let error = post_session_end_batch(
+                &http_client(),
+                &endpoint,
+                &OpenSessionEntry {
+                    session_id: "synthetic".into(),
+                    cwd: None,
+                },
+                "/synthetic",
+                "w",
+                "p",
+                AgentKind::Codex,
+                false,
+            )
+            .await
+            .unwrap_err();
+            server.abort();
+            let message = error.to_string();
+            assert!(
+                message.contains("plain error"),
+                "ordinary error content lost: {message:?}"
+            );
+            assert!(
+                !message.chars().any(char::is_control),
+                "terminal received controls: {message:?}"
+            );
+        }
+    }
+
     #[test]
     fn only_own_antigravity_sessions_replay_prompts() {
         assert!(replays_prompts(AgentKind::AntigravityCli, false));

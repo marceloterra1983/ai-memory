@@ -6801,6 +6801,42 @@ mod tests {
     }
 
     #[test]
+    fn terminal_workstream_name_cannot_inject_menu_lines_or_controls() {
+        let mut normal_lines = None;
+        for name in [
+            "research",
+            "research\u{1b}[31m\nINJECTED\r\t\u{7}\u{7f}\u{85}",
+        ] {
+            let mut output = Vec::new();
+            choose_after_run(
+                &ai_memory_core::i18n::Localizer::default(),
+                Paint::PLAIN,
+                ManagedHarness::Claude,
+                name,
+                &[RunHarnessChoice::Codex],
+                &mut Cursor::new(b"\n"),
+                &mut output,
+            )
+            .unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.contains("research"));
+            assert!(
+                !text.chars().any(|c| c.is_control() && c != '\n'),
+                "workstream controls reached terminal: {text:?}"
+            );
+            if let Some(lines) = normal_lines {
+                assert_eq!(
+                    text.lines().count(),
+                    lines,
+                    "workstream injected extra menu lines"
+                );
+            } else {
+                normal_lines = Some(text.lines().count());
+            }
+        }
+    }
+
+    #[test]
     fn post_run_choice_defaults_to_quit_and_lists_same_workstream_actions() {
         let mut input = Cursor::new(b"\n");
         let mut output = Vec::new();

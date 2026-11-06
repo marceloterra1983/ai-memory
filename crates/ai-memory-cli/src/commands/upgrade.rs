@@ -87,15 +87,30 @@ pub async fn run(config: &Config, config_path: Option<&Path>, args: UpgradeArgs)
     run_replacement_refresh(&exe, &config.data_dir, config_path)?;
     refresh_plugins(config, &super::user_service::SystemRunner);
     warn_remote_server(config);
-    println!(
-        "{}",
-        i18n.format(
-            "cli-upgrade-upgraded-to-tag",
-            &[("value0", super::show::terminal_text(&tag))]
-        )
-    );
+    println!("{}", upgraded_tag_message(i18n, &tag));
     info!(%tag, path = %exe.display(), "native upgrade complete");
     Ok(())
+}
+
+fn upgraded_tag_message(i18n: &ai_memory_core::i18n::Localizer, tag: &str) -> String {
+    i18n.format(
+        "cli-upgrade-upgraded-to-tag",
+        &[("value0", super::show::terminal_text(tag))],
+    )
+}
+
+fn downloading_tag_message(
+    i18n: &ai_memory_core::i18n::Localizer,
+    asset: &str,
+    tag: &str,
+) -> String {
+    i18n.format(
+        "cli-upgrade-downloading-asset-tag",
+        &[
+            ("value0", asset.to_owned()),
+            ("value1", super::show::terminal_text(tag)),
+        ],
+    )
 }
 
 /// Refresh staged and generated integrations from the replacement process.
@@ -185,16 +200,7 @@ async fn fetch_verified_archive(
 ) -> Result<Vec<u8>> {
     let archive_url = format!("{base}/download/{tag}/{asset}");
     let checksum_url = format!("{archive_url}.sha256");
-    println!(
-        "{}",
-        i18n.format(
-            "cli-upgrade-downloading-asset-tag",
-            &[
-                ("value0", asset.to_string()),
-                ("value1", super::show::terminal_text(tag))
-            ]
-        )
-    );
+    println!("{}", downloading_tag_message(i18n, asset, tag));
     let archive_bytes = fetcher
         .get_bytes(&archive_url)
         .await
@@ -1306,6 +1312,24 @@ fn content_length_exceeds_limit(content_length: u64, max_bytes: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_upgrade_tag_messages_are_control_free() {
+        let i18n = ai_memory_core::i18n::Localizer::default();
+        for tag in ["v3.4.2", "v3.4.2\u{1b}[31m\n\r\t\u{7}\u{7f}\u{85}"] {
+            for message in [
+                upgraded_tag_message(&i18n, tag),
+                downloading_tag_message(&i18n, "archive.tar.gz", tag),
+            ] {
+                assert!(message.contains("v3.4.2"));
+                assert!(
+                    !message.chars().any(char::is_control),
+                    "tag controls reached terminal: {message:?}"
+                );
+            }
+        }
+    }
+
     use std::io::Write as _;
     use tar::Header;
     use zip::ZipWriter;

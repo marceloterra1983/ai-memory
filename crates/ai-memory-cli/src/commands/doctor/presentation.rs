@@ -141,8 +141,7 @@ pub(super) fn render(report: &DoctorReport, terminal: &crate::terminal::Terminal
                 terminal.line(format_args!(
                     "{}", i18n.text("cli-presentation-no-captured-session-check-the-external-producer-and-repository-policy")));
             } else {
-                terminal.line(format_args!(
-                    "{}", i18n.format("cli-presentation-ran-here-but-nothing-was-captured-install-its-hook-ai-memory-install-hooks-a", &[("value0", terminal_text(&row.agent))])));
+                terminal.line(format_args!("{}", install_hook_hint(i18n, &row.agent)));
             }
         }
         if let Some(count) = row.mixed_capture_sessions.filter(|count| *count > 0) {
@@ -194,5 +193,32 @@ pub(super) fn render(report: &DoctorReport, terminal: &crate::terminal::Terminal
                 ]
             )
         ));
+    }
+}
+
+fn install_hook_hint(i18n: &ai_memory_core::i18n::Localizer, agent: &str) -> String {
+    i18n.format("cli-presentation-ran-here-but-nothing-was-captured-install-its-hook-ai-memory-install-hooks-a", &[("value0", terminal_text(agent))])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_doctor_agent_hint_is_control_free() {
+        let normal = install_hook_hint(&ai_memory_core::i18n::Localizer::default(), "codex");
+        for agent in ["codex", "codex\u{1b}[31m\n\r\t\u{7}\u{7f}\u{85}"] {
+            let hint = install_hook_hint(&ai_memory_core::i18n::Localizer::default(), agent);
+            assert!(hint.contains("codex"));
+            assert!(
+                !hint.chars().any(|c| c.is_control() && c != '\n'),
+                "agent controls reached terminal: {hint:?}"
+            );
+            assert_eq!(
+                hint.lines().count(),
+                normal.lines().count(),
+                "agent injected another hint line"
+            );
+        }
     }
 }

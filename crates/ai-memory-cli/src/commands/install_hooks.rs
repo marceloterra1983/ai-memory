@@ -6905,12 +6905,20 @@ fn resolve_hooks_dir(
     }
 
     // Probe candidates in order. The first dir that exists wins.
-    let candidates = hook_source_candidates(
+    let mut candidates = hook_source_candidates(
         sub,
         repo_root_guess(),
         exe_dir_guess(),
         Some(data_dir.to_path_buf()),
     );
+    if let Some(root) = crate::install_layout::cargo_manifest_dir()
+        .and_then(crate::install_layout::repo_root_from_dir)
+    {
+        let candidate = root.join(crate::install_layout::HOOKS_DIR_NAME).join(sub);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
     for path in &candidates {
         if !path.as_os_str().is_empty() && path.is_dir() {
             return Ok(path.clone());
@@ -6929,8 +6937,13 @@ fn hook_source_candidates(
     data_dir: Option<PathBuf>,
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::with_capacity(6);
-    // Cargo-run from the repo.
-    if let Some(root) = repo_root {
+    // Only a binary built inside this checkout makes its source bundle primary.
+    let dev_checkout = repo_root.as_ref().is_some_and(|root| {
+        exe_dir
+            .as_ref()
+            .is_some_and(|dir| dir.starts_with(root.join("target")))
+    });
+    if dev_checkout && let Some(root) = &repo_root {
         candidates.push(root.join(crate::install_layout::HOOKS_DIR_NAME).join(sub));
     }
     // Release tarball (macOS/Windows/Linux archive): the `hooks/` bundle
@@ -6964,6 +6977,9 @@ fn hook_source_candidates(
     // docker `setup-agent`, staged under the data dir actually in use.
     if let Some(dir) = data_dir {
         candidates.push(dir.join("hooks").join(sub));
+    }
+    if !dev_checkout && let Some(root) = repo_root {
+        candidates.push(root.join(crate::install_layout::HOOKS_DIR_NAME).join(sub));
     }
     candidates
 }
@@ -13050,6 +13066,53 @@ model = "gpt-5"
     }
 
     #[test]
+    fn installed_hooks_bundle_precedes_a_cwd_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("old-checkout");
+        fs::create_dir_all(repo.join("hooks/claude-code")).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
+        let data = tmp.path().join("data");
+        let bundle = data.join("hooks/claude-code");
+        fs::create_dir_all(&bundle).unwrap();
+        let exe = tmp.path().join("installed/bin/ai-memory");
+        let root = crate::install_layout::repo_root_guess(Some(&exe), Some(&repo));
+        let candidates = hook_source_candidates(
+            "claude-code",
+            root,
+            exe.parent().map(Path::to_path_buf),
+            Some(data),
+        );
+        // Host /usr paths are irrelevant to this synthetic installation.
+        let chosen = candidates
+            .iter()
+            .find(|p| p.starts_with(tmp.path()) && p.is_dir())
+            .unwrap();
+        assert_eq!(
+            chosen, &bundle,
+            "installed bundle must precede an unrelated cwd"
+        );
+        let dev_exe = repo.join("target/debug/ai-memory");
+        let candidates = hook_source_candidates(
+            "claude-code",
+            Some(repo.clone()),
+            dev_exe.parent().map(Path::to_path_buf),
+            None,
+        );
+        assert_eq!(candidates[0], repo.join("hooks/claude-code"));
+        let explicit = tmp.path().join("explicit");
+        fs::create_dir_all(explicit.join("claude-code")).unwrap();
+        assert_eq!(
+            resolve_hooks_dir(
+                Some(&explicit),
+                AgentChoice::ClaudeCode,
+                &tmp.path().join("data")
+            )
+            .unwrap(),
+            explicit.join("claude-code")
+        );
+    }
+
+    #[test]
     fn hook_source_candidates_include_native_package_dir() {
         let candidates = hook_source_candidates(
             "claude-code",
@@ -13059,23 +13122,23 @@ model = "gpt-5"
             Some(PathBuf::from("/home/alice/.local/share/ai-memory")),
         );
 
-        assert_eq!(candidates[0], PathBuf::from("/repo/hooks/claude-code"));
         assert_eq!(
-            candidates[1],
+            candidates[0],
             PathBuf::from("/opt/ai-memory/hooks/claude-code")
         );
         assert_eq!(
-            candidates[2],
+            candidates[1],
             PathBuf::from("/usr/local/share/ai-memory/hooks/claude-code")
         );
         assert_eq!(
-            candidates[3],
+            candidates[2],
             PathBuf::from("/usr/share/ai-memory/hooks/claude-code")
         );
         assert_eq!(
-            candidates[4],
+            candidates[3],
             PathBuf::from("/home/alice/.local/share/ai-memory/hooks/claude-code")
         );
+        assert_eq!(candidates[4], PathBuf::from("/repo/hooks/claude-code"));
     }
 
     /// Nix ships hook sources 0444 and `fs::copy` keeps that mode, so a
@@ -13159,6 +13222,7 @@ model = "gpt-5"
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         fs::create_dir_all(repo.join("hooks/claude-code")).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
         let exe = repo.join("target").join("release").join("ai-memory");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();

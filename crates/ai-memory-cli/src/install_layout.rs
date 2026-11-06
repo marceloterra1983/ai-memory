@@ -16,13 +16,17 @@ pub const BINARY_NAME: &str = "ai-memory";
 /// Sibling hooks bundle dir in release archives and install prefixes.
 pub const HOOKS_DIR_NAME: &str = "hooks";
 
-/// Walk up from `start` (inclusive) until an ancestor contains a `hooks/`
-/// directory. Used for cwd / `CARGO_MANIFEST_DIR` probes when the binary
-/// itself is not under the checkout.
+/// Walk up to a checkout with a Cargo workspace and the Claude hook bundle.
+/// A release bundle or an arbitrary cwd containing `hooks/` is not a checkout.
 pub fn repo_root_from_dir(start: &Path) -> Option<PathBuf> {
     let mut dir = start;
     loop {
-        if dir.join(HOOKS_DIR_NAME).is_dir() {
+        if dir.join("hooks/claude-code").is_dir()
+            && std::fs::read_to_string(dir.join("Cargo.toml"))
+                .ok()
+                .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
+                .is_some_and(|doc| doc.get("workspace").is_some_and(|item| item.is_table()))
+        {
             return Some(dir.to_path_buf());
         }
         match dir.parent() {
@@ -55,7 +59,7 @@ pub fn cargo_manifest_dir() -> Option<&'static Path> {
 /// tree (`CARGO_TARGET_DIR`, cross-compile `target/<triple>/…`).
 ///
 /// Order: walk from the executable, then from `cwd`, then from the compile-time
-/// `CARGO_MANIFEST_DIR`. The first ancestor that contains `hooks/` wins.
+/// `CARGO_MANIFEST_DIR`. Callers rank cwd/manifest fallbacks after installed bundles.
 pub fn repo_root_guess(exe: Option<&Path>, cwd: Option<&Path>) -> Option<PathBuf> {
     if let Some(exe) = exe
         && let Some(root) = repo_root_from_exe(exe)
@@ -250,6 +254,7 @@ mod hook_layout_tests {
         let hooks = repo.join(HOOKS_DIR_NAME);
         let exe = repo.join("target").join("debug").join("ai-memory");
         fs::create_dir_all(hooks.join("claude-code")).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();
 
@@ -267,6 +272,7 @@ mod hook_layout_tests {
             .join("release")
             .join("ai-memory");
         fs::create_dir_all(hooks.join("claude-code")).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();
 
@@ -290,15 +296,16 @@ mod hook_layout_tests {
     }
 
     #[test]
-    fn repo_root_from_exe_finds_hooks_beside_binary() {
+    fn release_bundle_is_not_mistaken_for_a_checkout() {
         let tmp = tempfile::tempdir().unwrap();
         let release = tmp.path().join("ai-memory-linux-x86_64");
         let hooks = release.join(HOOKS_DIR_NAME);
         let exe = release.join("ai-memory");
         fs::create_dir_all(hooks.join("claude-code")).unwrap();
+
         fs::write(&exe, b"").unwrap();
 
-        assert_eq!(repo_root_from_exe(&exe), Some(release));
+        assert_eq!(repo_root_from_exe(&exe), None);
     }
 
     #[test]
@@ -313,6 +320,7 @@ mod hook_layout_tests {
             .join("debug")
             .join("ai-memory");
         fs::create_dir_all(hooks.join("claude-code")).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
         fs::create_dir_all(&nested).unwrap();
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"").unwrap();

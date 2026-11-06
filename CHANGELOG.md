@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Preferred installed hook bundles over cwd or build-manifest checkouts, retaining explicit overrides and development binaries under target (`B1`, cross-review of `2d26dae5`).
+
 - Preserved newer queued consolidation generations when an in-flight attempt reconciled its session anchor (`F1`, cross-review of `3a4a8d79`).
 
 - Kept exact-relation prompt guidance within the existing minimum consolidation input budget without reducing observation evidence.

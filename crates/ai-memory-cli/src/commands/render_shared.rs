@@ -3229,8 +3229,16 @@ pub(crate) fn assert_shared_ts_delivery_runtime(name: &str, source: &str) {
         "{name}: a transient 4xx must stay retryable like a 5xx"
     );
     assert!(
-        source.contains("resp.status < 500 && !hookStatusRetryable(resp.status)"),
-        "{name}: the drain must keep an entry the server only asked to retry"
+        source.contains("function requestSpoolDrain(): void {\n  return;\n}"),
+        "{name}: receipt-free spool drain must stay inert"
+    );
+    assert!(
+        !source.contains("drainHookSpool"),
+        "{name}: persisted envelopes belong to the receipt worker"
+    );
+    assert!(
+        !source.contains("unlinkSync"),
+        "{name}: generated client must not delete persisted envelopes"
     );
     assert_every_ts_request_carries_client_marker(name, source);
 }
@@ -3238,8 +3246,7 @@ pub(crate) fn assert_shared_ts_delivery_runtime(name: &str, source: &str) {
 /// An unauthenticated server reached through a non-loopback host name refuses
 /// a handoff fetch without the client marker, so every `fetch` a generated
 /// integration makes must send it: through `authHeaders()` (hook POSTs, the
-/// handoff GET), `mcpHeaders()` (which spreads `authHeaders()`), or the spool
-/// drain's own header table.
+/// handoff GET), or `mcpHeaders()` (which spreads `authHeaders()`).
 #[cfg(test)]
 fn assert_every_ts_request_carries_client_marker(name: &str, source: &str) {
     assert_eq!(
@@ -3247,12 +3254,7 @@ fn assert_every_ts_request_carries_client_marker(name: &str, source: &str) {
         1,
         "{name}: exactly one shared authHeaders()"
     );
-    assert!(
-        source.contains(
-            "\"Content-Type\": \"application/json\",\n        \"X-AI-Memory-Client\": AGENT,"
-        ),
-        "{name}: the spool drain must send the client marker"
-    );
+
     if source.contains("function mcpHeaders(") {
         assert!(
             source.contains("    ...authHeaders(),\n"),
@@ -3272,9 +3274,7 @@ fn assert_every_ts_request_carries_client_marker(name: &str, source: &str) {
         requests += 1;
         let call: String = source[at..].chars().take(240).collect();
         assert!(
-            call.contains("authHeaders()")
-                || call.contains("mcpHeaders(")
-                || call.contains("        headers,\n"),
+            call.contains("authHeaders()") || call.contains("mcpHeaders("),
             "{name}: a fetch without the client marker:\n{call}"
         );
         // Bun's fetch sends even a loopback request through an environment
@@ -3305,8 +3305,8 @@ fn assert_every_ts_request_carries_client_marker(name: &str, source: &str) {
         }
     }
     assert!(
-        requests >= 3,
-        "{name}: expected the hook, handoff and drain requests"
+        requests >= 2,
+        "{name}: expected the hook and context requests"
     );
 }
 

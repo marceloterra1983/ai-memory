@@ -824,16 +824,16 @@ objetos do fork; a base desta fase é `c0daec8d`. Não há alteração de schema
 
 | Item / origem | Decisão e contrato reconciliado | Prova desta corrida |
 |---|---|---|
-| F1 / `3a4a8d79` | Reconcile no consolidator conserva summary e falhas antigas, mas limita o UPDATE à menor geração `running`; gerações posteriores continuam pendentes. Sem lease ativo, o reconcile manual mantém o contrato anterior. Invariante #16: nenhum lease é consumido ou invalidado e todas as escritas continuam no ator único. | `automatic_reconcile_preserves_newer_pending_generation`: A running, B pending, consolida A, completa A, claim B e segunda inferência. Sem o limite SQL: falha runtime; com ele: passa. Controles existentes preservam failed antiga e lease ativo. |
-| B1 / `2d26dae5` | Checkout exige Cargo.toml com `[workspace]` e `hooks/claude-code/`. Só o exe sob `checkout/target/` torna esse checkout primário; cwd e manifest vêm após sibling, prefixo, sistema e data dir. `--hooks-dir` continua absoluto na precedência. Caminho compilado removido é ignorado. | `installed_hooks_bundle_precedes_a_cwd_checkout` falha no runtime antigo e passa com a nova ordem; controla exe sob target e override explícito. Fixtures de triple, symlink e bundle sibling preservadas com marcadores reais. |
-| C1 / `143ad28a` | Locks OS usam hash da tupla módulo 1024, com prefixo `pool-v1-`; colisões só serializam páginas distintas. Aquisição continua ordenada e deduplicada. Arquivos SHA antigos ficam inertes, sem remoção. Instâncias novas devem usar o mesmo binário; um escritor antigo simultâneo usaria outro conjunto de locks. | 1100 leituras de caminhos inexistentes: antes criam 1100 locks, depois no máximo 1024; o arquivo legado semeado conserva os bytes. Controles de escritores independentes, CAS e cancelamento continuam usando o pool. |
-| C2 / `d009b152`, `c3b5a60e` | Os dois controles Node ignorados agora estão no `--ignored --exact` do CI. O runtime TS perde todo o drain morto, inclusive unlink de envelopes; integração externa semeia envelope e exige bytes intactos. | Negativo executado antes da remoção do código morto: retirar só o return apaga o envelope e falha com ENOENT. O teste Node final verifica envelope intacto, zero POST de backlog e controle de escrita; teste estático proíbe o unlink. A suíte CLI de integração não foi executada nesta corrida, conforme fronteira do dono. |
-| C3 / `d009b152` | O worker inalterado aceita o contrato real dos produtores shell e PowerShell com escopo/key e auth none/static. Aplicado o caminho TS: drains explícitos e piggyback dessas libs são no-ops; só worker (ou drain nativo com lock/recibo, quando worker não está ativo) retira backlog. Perfis/OIDC/escopo implícito continuam fora do suporte desse worker e ficam para o nativo; não ampliamos o contrato. | `test_spool_worker.py` executa os dois produtores, prova entrega, preservação sem completed_at e arquivo+recibo antes da remoção. pwsh disponível e exercitado. `test_lib.sh` tem negativo: 2xx apagava envelope; passa com no-ops. Controles antigos de entrega do drain script foram invertidos explicitamente para retenção de todos os modos; marcadores/proxies continuam testados nas requisições restantes. |
-| F2 / tag e `c0daec8d` | Fechamento de backfill usa o mesmo `base` efetivo e `.routed_to(profile_name)` dos eventos normais; o token do perfil não viaja ao servidor default. | `backfill_close_uses_the_claim_profile_and_a_fresh_key` exercita session-start/handoff com dois servidores sintéticos: antes o envelope nomeia o default; depois nomeia URL e perfil team-b. Nenhum pedido chega ao default. |
-| N1 da revisão b | Guarda local recusa fechamento sem scope_qs e sem cwd não branco, mesmo se chamado fora do fluxo atual. A chave do fechamento é nova por evento. | `backfill_close_without_scope_or_cwd_is_not_emitted` cobre None/vazio/branco e controle com cwd. O teste de perfil compara a chave do fechamento com a chave do session-start realmente enviado, ambas com 32 caracteres e distintas. |
-| C5 / `404fa8a0` | Política custom continua recusando todo redirect. Mudança de origem retorna o diagnóstico da tag com a origem alvo, sem replay; mesma origem continua 3xx recusado. Dream mantém mensagem privada e cliente sem proxy/redirect. | Quatro asserts da tag restaurados (run e notify, texto e origem alvo); `Policy::none()` falha no primeiro. A política corrigida passa junto com os controles de não envio, Ignore e recusa na mesma origem. Comentário do notify atualizado. |
-| C4 / `8f272d97`, `b1389f55`, `56758c2c` | Saneamento já portado ganhou testes nos quatro sinks: erro HTTP do finalize, ambas as mensagens de tag do upgrade, sugestão de agente do doctor e menu com nome de workstream. Helpers privados de mensagens permitem testar a redação usada pelo println. | `terminal_error_body_is_single_line_and_control_free` falha com terminal_body (newline/tab chegam ao erro) e passa com terminal_text. Os outros três controles incluem ESC, DEL, C1, CR, tab e quebra de linha com controle de texto comum; doctor/menu mantêm apenas as quebras da própria apresentação. |
-| Ranking / `1f0ff776`, `ad3d8c73`, `d2a57a10` | Nenhuma mudança adicional no ranking. Executada a mutação que faltava: trocar a transação comum por leituras autocommit em `merge_field_windows`. Fonte restaurado byte a byte depois do ensaio. | `cargo test --locked -p ai-memory-store field_windows_share_snapshot_during_concurrent_writer`: sem snapshot, 0 passed/1 failed (duas versões, esperado uma); restaurado, 1 passed/0 failed. Logs `RANK-without.log` e `RANK-with.log` em `target/evidence-c/`. |
+| F1 / `3a4a8d79` | Reconcile no consolidator conserva summary e falhas antigas, mas limita o UPDATE à menor geração `running`; gerações posteriores continuam pendentes. Sem lease ativo, o reconcile manual mantém o contrato anterior. Invariante #16: nenhum lease é consumido ou invalidado e todas as escritas continuam no ator único. | `0b7ed5f4`: `automatic_reconcile_preserves_newer_pending_generation`: A running, B pending, consolida A, completa A, claim B e segunda inferência. Sem o limite SQL: falha runtime; com ele: passa. Controles existentes preservam failed antiga e lease ativo. |
+| B1 / `2d26dae5` | Checkout exige Cargo.toml com `[workspace]` e `hooks/claude-code/`. Só o exe sob `checkout/target/` torna esse checkout primário; cwd e manifest vêm após sibling, prefixo, sistema e data dir. `--hooks-dir` continua absoluto na precedência. Caminho compilado removido é ignorado. | `4b97ced0`, `35ad6823`: `installed_hooks_bundle_precedes_a_cwd_checkout` falha no runtime antigo e passa com a nova ordem; controla exe sob target e override explícito. Fixtures de triple, symlink e bundle sibling preservadas com marcadores reais. |
+| C1 / `143ad28a` | Locks OS usam hash da tupla módulo 1024, com prefixo `pool-v1-`; colisões só serializam páginas distintas. Aquisição continua ordenada e deduplicada. Arquivos SHA antigos ficam inertes, sem remoção. Instâncias novas devem usar o mesmo binário; um escritor antigo simultâneo usaria outro conjunto de locks. | `cb4189a4`, `e0b345de`, `35ad6823`: 1100 leituras de caminhos inexistentes: antes criam 1100 locks, depois no máximo 1024; o arquivo legado semeado conserva os bytes. Controles de escritores independentes, CAS e cancelamento continuam usando o pool. |
+| C2 / `d009b152`, `c3b5a60e` | Os dois controles Node ignorados agora estão no `--ignored --exact` do CI. O runtime TS perde todo o drain morto, inclusive unlink de envelopes; integração externa semeia envelope e exige bytes intactos. | `07ec2cce`, `32c55497`: Negativo executado antes da remoção do código morto: retirar só o return apaga o envelope e falha com ENOENT. O teste Node final verifica envelope intacto, zero POST de backlog e controle de escrita; teste estático proíbe o unlink. A suíte CLI de integração não foi executada nesta corrida, conforme fronteira do dono. |
+| C3 / `d009b152` | O worker inalterado aceita o contrato real dos produtores shell e PowerShell com escopo/key e auth none/static. Aplicado o caminho TS: drains explícitos e piggyback dessas libs são no-ops; só worker (ou drain nativo com lock/recibo, quando worker não está ativo) retira backlog. Perfis/OIDC/escopo implícito continuam fora do suporte desse worker e ficam para o nativo; não ampliamos o contrato. | `41024a24`: `test_spool_worker.py` executa os dois produtores, prova entrega, preservação sem completed_at e arquivo+recibo antes da remoção. pwsh disponível e exercitado. `test_lib.sh` tem negativo: 2xx apagava envelope; passa com no-ops. Controles antigos de entrega do drain script foram invertidos explicitamente para retenção de todos os modos; marcadores/proxies continuam testados nas requisições restantes. |
+| F2 / tag e `c0daec8d` | Fechamento de backfill usa o mesmo `base` efetivo e `.routed_to(profile_name)` dos eventos normais; o token do perfil não viaja ao servidor default. | `574b71f9`: `backfill_close_uses_the_claim_profile_and_a_fresh_key` exercita session-start/handoff com dois servidores sintéticos: antes o envelope nomeia o default; depois nomeia URL e perfil team-b. Nenhum pedido chega ao default. |
+| N1 da revisão b | Guarda local recusa fechamento sem scope_qs e sem cwd não branco, mesmo se chamado fora do fluxo atual. A chave do fechamento é nova por evento. | `574b71f9`: `backfill_close_without_scope_or_cwd_is_not_emitted` cobre None/vazio/branco e controle com cwd. O teste de perfil compara a chave do fechamento com a chave do session-start realmente enviado, ambas com 32 caracteres e distintas. |
+| C5 / `404fa8a0` | Política custom continua recusando todo redirect. Mudança de origem retorna o diagnóstico da tag com a origem alvo, sem replay; mesma origem continua 3xx recusado. Dream mantém mensagem privada e cliente sem proxy/redirect. | `15773fee`: Quatro asserts da tag restaurados (run e notify, texto e origem alvo); `Policy::none()` falha no primeiro. A política corrigida passa junto com os controles de não envio, Ignore e recusa na mesma origem. Comentário do notify atualizado. |
+| C4 / `8f272d97`, `b1389f55`, `56758c2c` | Saneamento já portado ganhou testes nos quatro sinks: erro HTTP do finalize, ambas as mensagens de tag do upgrade, sugestão de agente do doctor e menu com nome de workstream. Helpers privados de mensagens permitem testar a redação usada pelo println. | `dfd6f9d3`: `terminal_error_body_is_single_line_and_control_free` falha com terminal_body (newline/tab chegam ao erro) e passa com terminal_text. Os outros três controles incluem ESC, DEL, C1, CR, tab e quebra de linha com controle de texto comum; doctor/menu mantêm apenas as quebras da própria apresentação. |
+| Ranking / `1f0ff776`, `ad3d8c73`, `d2a57a10` | Nenhuma mudança adicional no ranking. Executada a mutação que faltava: trocar a transação comum por leituras autocommit em `merge_field_windows`. Fonte restaurado byte a byte depois do ensaio. | `e29f54f1`: `cargo test --locked -p ai-memory-store field_windows_share_snapshot_during_concurrent_writer`: sem snapshot, 0 passed/1 failed (duas versões, esperado uma); restaurado, 1 passed/0 failed. Logs `RANK-without.log` e `RANK-with.log` em `target/evidence-c/`. |
 | Idioma do dream / tag → `3fda82ca0` | Registrada a retirada dos três asserts de `dream_prompt_mirrors_page_language`: `## OUTPUT LANGUAGE`, `dominant natural language of the pages` e `do not make English the output language`. O prompt passou a exigir cópia literal integral das fontes e título literal, como o fork; tradução ou reescrita é recusada pelo validador determinístico. Não reinstalamos as instruções antigas de geração livre. | `git show 3fda82ca0 -- crates/ai-memory-consolidate/src/dream.rs`; controles de preservação literal e keep-token permanecem no consolidate. |
 | N1 da revisão a3 — nome de ferramenta / `c3b5a60e` | Reversão explícita do contrato da tag: `tool_label` validado é gravado no corpo por padrão, inclusive metadata-only; `record_tool_names` controla o título. Documentação de config corrigida. | Parser/gramática fechada, payload metadata-only e teste Node de labels; não é autorização para gravar argumentos/saída. |
 | N1 da revisão a3 — redirect / `404fa8a0` | Reversão explícita: redirects na mesma origem também são recusados, sem replay; C5 recupera o diagnóstico entre origens sem reabrir o follow. | `same_origin_redirect_never_replays_the_webhook`, `redirect_credentials` e controles de C5. |
@@ -844,3 +844,69 @@ objetos do fork; a base desta fase é `c0daec8d`. Não há alteração de schema
 | C2 — consumidores gerados | OpenClaw e os quatro geradores TS deixaram de exigir a presença do drain removido nos asserts legados; agora exigem requestSpoolDrain compatível e ausência de drainHookSpool/unlinkSync. Import de unlinkSync retirado do runtime gerado. | Controles de escrita de spool, fila limitada, abort e fs imports úteis permanecem. |
 | C2 — oracle compartilhado | O oracle TS ainda exigia o header e a requisição do drain morto. Substituídos por recusa de drainHookSpool/unlinkSync e requestSpoolDrain inerte. O mínimo de fetches cai de três para dois (hook e contexto); cada fetch restante continua exigindo authHeaders/mcpHeaders, sem proxy, sem redirect e sem injetar erro de contexto. | Os controles de escrita, chave, seq, abort e classificação retryable continuam estritos; removida a alternativa de headers brutos que só o drain usava. |
 | Gates — ajustes de fixtures | O gate completo encontrou a fixture cargo-run de setup-agent sem o novo marcador exigido por B1; acrescentado Cargo.toml de workspace sem mudar o assert de descoberta. Clippy exigiu array no controle de dois slots de C1. | Reexecutados os gates após corrigir as duas fixtures; nenhum prazo ou assert foi afrouxado. |
+
+### Prova de fechamento da fase C
+
+Resultado: APROVADO nos gates pedidos, execução concluída. Todos os itens
+1–11 foram atendidos. Rust/Cargo 1.95.0, com TMPDIR externo
+`/tmp/x.wFz8g0`, HOME/XDG sintéticos e configuração Git isolada nos testes.
+
+Passaram `cargo build --release --locked`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --check` e `git diff --check c0daec8d..HEAD`. O ledger em
+`target/evidence-c/GATES.md` terminou com 18/18 gates satisfeitos, nenhum
+pendente ou abandonado. Os primeiros logs de falha de fixture/clippy foram
+preservados em arquivos `*-attempt1.*`; a execução final passou integralmente.
+
+SHA256 de `target/release/ai-memory`:
+
+```text
+33b9f1ff4cfb3a5dedb7bcc483c9e42dc33bd8690f6d7122e4b1151691149603
+```
+
+Execução final de `cargo test --locked -p <crate>` (CLI apenas `--lib`):
+
+| Crate | passed | failed | ignored |
+|---|---:|---:|---:|
+| ai-memory-cli (somente lib) | 2361 | 0 | 3 |
+| ai-memory-consolidate | 601 | 0 | 7 |
+| ai-memory-core | 385 | 0 | 0 |
+| ai-memory-hooks | 804 | 0 | 0 |
+| ai-memory-llm | 463 | 0 | 2 |
+| ai-memory-mcp | 859 | 0 | 2 |
+| ai-memory-store | 975 | 0 | 1 |
+| ai-memory-wiki | 411 | 0 | 1 |
+
+Total medido: 6859 passed, 0 failed, 16 ignored. Os três
+ignorados obrigatórios do render_shared foram executados separadamente com
+`cargo test --locked -p ai-memory-cli --lib commands::render_shared -- --ignored`: 3 passed.
+Os demais ignorados continuam sendo controles externos/manuais já existentes.
+A suíte CLI `--test suite` não foi executada, conforme a fronteira do dono.
+
+`sh tests/hooks/test_lib.sh`: 442 passed, 0 failed. O teste de compatibilidade
+executou os produtores shell e PowerShell (pwsh disponível), com auth none e
+static, contra o worker original; dois testes aprovados, quatro combinações.
+`python3 -m pytest local-reliable-mcp/tests/test_hook_delivery.py`: 32 passed,
+com PYTHONPATH apontando ao módulo local, sem alterar o worker/relay.
+
+Nove pares negativos de runtime cobrem os itens 1–6 e 8–10.
+`target/evidence-c/negative-summary.json` contém os comandos, mutações,
+asserções, saídas e hashes dos logs: todos reprovam sem a correção e passam
+com ela. Falhas de compilação/harness iniciais não contam como negativos.
+O negativo TS foi executado retirando só o return antes da remoção do código
+morto; o envelope semeado foi apagado. O negativo de ranking expôs duas
+versões, depois voltou a uma; reader.rs foi restaurado byte a byte.
+
+Evidências complementares no mesmo diretório: `crate-test-results.json`,
+`final-summary.json`, `gates-final.log`, `built-source-hashes.json` e
+`release-sha256.json`. Os fontes finais coincidem com o snapshot dos gates/build.
+
+Antes e depois dos testes, `git -C /home/marce/Projects/ai-memory status --short`
+e `ls -la /home/marce/Projects/ai-memory/.claude` permaneceram idênticos
+(`main.before/after` e `claude.before/after`).
+`git diff --name-only c0daec8d..HEAD | grep -i migration` saiu vazio.
+Sem instalação, push, mudança de serviço, dados reais ou acesso aos caminhos
+e portas protegidos. target-host foi apenas ignorado, sem remoção.
+
+O orquestrador pode executar a suíte CLI de integração no host e seguir para
+a próxima revisão cruzada. Nenhum item solicitado desta corrida ficou pendente.

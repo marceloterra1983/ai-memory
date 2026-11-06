@@ -339,7 +339,17 @@ fn dispatch_backfill_close(
     server_url: &str,
     auth_token: Option<&str>,
     oidc_present: bool,
+    profile_name: Option<&str>,
 ) {
+    // A standalone candidate cannot fall back to a process-global project.
+    if scope_qs.is_empty()
+        && candidate
+            .cwd
+            .as_deref()
+            .is_none_or(|cwd| cwd.trim().is_empty())
+    {
+        return;
+    }
     let usage = compute_backfill_usage(
         candidate.agent_kind,
         &candidate.session_id,
@@ -381,7 +391,8 @@ fn dispatch_backfill_close(
         session_id = url_encode(&candidate.session_id),
     );
     let spool = hook_spool::spool_dir(dd);
-    let entry = hook_spool::entry_for(event_url, payload, auth_token, oidc_present);
+    let entry =
+        hook_spool::entry_for(event_url, payload, auth_token, oidc_present).routed_to(profile_name);
     if let Err(e) = hook_spool::enqueue_with_config(&spool, &entry, None) {
         eprintln!(
             "{}",
@@ -2236,9 +2247,10 @@ where
                         candidate,
                         &qs,
                         &dd,
-                        &args.server_url,
+                        base,
                         effective_token,
                         oidc_present,
+                        profile_name,
                     );
                 }
                 if matches!(agent_kind, AgentKind::KiroCli | AgentKind::IbmBob) {
@@ -3548,6 +3560,7 @@ mod tests {
             "http://127.0.0.1:1",
             None,
             false,
+            None,
         );
         let entries = read_spooled_entries(&hook_spool::spool_dir(&dd));
         assert_eq!(entries.len(), 1);
@@ -3560,6 +3573,46 @@ mod tests {
         assert!(
             query_param(url, "ingest_key").is_some_and(|key| key.len() == 32),
             "{url}"
+        );
+    }
+
+    #[test]
+    fn backfill_close_without_scope_or_cwd_is_not_emitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        for cwd in [None, Some("".into()), Some(" ".into())] {
+            let candidate = BackfillCandidate {
+                session_id: "old-session".into(),
+                agent_kind: AgentKind::Cursor,
+                cwd,
+            };
+            dispatch_backfill_close(
+                &candidate,
+                "",
+                tmp.path(),
+                "http://127.0.0.1:59074",
+                None,
+                false,
+                None,
+            );
+        }
+        assert!(!hook_spool::spool_dir(tmp.path()).exists(), "rejected close must not create a spool");
+        let candidate = BackfillCandidate {
+            session_id: "old-session".into(),
+            agent_kind: AgentKind::Cursor,
+            cwd: Some("/synthetic".into()),
+        };
+        dispatch_backfill_close(
+            &candidate,
+            "",
+            tmp.path(),
+            "http://127.0.0.1:59074",
+            None,
+            false,
+            None,
+        );
+        assert_eq!(
+            read_spooled_entries(&hook_spool::spool_dir(tmp.path())).len(),
+            1
         );
     }
 
@@ -9325,6 +9378,66 @@ mod tests {
         assert!(
             recorded.iter().all(|r| !r.contains("INSTALL-TOKEN")),
             "{recorded:?}"
+        );
+        assert_eq!(first_request(&mut default_requests).await, None);
+    }
+
+    #[tokio::test]
+    async fn backfill_close_uses_the_claim_profile_and_a_fresh_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let handoff = format!(
+            "{}session_id=old-session agent_kind=cursor cwd= -->\nB-HANDOFF",
+            ai_memory_hooks::BACKFILL_MARKER_PREFIX
+        );
+        let (profile_base, mut profile_requests) =
+            serve_requests("200 OK", Box::leak(handoff.into_boxed_str())).await;
+        let (default_base, mut default_requests) = serve_requests("200 OK", "A-HANDOFF").await;
+        let repo = repo_with_marker(tmp.path(), "repo", "server = \"team-b\"\n");
+        register_profile(&data_dir, "team-b", &profile_base, &[&repo], Some("tok-b"));
+        let mut stdout = Vec::new();
+        run_with_payload(
+            Some(data_dir.clone()),
+            kiro_hook_args("session-start", &default_base),
+            serde_json::json!({"session_id":"kiro-session", "cwd":repo}).to_string(),
+            &mut stdout,
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        let entries = read_spooled_entries(&hook_spool::spool_dir(&data_dir));
+        let close = entries
+            .iter()
+            .find(|e| query_param(&e.url, "event") == Some("session-end"))
+            .expect("backfill close is queued");
+        assert!(
+            close.url.starts_with(&format!("{profile_base}/hook?")),
+            "close used another server: {}",
+            close.url
+        );
+        assert_eq!(close.profile.as_deref(), Some("team-b"));
+        assert_eq!(close.token.as_deref(), Some("tok-b"));
+        let close_key = query_param(&close.url, "ingest_key").unwrap();
+        let mut recorded = Vec::new();
+        while let Some(request) = first_request(&mut profile_requests).await {
+            recorded.push(request);
+        }
+        let start = recorded
+            .iter()
+            .find(|r| r.contains("event=session-start"))
+            .expect("session-start delivered");
+        let start_key = start
+            .split("ingest_key=")
+            .nth(1)
+            .unwrap()
+            .split(['&', ' ', '\"'])
+            .next()
+            .unwrap();
+        assert_eq!(start_key.len(), 32);
+        assert_eq!(close_key.len(), 32);
+        assert_ne!(
+            close_key, start_key,
+            "close must never reuse the session-start key"
         );
         assert_eq!(first_request(&mut default_requests).await, None);
     }

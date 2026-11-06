@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Routed backfill session closes through the claim server profile and refused closes lacking both scope and cwd (`F2`, `N1`, cross-review of `c0daec8d`).
+
 - Left persisted shell and PowerShell hook envelopes to the receipt worker or native lock-aware drain, matching generated TypeScript ownership (`C3`, cross-review of `d009b152`).
 
 - Removed the disabled generated TypeScript spool drain and ran its seeded-envelope and tool-label runtime guards in CI (`C2`, cross-review of `d009b152`).

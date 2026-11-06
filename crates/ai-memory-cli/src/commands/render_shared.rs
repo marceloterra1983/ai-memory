@@ -3019,7 +3019,7 @@ fn claude_code_windows_command_is_unchanged_by_the_codex_fix() {
 /// TypeScript runtime shared by every generated integration that must
 /// survive an unreachable server (#580): a spool writer emitting the CLI
 /// `hook-spool` on-disk contract (same filenames, same `SpoolEntry` JSON,
-/// same permissions) plus a self-drain. Callers only need `TOKEN`, `AGENT`,
+/// same permissions). Persisted envelopes are drained by the receipt worker. Callers only need `TOKEN`, `AGENT`,
 /// `timeoutSignal`, and the node `join`/`homedir`/fs imports in scope.
 /// Runtime credential fallback shared by every generated TypeScript
 /// integration. #552 moved the bearer out of generated files into a 0600
@@ -3103,8 +3103,8 @@ pub(crate) fn ts_spool_runtime() -> &'static str {
     r#"
 // ---- offline spool (#580): the same on-disk contract as `ai-memory hook` ----
 // <data_dir>/hook-spool, entries the CLI's hook-drain understands. Written on
-// delivery failure, drained here on first use and after each queue flush; the
-// ingest_key minted at spool time makes a double drain idempotent server-side.
+// delivery failure. Only the receipt worker drains these envelopes; the
+// ingest_key minted at spool time makes replay idempotent server-side.
 function hookSpoolDir(): string {
   const env = process.env.AI_MEMORY_DATA_DIR;
   if (env && env.trim()) return join(env, "hook-spool");
@@ -3131,8 +3131,7 @@ function spoolFailedHook(url: URL | string, payload: Record<string, unknown>): v
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const createdMs = Date.now();
     // Idempotency key minted ONCE at spool time and baked into the URL,
-    // so this plugin's drain and the CLI's drain can both deliver the
-    // entry without double-ingesting.
+    // so the receipt worker can retry without double-ingesting.
     const key = `ts${createdMs.toString(16)}${Math.floor(Math.random() * 0xffffffff).toString(16)}`;
     const u = new URL(String(url));
     if (!u.searchParams.has("ingest_key")) u.searchParams.set("ingest_key", key);
@@ -3163,63 +3162,9 @@ function hookStatusRetryable(status: number): boolean {
   return status >= 500 || status === 408 || status === 425 || status === 429;
 }
 
-let spoolDrainPromise: Promise<void> | undefined;
-
+// Receipt-free clients leave persisted envelopes to the delivery worker.
 function requestSpoolDrain(): void {
-  return; // ai-memory-hook-delivery owns the spool; TS drain deletes without receipts.
-  if (spoolDrainPromise) return;
-  spoolDrainPromise = drainHookSpool().finally(() => {
-    spoolDrainPromise = undefined;
-  });
-}
-
-async function drainHookSpool(): Promise<void> {
-  let names: string[];
-  try {
-    names = readdirSync(hookSpoolDir()).filter((n) => n.endsWith(".json"));
-  } catch (_e) {
-    return; // no spool dir = nothing queued
-  }
-  names.sort();
-  for (const name of names.slice(0, 500)) {
-    const file = join(hookSpoolDir(), name);
-    let entry: { url?: string; body?: string; token?: string };
-    try {
-      entry = JSON.parse(readMarkerText(file, "utf8"));
-    } catch (_e) {
-      continue; // torn or foreign file; leave it for the CLI drain
-    }
-    if (!entry.url || typeof entry.body !== "string") continue;
-    try {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "X-AI-Memory-Client": AGENT,
-      };
-      if (entry.token) headers["Authorization"] = `Bearer ${entry.token}`;
-      // Bun reads HTTP(S)_PROXY and ALL_PROXY even for a loopback URL;
-      // `proxy: false` connects directly. Node's fetch ignores the key.
-      // A redirect is refused, not followed: a gateway's login page answers
-      // 200, and the entry would be deleted as delivered.
-      const resp = await fetch(entry.url, {
-        proxy: false,
-        redirect: "error",
-        method: "POST",
-        headers,
-        body: entry.body,
-        signal: timeoutSignal(2000),
-      }).catch(() => undefined);
-      if (!resp) return; // still unreachable; stop, keep the backlog
-      if (resp.ok || (resp.status >= 400 && resp.status < 500 && !hookStatusRetryable(resp.status))) {
-        // Delivered, or permanently rejected - either way, done with it.
-        try { unlinkSync(file); } catch (_e) {}
-      } else {
-        return; // 5xx or a transient 4xx: server unhappy; retry a later drain
-      }
-    } catch (_e) {
-      return;
-    }
-    await new Promise<void>((r) => setTimeout(r, 50));
-  }
+  return;
 }
 
 "#
@@ -3552,16 +3497,39 @@ mod tests {
     }
 
     #[test]
+    fn generated_ts_spool_has_no_envelope_unlink() {
+        assert!(!ts_spool_runtime().contains("unlinkSync"));
+        assert!(!ts_spool_runtime().contains("drainHookSpool"));
+    }
+
+    #[test]
     #[ignore = "requires Node; phase-A delivery gate runs it explicitly"]
     fn generated_ts_spool_drain_requires_external_receipt() {
         let source = ts_spool_runtime();
-        let start = source.find("function requestSpoolDrain(): void {").unwrap();
-        let end = start + source[start..].find("\n}").unwrap() + 2;
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("drain.ts");
-        std::fs::write(&script, format!(
-            "let calls = 0; let spoolDrainPromise: Promise<void> | undefined;\nasync function drainHookSpool() {{ calls++; }}\n{}\nrequestSpoolDrain(); await Promise.resolve(); if(calls !== 0) throw new Error('receipt-free drain consumed worker envelopes');\n", &source[start..end]
-        )).unwrap();
+        std::fs::write(&script, format!(r#"
+import {{ mkdirSync, writeFileSync, renameSync, readdirSync, unlinkSync, readFileSync as readMarkerText }} from "node:fs";
+import {{ join, dirname }} from "node:path";
+import {{ homedir }} from "node:os";
+process.env.AI_MEMORY_DATA_DIR = dirname(process.argv[1]);
+const AGENT = "synthetic";
+function resolveToken() {{ return null; }}
+function timeoutSignal(_ms: number) {{ return undefined; }}
+let calls = 0;
+globalThis.fetch = async () => {{ calls++; return new Response(null, {{ status: 204 }}); }};
+{source}
+mkdirSync(hookSpoolDir(), {{recursive: true}});
+const file = join(hookSpoolDir(), "0000000000000-1-0000000000000000.json");
+const envelope = JSON.stringify({{url: "http://127.0.0.1:59074/hook?workspace=w&project=p&ingest_key=existing", body: "{{}}", auth_mode: "none", attempts: 0, created_ms: Date.now()}});
+writeFileSync(file, envelope);
+requestSpoolDrain();
+await new Promise(r => setTimeout(r, 100));
+if (readMarkerText(file, "utf8") !== envelope) throw new Error("existing envelope changed");
+if (calls !== 0) throw new Error("receipt-free drain sent an existing envelope");
+spoolFailedHook("http://127.0.0.1:59074/hook?workspace=w&project=p", {{control: true}});
+if (readdirSync(hookSpoolDir()).length !== 2) throw new Error("writer control did not spool");
+"#)).unwrap();
         let output = std::process::Command::new("node")
             .arg("--experimental-strip-types")
             .arg(script)

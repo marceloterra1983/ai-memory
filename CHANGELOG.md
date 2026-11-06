@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Removed the disabled generated TypeScript spool drain and ran its seeded-envelope and tool-label runtime guards in CI (`C2`, cross-review of `d009b152`).
+
 - Bounded page file locks to 1024 shared slots, retaining legacy lock files without acquiring or deleting them (`C1`, cross-review of `143ad28a`).
 
 - Preferred installed hook bundles over cwd or build-manifest checkouts, retaining explicit overrides and development binaries under target (`B1`, cross-review of `2d26dae5`).

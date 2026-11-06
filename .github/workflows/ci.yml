@@ -176,7 +176,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         # `--workspace` reuses the test binaries built above instead of
         # re-resolving features for one package.
-        run: cargo test --workspace --lib -- --ignored --exact commands::render_shared::tests::generated_capture_policy_v1_node_runtime_evidence
+        run: >-
+          cargo test --workspace --lib -- --ignored --exact
+          commands::render_shared::tests::generated_capture_policy_v1_node_runtime_evidence
+          commands::render_shared::tests::generated_ts_spool_drain_requires_external_receipt
+          commands::render_shared::tests::generated_tool_labels_match_the_closed_rust_grammar
       # The optional TypeScript SDK (companions/ai-memory-ts) against the server
       # built above: integration tests, the MCP schema drift test and every
       # example. A pull request that changes an MCP tool schema fails here

@@ -256,12 +256,25 @@ console.log(JSON.stringify({ events, files, handoffs, unmarked, system: transfor
         let mut port = free_port();
         write_fixture(&dir, port);
 
+        let spool = dir.join("data/hook-spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        let existing = spool.join("0000000000000-1-0000000000000000.json");
+        let envelope = serde_json::to_vec(&serde_json::json!({
+            "url": format!("http://127.0.0.1:{port}/hook?event=stop&workspace=synthetic&project=synthetic&ingest_key=seed"),
+            "body": "{}", "auth_mode": "none", "attempts": 0, "created_ms": 1
+        })).unwrap();
+        std::fs::write(&existing, &envelope).unwrap();
         let owned = run_on_free_port(&dir, &mut port, Some("orchestrator-a"), None);
+        assert_eq!(
+            std::fs::read(&existing).unwrap(),
+            envelope,
+            "existing worker envelope must stay intact"
+        );
         assert!(
             delivered_events(&owned).is_empty(),
             "owned run must POST nothing: {owned}"
         );
-        assert_eq!(spooled_entries(&dir), 0, "owned run must spool nothing new");
+        assert_eq!(spooled_entries(&dir), 1, "owned run must spool nothing new");
         // Context delivery is a separate path and must survive the handover.
         assert_eq!(owned["handoffs"], 1, "{owned}");
         assert_eq!(owned["unmarked"], serde_json::json!([]), "{owned}");

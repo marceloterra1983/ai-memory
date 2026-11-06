@@ -92,7 +92,10 @@ async fn independent_wiki_waits_for_the_process_file_lock() {
         .chain_update([0])
         .chain_update(req.path.as_str().as_bytes())
         .finalize();
-    let lock_path = tmp.path().join("page-locks").join(format!("{digest:x}"));
+    let lock_path = tmp.path().join("page-locks").join(format!(
+        "pool-v1-{:04}",
+        u16::from_be_bytes([digest[0], digest[1]]) % 1024
+    ));
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -148,4 +151,29 @@ async fn bare_wiki_verifies_source_through_the_writer() {
         matches!(wiki.write_page_if(req, PagePrecondition::Latest(id)).await.unwrap(), ConditionalWrite::Mismatch { current: Some(current) } if current == id)
     );
     assert_eq!(std::fs::read_to_string(abs).unwrap(), "external source");
+}
+
+#[tokio::test]
+async fn missing_page_reads_use_a_bounded_file_lock_pool() {
+    let (tmp, store, wiki, req) = fixture().await;
+    let legacy = tmp.path().join("page-locks").join("a".repeat(64));
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, b"legacy lock stays inert").unwrap();
+    for index in 0..1100 {
+        let path = PagePath::new(format!("missing/{index}.md")).unwrap();
+        assert!(
+            wiki.read_page_version(req.workspace_id, req.project_id, &path, &store.reader)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    let files = std::fs::read_dir(tmp.path().join("page-locks"))
+        .unwrap()
+        .count();
+    assert!(
+        files <= 1025,
+        "1100 distinct reads created {files} files; pool is bounded to 1024 plus one legacy file"
+    );
+    assert_eq!(std::fs::read(legacy).unwrap(), b"legacy lock stays inert");
 }

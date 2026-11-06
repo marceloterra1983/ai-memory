@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Bounded page file locks to 1024 shared slots, retaining legacy lock files without acquiring or deleting them (`C1`, cross-review of `143ad28a`).
+
 - Preferred installed hook bundles over cwd or build-manifest checkouts, retaining explicit overrides and development binaries under target (`B1`, cross-review of `2d26dae5`).
 
 - Preserved newer queued consolidation generations when an in-flight attempt reconciled its session anchor (`F1`, cross-review of `3a4a8d79`).

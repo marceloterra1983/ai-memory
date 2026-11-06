@@ -764,7 +764,10 @@ async fn dream_cancelled_file_lock_wait_releases_already_acquired_locks() {
                 .chain_update([0])
                 .chain_update(path.as_bytes())
                 .finalize();
-            tmp.path().join("page-locks").join(format!("{hash:x}"))
+            tmp.path().join("page-locks").join(format!(
+                "pool-v1-{:04}",
+                u16::from_be_bytes([hash[0], hash[1]]) % 1024
+            ))
         })
         .collect();
     paths.sort();

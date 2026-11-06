@@ -989,52 +989,139 @@ continua depois dos bundles instalados. Esta decisão descreve
 
 ### N4 — precedência do prefixo com hooks em share
 
-Os novos testes `prefix_share_hooks_precede_system_paths_and_cwd_checkout`
-de `install_hooks` e `setup_agent` copiam o harness para
-`<temporário>/prefix/bin/ai-memory` e o reexecutam com cwd em outro checkout
-temporário. Há `session-start.sh` com conteúdos distintos em
-`prefix/share/ai-memory/hooks/claude-code/` e `checkout/hooks/claude-code/`;
-`install_hooks` também tem um bundle concorrente no data dir temporário.
-Os testes chamam `resolve_hooks_dir(None, ...)` e
-`resolve_source(None, ...)`, sem override de fonte, e verificam o diretório
-escolhido e o conteúdo lido. Também exigem que os geradores de candidatos
-usados por esses resolvedores coloquem o prefixo antes dos caminhos fixos
-`/usr/local/share/ai-memory/hooks/claude-code` e
-`/usr/share/ai-memory/hooks/claude-code`. Esses dois caminhos não recebem
-fixtures nem escritas no host. O checkout desta fixture é descoberto pelo
-cwd; a prioridade do checkout ancestral do executável continua sendo N1.
-O lançamento do harness admite repetição limitada somente para
-`ExecutableFileBusy`, que apareceu sob carga paralela no gate completo.
-Um subprocesso que retorna falha de teste encerra o controle sem repetição.
+A rodada 1 (`fac147b6`) só testou um prefixo fora de qualquer checkout, com
+o checkout achado pelo cwd, e descrevia o prefixo como anterior a qualquer
+checkout. A revisão reprovou: no `install-hooks`, o checkout primário vence o
+prefixo. A rodada 2 descreve a ordem real, testa os dois arranjos e não muda
+produção. Os logs da rodada 1 ficam em `target-host/evidence-n1n4/`.
 
-Controles negativos moveram temporariamente o bloco do prefixo nos dois
-geradores de produção. Depois dos caminhos de sistema, ambos os testes
-falharam na ordem de `/usr/local/share`; depois de todos os fallbacks,
-`install_hooks` escolheu o bundle do data dir e `setup_agent` o do checkout.
-Cada execução negativa terminou em `0 passed; 2 failed`, exit 101. Os dois
-fontes foram restaurados byte a byte após cada controle. A execução inicial
-e a posterior à restauração terminaram em `2 passed; 0 failed`, exit 0.
+**Ordem do `install-hooks`.** `resolve_hooks_dir`
+(`crates/ai-memory-cli/src/commands/install_hooks.rs:6891`) devolve o
+primeiro diretório existente de `hook_source_candidates` (`:6933`) e, por
+último, do checkout de `CARGO_MANIFEST_DIR` (`:6914`):
 
-Evidência local em `target-host/evidence-n1n4/`: `prefix-pass-before.log`,
-`negative-system.log`, `negative-checkout.log`, `prefix-pass-after.log`,
-patches das mutações, `restoration-*.json` e metadados com SHA256 dos fontes
-e logs. Com Rust/Cargo 1.95.0, `CARGO_TARGET_DIR=target-host`,
-`--locked --offline`, HOME/XDG/TMPDIR e configuração Git temporários,
-os módulos completos passaram: `commands::install_hooks::`, 257 testes;
-`commands::setup_agent::`, 16 testes; nenhum falhou ou foi ignorado.
+1. checkout primário, o ancestral mais próximo do executável com os
+   marcadores de N1 (`:6942`–`:6951`);
+2. `<exe_dir>/hooks`, do tarball plano (`:6952`);
+3. `<prefix>/share/ai-memory/hooks`, quando o executável está em
+   `<prefix>/bin` (`:6958`–`:6972`);
+4. `/usr/local/share/ai-memory/hooks` (`:6973`) e
+   `/usr/share/ai-memory/hooks` (`:6977`);
+5. o bundle encenado no data dir (`:6981`);
+6. checkout que não é primário, achado pelo cwd ou pelo manifesto (`:6984`).
 
-Os primeiros ensaios do gate amplo estão preservados em `attempt1/`.
-O runner inicialmente herdava `CODEX_HOME`, fazendo duas fixtures de backfill
-procurarem transcripts fora do home temporário; remover essa variável do
-runner fez os sete controles focados de backfill passarem. O ensaio seguinte
-expôs `ExecutableFileBusy` no harness copiado e motivou a repetição limitada
-descrita acima, restrita aos testes novos. Os controles negativos foram
-refeitos depois desse ajuste.
+**Ordem do `setup-agent`.** `resolve_source`
+(`crates/ai-memory-cli/src/commands/setup_agent.rs:909`) devolve o primeiro
+diretório existente de `source_candidates` (`:936`): prefixo
+(`:941`–`:956`), `/usr/local/share` e `/usr/share` (`:957`–`:962`),
+`<exe_dir>/hooks` (`:963`–`:967`) e, por último, o checkout de
+`install_layout::repo_root_guess` (`:968`–`:974`). Esse checkout sai do
+executável, depois do cwd e depois do manifesto
+(`crates/ai-memory-cli/src/install_layout.rs:63`).
 
-Passaram também fmt, diff-check, clippy do workspace com `--all-targets
--- -D warnings`, cargo-deny offline e
-`cargo test --workspace --all-targets --locked --offline` (exit 0).
-`final-summary.json` reúne as saídas e hashes finais; `source-boundary.log`
-confirma que, retirados apenas os dois testes novos em `#[cfg(test)]`, os
-fontes ficam idênticos a `57de758f`. Nenhuma instalação, operação de serviço
-ou push foi executado.
+**Assimetria.** Com o binário fora de checkout, os dois resolvedores
+concordam: o prefixo vence os caminhos de sistema, o data dir e o checkout do
+cwd. Com o binário dentro de um checkout, discordam. O `install-hooks` põe o
+checkout primário antes de tudo. O `setup-agent` põe qualquer bundle
+instalado antes dele: o prefixo e também `/usr/local/share` e `/usr/share`.
+Isso vale mesmo sem prefixo, como no binário em `<checkout>/target/debug/`
+num host com pacote nativo em `/usr/share`.
+
+**Quando aparece.** O caso do prefixo exige `<prefix>/bin/ai-memory` e
+`<prefix>/share/ai-memory/hooks/` dentro de um checkout com os marcadores.
+Por exemplo, um prefixo de instalação montado dentro do repositório, ou um
+release no layout `bin/` + `share/` extraído ali. `cargo install --root`
+dentro do repositório põe o binário nesse lugar, mas só instala `bin/`. Sem
+alguém escrever `share/`, o candidato do prefixo não existe. Então o
+`setup-agent` cai nos caminhos de sistema, quando existem, ou no próprio
+checkout.
+
+**Avaliação: aceitável, não insegura.**
+
+- Nenhum candidato cruza fronteira de privilégio. Os hooks rodam como o
+  usuário que roda o comando. Os caminhos de sistema são de root, e o
+  checkout e o prefixo são do próprio usuário.
+- O risco é misturar versões de binário e hooks. É o mesmo custo aceito em
+  N1, e `--hooks-dir` e `--source` fixam a origem.
+- A assimetria vem do upstream. Em `v3.4.2`, `hook_source_candidates` punha
+  qualquer raiz de repositório em primeiro lugar, inclusive a do cwd
+  (`git show v3.4.2:crates/ai-memory-cli/src/commands/install_hooks.rs`).
+  O porte restringiu essa prioridade ao checkout primário, em `4b97ced0` e
+  `412c00c7`, e assim reduziu os casos de divergência. `setup_agent.rs` não
+  mudou em relação ao upstream nesse trecho.
+- Nos dois resolvedores, um checkout achado só pelo cwd fica por último.
+
+**Testes.** Cada arquivo tem dois testes. Eles copiam o harness para um
+`bin/` temporário e o reexecutam por `rerun_installed_harness`
+(`install_hooks.rs:13217`, `setup_agent.rs:1091`). Assim, os resolvedores
+derivam os caminhos de um `current_exe` real. Só `ExecutableFileBusy` se
+repete, até 4 vezes; falha de asserção encerra o teste. Os dois casos:
+
+- **(a) Binário dentro do checkout.**
+  - Testes: `binary_inside_checkout_uses_checkout_hooks_before_prefix_share`
+    (`install_hooks.rs:13322`) e
+    `binary_inside_checkout_uses_prefix_share_before_checkout_hooks`
+    (`setup_agent.rs:1188`).
+  - Arranjo:
+    - o binário fica em `<tmp>/checkout/prefix/bin/ai-memory`;
+    - o checkout tem os marcadores;
+    - `prefix/share/ai-memory/hooks/claude-code` tem outro conteúdo;
+    - o cwd é `<tmp>`.
+  - Os testes afirmam que `repo_root_from_exe` acha o checkout. Depois
+    conferem caminho e conteúdo do arquivo devolvido pelo resolvedor: o
+    bundle do checkout no `install-hooks` e o do prefixo no `setup-agent`.
+- **(b) Binário fora de checkout.**
+  - Teste: `binary_outside_checkout_uses_prefix_share_before_system_and_cwd_checkout`
+    (`install_hooks.rs:13257`, `setup_agent.rs:1131`). Substitui o teste da
+    rodada 1.
+  - Arranjo:
+    - o binário fica em `<tmp>/prefix/bin/ai-memory`;
+    - o cwd é `<tmp>/checkout`;
+    - no `install-hooks`, o data dir tem um bundle encenado.
+  - O teste afirma três coisas:
+    - nenhum checkout sai do executável;
+    - o prefixo vence pelo conteúdo;
+    - no gerador de candidatos, o prefixo precede `/usr/local/share`,
+      `/usr/share` e o checkout do cwd, e no `install-hooks` também o data
+      dir.
+
+`/usr/local/share` e `/usr/share` ficam fora do caminho ponta a ponta,
+porque nada escreve no host. Só o gerador de candidatos confere a ordem
+deles. Neste host os dois não existem. Por isso, mover o prefixo para depois
+deles reprova só a asserção de índice, como mostrou a rodada 1.
+
+**Controles negativos.** Cada controle passa por
+`target-host/evidence-n4r2/mutacao.py`. O script inverte uma ordem de
+produção e roda os quatro testes. Depois restaura o arquivo byte a byte e
+compara os SHA-256. Os controles:
+
+| Controle | Inversão | Teste que reprova | Resolveu | Placar |
+|---|---|---|---|---|
+| `dev-checkout-depois-do-prefixo` | `install_hooks.rs:6949` para depois do bloco do prefixo | (a) do `install-hooks` | o `share` do prefixo | `3 passed; 1 failed` |
+| `prefixo-depois-do-checkout-setup-agent` | `setup_agent.rs:941`–`:956` para depois de `:968` | (a) e (b) do `setup-agent` | o checkout | `2 passed; 2 failed` |
+| `prefixo-por-ultimo-install-hooks` | `install_hooks.rs:6958`–`:6972` para o fim | (b) do `install-hooks` | o bundle do data dir | `3 passed; 1 failed` |
+
+Os três controles terminaram com exit 101. Cada restauração reproduziu o
+SHA-256 de antes: `818e5d08…` em `install_hooks.rs` e `e4ba4e31…` em
+`setup_agent.rs`. Depois deles, os quatro testes deram `4 passed; 0 failed`,
+exit 0.
+
+**Módulos.** Rust/Cargo 1.95.0, `CARGO_TARGET_DIR=target-host`, `--locked
+--offline`:
+
+- `commands::install_hooks::`: 258 passaram;
+- `commands::setup_agent::`: 17 passaram;
+- nenhum teste falhou ou foi ignorado.
+
+Os módulos rodaram com HOME, XDG e TMPDIR temporários, sem config global do
+Git, sem `CODEX_HOME`, e com `CARGO_HOME` e `RUSTUP_HOME` reais. A primeira
+execução sem eles falhou no modo offline ao buscar a dependência git `zip`.
+Foi falha de ambiente, não de teste. Também passaram, com exit 0:
+
+- `cargo fmt --all --check`;
+- `git diff --check`;
+- `cargo clippy -p ai-memory-cli --all-targets -- -D warnings`.
+
+O `cargo test --workspace` não foi repetido nesta rodada. A rodada 1 o rodou
+em `fac147b6`. Logs em `target-host/evidence-n4r2/`. Nenhuma instalação,
+operação de serviço ou push foi executado.

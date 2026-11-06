@@ -1085,8 +1085,50 @@ mod tests {
         );
     }
 
+    /// Re-run `test` from a copy of this harness at `installed`, so the
+    /// resolvers derive every path from a real `current_exe` rather than
+    /// from a candidate list supplied by the test.
+    fn rerun_installed_harness(installed: &Path, cwd: &Path, test: &str) {
+        fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        fs::copy(std::env::current_exe().unwrap(), installed).unwrap();
+        let filter = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+        let mut command = std::process::Command::new(installed);
+        command
+            .args(["--exact", &filter, "--nocapture"])
+            .current_dir(cwd);
+        // Like the version probe, allow a freshly copied executable to stop
+        // being busy under parallel load. Assertion failures are never retried.
+        let mut busy_attempts = 0;
+        let output = loop {
+            match command.output() {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && busy_attempts < 4 =>
+                {
+                    busy_attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result.unwrap(),
+            }
+        };
+        assert!(
+            output.status.success(),
+            "{test} subprocess failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    }
+
+    fn write_hook_bundles(bundles: &[(PathBuf, &str)]) {
+        for (bundle, content) in bundles {
+            fs::create_dir_all(bundle).unwrap();
+            fs::write(bundle.join("session-start.sh"), content).unwrap();
+        }
+    }
+
     #[test]
-    fn prefix_share_hooks_precede_system_paths_and_cwd_checkout() {
+    fn binary_outside_checkout_uses_prefix_share_before_system_and_cwd_checkout() {
         let exe = std::env::current_exe().unwrap();
         let binary_name = crate::install_layout::shipped_binary_name();
         // resolve_source must discover the prefix from the running binary.
@@ -1094,6 +1136,7 @@ mod tests {
             let prefix = exe.parent().unwrap().parent().unwrap();
             let source = prefix.join("share/ai-memory/hooks/claude-code");
             let checkout = std::env::current_dir().unwrap();
+            assert_eq!(crate::install_layout::repo_root_from_exe(&exe), None);
             assert_eq!(
                 crate::install_layout::repo_root_guess(Some(&exe), Some(&checkout)),
                 Some(checkout.clone())
@@ -1126,56 +1169,68 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let prefix = tmp.path().join("prefix");
         let checkout = tmp.path().join("checkout");
-        for (bundle, content) in [
+        write_hook_bundles(&[
             (
                 prefix.join("share/ai-memory/hooks/claude-code"),
                 "# prefix bundle\n",
             ),
             (checkout.join("hooks/claude-code"), "# checkout bundle\n"),
-        ] {
-            fs::create_dir_all(&bundle).unwrap();
-            fs::write(bundle.join("session-start.sh"), content).unwrap();
-        }
+        ]);
         fs::write(checkout.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
-        let installed = prefix.join("bin").join(binary_name);
-        fs::create_dir_all(installed.parent().unwrap()).unwrap();
-        fs::copy(exe, &installed).unwrap();
-        let mut command = std::process::Command::new(installed);
-        command
-            .args([
-                "--exact",
-                concat!(
-                    module_path!(),
-                    "::prefix_share_hooks_precede_system_paths_and_cwd_checkout"
-                )
-                .split_once("::")
-                .unwrap()
-                .1,
-                "--nocapture",
-            ])
-            .current_dir(checkout);
-        // Like the version probe, allow a freshly copied executable to stop
-        // being busy under parallel load. Assertion failures are never retried.
-        let mut busy_attempts = 0;
-        let output = loop {
-            match command.output() {
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
-                        && busy_attempts < 4 =>
-                {
-                    busy_attempts += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                result => break result.unwrap(),
-            }
-        };
-        assert!(
-            output.status.success(),
-            "prefix resolver subprocess failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        rerun_installed_harness(
+            &prefix.join("bin").join(binary_name),
+            &checkout,
+            "binary_outside_checkout_uses_prefix_share_before_system_and_cwd_checkout",
         );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    }
+
+    #[test]
+    fn binary_inside_checkout_uses_prefix_share_before_checkout_hooks() {
+        let exe = std::env::current_exe().unwrap();
+        let binary_name = crate::install_layout::shipped_binary_name();
+        if exe.file_name().unwrap() == binary_name {
+            let prefix = exe.parent().unwrap().parent().unwrap();
+            let checkout = prefix.parent().unwrap();
+            let share = prefix.join("share/ai-memory/hooks/claude-code");
+            let checkout_hooks = checkout.join("hooks/claude-code");
+            // cwd is outside the checkout: only the executable discovers it.
+            // Unlike install-hooks, setup-agent still ranks the prefix first.
+            assert_eq!(
+                crate::install_layout::repo_root_from_exe(&exe).as_deref(),
+                Some(checkout)
+            );
+            let resolved = resolve_source(None, "claude-code").unwrap();
+            assert_eq!(resolved, share);
+            assert_eq!(
+                fs::read_to_string(resolved.join("session-start.sh")).unwrap(),
+                "# prefix bundle\n"
+            );
+
+            let candidates = source_candidates(None, "claude-code", Some(exe.clone()));
+            let position = |path: &Path| candidates.iter().position(|p| p == path).unwrap();
+            assert!(
+                position(&share) < position(&checkout_hooks),
+                "prefix share must precede the checkout: {candidates:?}"
+            );
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("checkout");
+        let prefix = checkout.join("prefix");
+        write_hook_bundles(&[
+            (
+                prefix.join("share/ai-memory/hooks/claude-code"),
+                "# prefix bundle\n",
+            ),
+            (checkout.join("hooks/claude-code"), "# checkout bundle\n"),
+        ]);
+        fs::write(checkout.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
+        rerun_installed_harness(
+            &prefix.join("bin").join(binary_name),
+            tmp.path(),
+            "binary_inside_checkout_uses_prefix_share_before_checkout_hooks",
+        );
     }
 
     /// Nix ships hook sources 0444 and `fs::copy` keeps that mode, so a

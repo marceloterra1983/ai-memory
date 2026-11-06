@@ -767,7 +767,7 @@ async fn dream_cancelled_file_lock_wait_releases_already_acquired_locks() {
             u16::from_be_bytes([hash[0], hash[1]]) % 1024
         ))
     };
-    let mut paths = vec![lock_path("a.md"), lock_path("b.md")];
+    let mut paths = [lock_path("a.md"), lock_path("b.md")];
     // Pool collisions are legitimate. This cancellation probe specifically
     // needs two slots: one already acquired and another still held externally.
     if paths[0] == paths[1] {

@@ -1052,6 +1052,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join("hooks/claude-code")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
         let exe = repo.join("target/debug/ai-memory");
         let candidates = source_candidates(None, "claude-code", Some(exe));
         assert!(

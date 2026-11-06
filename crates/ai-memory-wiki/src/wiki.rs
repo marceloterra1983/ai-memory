@@ -3176,6 +3176,12 @@ impl Wiki {
         let mut files = 0;
         for page in &repair.date_only_pages {
             let page_path = PagePath::new(&page.path)?;
+            let _page_guard = self
+                .lock_page(page.workspace_id, page.project_id, &page_path)
+                .await;
+            let _file_locks = self
+                .lock_page_files(&[(page.workspace_id, page.project_id, page_path.clone())])
+                .await?;
             let abs = self.confined_page_path(
                 page.workspace_id,
                 page.project_id,
@@ -5066,6 +5072,61 @@ mod tests {
 
         assert_eq!(wiki.repair_date_only_stale_after().await.unwrap(), (0, 0));
         assert_eq!(wiki.git.commit_count(), commits + 1);
+    }
+
+    #[tokio::test]
+    async fn startup_repair_waits_for_an_independent_wikis_pool_slot() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store.writer.get_or_create_workspace("w").await.unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "p", None)
+            .await
+            .unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let other = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let rel = "notes/freeze.md";
+        wiki.write_page(req(
+            ws,
+            proj,
+            rel,
+            "body stays",
+            serde_json::json!({"expires_at": "2099-08-01"}),
+        ))
+        .await
+        .unwrap();
+        regress_to_date_only_stale_after(&tmp, &wiki, ws, proj, rel, true, true);
+        let abs = wiki.project_root(ws, proj).join(rel);
+        let before = std::fs::read(&abs).unwrap();
+        let locks = other
+            .lock_page_files(&[(ws, proj, PagePath::new(rel).unwrap())])
+            .await
+            .unwrap();
+
+        let repair = wiki.repair_date_only_stale_after();
+        tokio::pin!(repair);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut repair)
+                .await
+                .is_err(),
+            "startup repair rewrote a page while an independent Wiki held its pool slot"
+        );
+        assert_eq!(std::fs::read(&abs).unwrap(), before);
+        drop(locks);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut repair)
+                .await
+                .unwrap()
+                .unwrap(),
+            (1, 1)
+        );
+        let after = parse(&std::fs::read_to_string(&abs).unwrap()).unwrap();
+        assert_eq!(
+            after.frontmatter["stale_after"],
+            "2099-08-01T23:59:59.999999Z"
+        );
+        assert_eq!(after.body, "body stays");
     }
 
     /// Refused on every platform, not only the case-insensitive ones: the

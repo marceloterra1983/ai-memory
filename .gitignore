@@ -1,5 +1,6 @@
 # Rust build artefacts.
 /target/
+/target-host/
 /companions/*/target/
 /companions/*/.build/
 /companions/*/.swiftpm/

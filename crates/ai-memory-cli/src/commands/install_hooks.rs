@@ -13212,6 +13212,105 @@ model = "gpt-5"
     }
 
     #[test]
+    fn prefix_share_hooks_precede_system_paths_and_cwd_checkout() {
+        let exe = std::env::current_exe().unwrap();
+        let binary_name = crate::install_layout::shipped_binary_name();
+        // Re-exec the harness from a real prefix so resolve_hooks_dir uses
+        // current_exe, rather than a candidate list supplied by this test.
+        if exe.file_name().unwrap() == binary_name {
+            let prefix = exe.parent().unwrap().parent().unwrap();
+            let source = prefix.join("share/ai-memory/hooks/claude-code");
+            let checkout = std::env::current_dir().unwrap();
+            let data = prefix.parent().unwrap().join("data");
+            assert_eq!(repo_root_guess(), Some(checkout.clone()));
+            let resolved = resolve_hooks_dir(None, AgentChoice::ClaudeCode, &data).unwrap();
+            assert_eq!(resolved, source);
+            assert_eq!(
+                fs::read_to_string(resolved.join("session-start.sh")).unwrap(),
+                "# prefix bundle\n"
+            );
+
+            // The fixed system paths need no host writes: check their order
+            // in the same production builder used by the resolver above.
+            let candidates = hook_source_candidates(
+                "claude-code",
+                repo_root_guess(),
+                exe_dir_guess(),
+                Some(data),
+            );
+            let position = |path: &Path| candidates.iter().position(|p| p == path).unwrap();
+            for rival in [
+                PathBuf::from("/usr/local/share/ai-memory/hooks/claude-code"),
+                PathBuf::from("/usr/share/ai-memory/hooks/claude-code"),
+                checkout.join("hooks/claude-code"),
+            ] {
+                assert!(
+                    position(&source) < position(&rival),
+                    "prefix must precede {}: {candidates:?}",
+                    rival.display()
+                );
+            }
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().join("prefix");
+        let checkout = tmp.path().join("checkout");
+        let data = tmp.path().join("data");
+        for (bundle, content) in [
+            (
+                prefix.join("share/ai-memory/hooks/claude-code"),
+                "# prefix bundle\n",
+            ),
+            (checkout.join("hooks/claude-code"), "# checkout bundle\n"),
+            (data.join("hooks/claude-code"), "# staged bundle\n"),
+        ] {
+            fs::create_dir_all(&bundle).unwrap();
+            fs::write(bundle.join("session-start.sh"), content).unwrap();
+        }
+        fs::write(checkout.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
+        let installed = prefix.join("bin").join(binary_name);
+        fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        fs::copy(exe, &installed).unwrap();
+        let mut command = std::process::Command::new(installed);
+        command
+            .args([
+                "--exact",
+                concat!(
+                    module_path!(),
+                    "::prefix_share_hooks_precede_system_paths_and_cwd_checkout"
+                )
+                .split_once("::")
+                .unwrap()
+                .1,
+                "--nocapture",
+            ])
+            .current_dir(checkout);
+        // Like the version probe, allow a freshly copied executable to stop
+        // being busy under parallel load. Assertion failures are never retried.
+        let mut busy_attempts = 0;
+        let output = loop {
+            match command.output() {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && busy_attempts < 4 =>
+                {
+                    busy_attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result.unwrap(),
+            }
+        };
+        assert!(
+            output.status.success(),
+            "prefix resolver subprocess failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    }
+
+    #[test]
     fn hook_source_candidates_include_native_package_dir() {
         let candidates = hook_source_candidates(
             "claude-code",

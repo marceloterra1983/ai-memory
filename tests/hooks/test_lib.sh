@@ -982,9 +982,24 @@ assert_eq "drain keeps entry queued on 429 saturation" "1" \
     "$(ls "$TMP/spool-data/hook-spool/"*.json 2>/dev/null | wc -l | tr -d ' ')"
 unset -f curl
 
-# Native OIDC entries carry no inline token: only the native drain can resolve
-# auth.json. Script drains must leave them byte-identical and continue with
-# entries they can deliver, even if an anonymous POST would return 200.
+# A 2xx is not a completed receipt: neither explicit nor piggyback script
+# drains may post or remove the worker's existing envelope.
+AI_MEMORY_DATA_DIR="$TMP/worker-owned-spool"
+export AI_MEMORY_DATA_DIR
+ai_memory_spool_event 'http://127.0.0.1:59074/hook?event=stop&workspace=w&project=p&ingest_key=owned' '{"session_id":"synthetic"}'
+WORKER_ENTRY=$(ls "$AI_MEMORY_DATA_DIR/hook-spool/"*.json)
+cp "$WORKER_ENTRY" "$AI_MEMORY_DATA_DIR/expected.json"
+WORKER_DRAIN_LOG="$AI_MEMORY_DATA_DIR/posts"
+: >"$WORKER_DRAIN_LOG"
+curl() { cat >/dev/null; printf 'post\n' >>"$WORKER_DRAIN_LOG"; printf '204'; }
+ai_memory_drain_spool 64
+ai_memory_kick_drain
+assert_eq "worker owns script backlog bytes" yes "$(cmp -s "$WORKER_ENTRY" "$AI_MEMORY_DATA_DIR/expected.json" && printf yes || printf no)"
+assert_eq "script drain sends no receipt-free POST" "0" "$(wc -l <"$WORKER_DRAIN_LOG" | tr -d ' ')"
+unset -f curl
+
+# OIDC, static, anonymous and legacy entries all remain owned by the worker
+# or native drainer, even if a receipt-free request would return 200.
 for OIDC_STATUS in 200 401; do
     AI_MEMORY_DATA_DIR="$TMP/oidc-drain-$OIDC_STATUS"
     export AI_MEMORY_DATA_DIR
@@ -1021,10 +1036,10 @@ for OIDC_STATUS in 200 401; do
     assert_eq "OIDC drain ($OIDC_STATUS): native entry is never posted" 0 \
         "$(grep -c 'event=oidc$' "$OIDC_LOG" || true)"
     for OIDC_CONTROL in static none legacy; do
-        assert_eq "OIDC drain ($OIDC_STATUS): $OIDC_CONTROL control delivers" 1 \
+        assert_eq "OIDC drain ($OIDC_STATUS): $OIDC_CONTROL control stays queued" 0 \
             "$(grep -Ec "event=$OIDC_CONTROL(&|\$)" "$OIDC_LOG" || true)"
     done
-    assert_eq "OIDC drain ($OIDC_STATUS): only the native entry stays queued" 1 \
+    assert_eq "OIDC drain ($OIDC_STATUS): all entries stay queued" 4 \
         "$(find "$OIDC_DIR" -name '*.json' | wc -l | tr -d ' ')"
     unset -f curl
 done
@@ -1048,12 +1063,18 @@ PS_SPOOL_STATIC=$(grep -q 'function Write-AiMemorySpoolEvent' "$PS_LIB" \
     && grep -Fq 'Write-AiMemorySpoolEvent -Url' "$PS_LIB" \
     && grep -Fq 'Invoke-AiMemoryKickDrain' "$PS_LIB" \
     && grep -Fq 'if ($Status -lt 400 -or $Status -ge 500 -or $Status -eq 408 -or $Status -eq 425 -or $Status -eq 429) {' "$PS_LIB" \
-    && grep -Fq 'if ($code -eq 408 -or $code -eq 425 -or $code -eq 429) {' "$PS_LIB" \
     && grep -Fq -- '--ai-memory-drain-spool' "$PS_LIB" \
     && grep -Fq '$script:AiMemoryLibFile = $PSCommandPath' "$PS_LIB" \
-    && grep -Fq 'RedirectStandardOutput' "$PS_LIB" \
     && printf ok || printf bad)
 assert_eq "powershell bundle spools undelivered events (static)" "ok" "$PS_SPOOL_STATIC"
+PS_DRAIN_STATIC=$(sed -n '/^function Invoke-AiMemoryDrainSpool {/,/^function Get-AiMemorySessionIdPath/p' "$PS_LIB")
+assert_eq "powershell drain cannot delete or POST an envelope (static)" no "$(printf '%s' "$PS_DRAIN_STATIC" | grep -Eq 'Remove-Item|Invoke-WebRequest|Process.*Start' && printf yes || printf no)"
+if python3 "$(dirname "$0")/test_spool_worker.py" >"$TMP/worker-compat.log" 2>&1; then
+    assert_eq "script envelopes are accepted by the unchanged receipt worker" yes yes
+else
+    cat "$TMP/worker-compat.log"
+    assert_eq "script envelopes are accepted by the unchanged receipt worker" yes no
+fi
 # The ingest key must ride the initial POST too, or an ambiguous delivery
 # and its spooled replay could double-ingest (the reason the shell bundle
 # mints `ai_memory_ingest_key` before the first POST).
@@ -1074,8 +1095,7 @@ fi
 # session's capture events announces itself with AI_MEMORY_CAPTURE_OWNER.
 # The bundle must then stop PRODUCING events (no POST, no spool entry, no
 # piggyback drain) while still DELIVERING: the synchronous handoff GET keeps
-# working, a backlog already on disk stays put, and an explicit drain still
-# ships it. Every case below runs the real `ai_memory_post_hook` /
+# working and persisted backlog stays owned by the receipt worker. Every case below runs the real `ai_memory_post_hook` /
 # `ai_memory_get_handoff` / `ai_memory_drain_spool` path with curl stubbed,
 # so what is asserted is what the shipped functions do.
 
@@ -1167,16 +1187,15 @@ printf '%s' '{"e":"blank"}' \
     | ai_memory_post_hook "http://127.0.0.1:49374/hook?event=post-tool-use&agent=cursor" >/dev/null 2>&1
 assert_eq "whitespace owner: post_hook POSTs" "1" "$(owner_posts)"
 
-# 5. An EXPLICIT drain is delivery, not production: it must still ship a
-#    queued event while the owner is set, and retire it on a 2xx.
+# 5. An explicit script drain also preserves persisted backlog for the worker.
 unset AI_MEMORY_CAPTURE_OWNER
 owner_case drain
 ai_memory_spool_event "http://127.0.0.1:49374/hook?event=stop&agent=cursor" '{"e":"pending"}'
 AI_MEMORY_CAPTURE_OWNER="external-runner"
 export AI_MEMORY_CAPTURE_OWNER
 ai_memory_drain_spool 64 >/dev/null 2>&1
-assert_eq "owner: explicit drain still delivers the backlog" "1" "$(owner_posts)"
-assert_eq "owner: delivered entry is retired"                "0" "$(owner_spooled)"
+assert_eq "owner: explicit script drain leaves delivery to worker" "0" "$(owner_posts)"
+assert_eq "owner: queued entry stays for receipt worker"       "1" "$(owner_spooled)"
 
 unset -f curl
 unset AI_MEMORY_CAPTURE_OWNER
@@ -1687,7 +1706,7 @@ unset AI_MEMORY_AUTH_TOKEN
 ai_memory_drain_spool 64 >/dev/null 2>&1       # drain with the spooled token
 unset -f curl
 assert_eq "client marker: every curl branch was exercised" "yes" \
-    "$([ "$(awk 'END { print NR + 0 }' "$MARKER_LOG")" -ge 8 ] && printf 'yes' || printf 'no')"
+    "$([ "$(awk 'END { print NR + 0 }' "$MARKER_LOG")" -ge 6 ] && printf 'yes' || printf 'no')"
 assert_eq "client marker: no request went out without it" "0" \
     "$(grep -c UNMARKED "$MARKER_LOG")"
 unset AI_MEMORY_DATA_DIR
@@ -1740,7 +1759,7 @@ unset AI_MEMORY_AUTH_TOKEN
 ai_memory_drain_spool 64 >/dev/null 2>&1       # drain with the spooled token
 unset -f curl
 assert_eq "no proxy: every curl branch was exercised" "yes" \
-    "$([ "$(awk 'END { print NR + 0 }' "$NOPROXY_LOG")" -ge 8 ] && printf 'yes' || printf 'no')"
+    "$([ "$(awk 'END { print NR + 0 }' "$NOPROXY_LOG")" -ge 6 ] && printf 'yes' || printf 'no')"
 assert_eq "no proxy: no request could reach an environment proxy" "0" \
     "$(grep -c PROXYABLE "$NOPROXY_LOG")"
 unset AI_MEMORY_DATA_DIR
@@ -1754,11 +1773,11 @@ PS_REQUESTS=$(grep -Ec '^[^#]*Invoke-WebRequest( @NoProxy)? `$' "$PS_HELPER")
 PS_REQUESTS_WITH_HEADERS=$(grep -E -A6 '^[^#]*Invoke-WebRequest( @NoProxy)? `$' "$PS_HELPER" | grep -Ec -- '-Headers \$[Hh]eaders')
 PS_REQUESTS_NO_PROXY=$(grep -Ec '^[^#]*Invoke-WebRequest @NoProxy `$' "$PS_HELPER")
 assert_eq "powershell: header tables found" "yes" \
-    "$([ "$PS_HEADER_TABLES" -ge 2 ] && printf 'yes' || printf 'no (%s)' "$PS_HEADER_TABLES")"
+    "$([ "$PS_HEADER_TABLES" -ge 1 ] && printf 'yes' || printf 'no (%s)' "$PS_HEADER_TABLES")"
 assert_eq "powershell: every header table carries the client marker" "$PS_HEADER_TABLES" "$PS_MARKED_TABLES"
 assert_eq "powershell: every request passes the header table" "$PS_REQUESTS" "$PS_REQUESTS_WITH_HEADERS"
 assert_eq "powershell: every request call site found" "yes" \
-    "$([ "$PS_REQUESTS" -ge 3 ] && [ "$PS_REQUESTS" -eq "$(grep -Ec '^[^#]*Invoke-WebRequest' "$PS_HELPER")" ] && printf 'yes' || printf 'no (%s)' "$PS_REQUESTS")"
+    "$([ "$PS_REQUESTS" -ge 2 ] && [ "$PS_REQUESTS" -eq "$(grep -Ec '^[^#]*Invoke-WebRequest' "$PS_HELPER")" ] && printf 'yes' || printf 'no (%s)' "$PS_REQUESTS")"
 # PowerShell 7 reads HTTP_PROXY/HTTPS_PROXY/ALL_PROXY for Invoke-WebRequest;
 # `Get-AiMemoryNoProxy` supplies -NoProxy there, like the curl branches above.
 assert_eq "powershell: every request skips environment proxies" "$PS_REQUESTS" "$PS_REQUESTS_NO_PROXY"

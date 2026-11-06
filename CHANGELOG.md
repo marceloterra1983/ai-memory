@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Left persisted shell and PowerShell hook envelopes to the receipt worker or native lock-aware drain, matching generated TypeScript ownership (`C3`, cross-review of `d009b152`).
+
 - Removed the disabled generated TypeScript spool drain and ran its seeded-envelope and tool-label runtime guards in CI (`C2`, cross-review of `d009b152`).
 
 - Bounded page file locks to 1024 shared slots, retaining legacy lock files without acquiring or deleting them (`C1`, cross-review of `143ad28a`).

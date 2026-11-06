@@ -1205,10 +1205,8 @@ ai_memory_json_string() {
 # TypeScript integrations gained this in #580; the script bundle is the
 # remaining capture path that POSTs and forgets.
 #
-# The backlog is drained at session boundaries and, after any successful
-# 2xx POST, by the detached piggyback drain in ai_memory_kick_drain —
-# never synchronously on the per-tool-call hot path, which must not block
-# the agent.
+# The receipt worker owns delivery and archival of persisted envelopes.
+# Without it, entries remain for the native lock/receipt-aware hook-drain.
 
 ai_memory_spool_dir() {
     printf '%s/hook-spool' "$(ai_memory_state_dir)"
@@ -1329,60 +1327,13 @@ ai_memory_json_field() {
     ' "$2"
 }
 
-# Deliver the queued backlog, oldest first. Bounded by count so a drain never
-# becomes an unbounded upload. A 2xx or terminal 4xx retires the entry (delivered,
-# or permanently rejected); transient 408/425/429 or anything else stops the pass
-# and keeps the remainder for the next one. The bearer goes through a 0600 header file
-# rather than curl's argv, for the reason #552 moved it off the command line.
+# Persisted envelopes belong to the receipt worker. HTTP success alone does
+# not prove completed_at or durable archival. Keep these entry points for old
+# installed scripts, but never POST, delete or detach a receipt-free drain.
 ai_memory_drain_spool() {
-    _amdmax=${1:-64}
-    _amddir=$(ai_memory_spool_dir)
-    [ -d "$_amddir" ] || return 0
-    _amdn=0
-    for _amdf in "$_amddir"/*.json; do
-        [ -f "$_amdf" ] || break
-        [ "$_amdn" -lt "$_amdmax" ] || break
-        _amdn=$((_amdn + 1))
-        # OIDC entries have no inline bearer. Leave them for the native drain,
-        # which can resolve/refresh auth.json, rather than POSTing anonymously.
-        _amdmode=$(ai_memory_json_field auth_mode "$_amdf" 2>/dev/null) || _amdmode=''
-        [ "$_amdmode" = oidc ] && continue
-        _amdurl=$(ai_memory_json_field url "$_amdf" 2>/dev/null) || continue
-        [ -n "$_amdurl" ] || continue
-        _amdbody=$(ai_memory_json_field body "$_amdf" 2>/dev/null) || continue
-        _amdtok=$(ai_memory_json_field token "$_amdf" 2>/dev/null) || _amdtok=''
-        if [ -n "$_amdtok" ]; then
-            _amdhdr="$_amddir/.drain-header.$$"
-            (umask 077; printf 'Authorization: Bearer %s\n' "$_amdtok" >"$_amdhdr") 2>/dev/null || continue
-            _amdcode=$(printf '%s' "$_amdbody" | curl -s --noproxy '*' --max-time 2.0 -H "X-AI-Memory-Client: hook-sh" -o /dev/null \
-                -w '%{http_code}' -X POST "$_amdurl" \
-                -H "Content-Type: application/json" -H @"$_amdhdr" \
-                --data-binary @- 2>/dev/null) || _amdcode=000
-            rm -f "$_amdhdr" 2>/dev/null || true
-        else
-            _amdcode=$(printf '%s' "$_amdbody" | curl -s --noproxy '*' --max-time 2.0 -H "X-AI-Memory-Client: hook-sh" -o /dev/null \
-                -w '%{http_code}' -X POST "$_amdurl" \
-                -H "Content-Type: application/json" \
-                --data-binary @- 2>/dev/null) || _amdcode=000
-        fi
-        case "$_amdcode" in
-            408|425|429) return 0 ;;
-            2*|4*) rm -f "$_amdf" 2>/dev/null || true ;;
-            *) return 0 ;;
-        esac
-    done
     return 0
 }
 
-# Piggyback drain: a delivery that just succeeded proves the server is
-# reachable, so flush the backlog behind it. Detached from the hook's own
-# process so the agent never waits, and a no-op when nothing is queued —
-# which is every call on a healthy install.
 ai_memory_kick_drain() {
-    _amkdir=$(ai_memory_spool_dir)
-    [ -d "$_amkdir" ] || return 0
-    set -- "$_amkdir"/*.json
-    [ -f "$1" ] || return 0
-    (ai_memory_drain_spool 64 >/dev/null 2>&1 &) 2>/dev/null || true
     return 0
 }

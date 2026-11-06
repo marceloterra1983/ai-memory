@@ -66,8 +66,8 @@ Remove-Item -Recurse -Force (Join-Path $root "data")
 Invoke-AiMemoryDrainSpool -Max 8
 
 # 7. Native OIDC entries require auth.json resolution. Even a server accepting
-#    an anonymous request must not receive them from the script drain; eligible
-#    entries behind them still deliver. A body mentioning auth_mode is data.
+#    an anonymous request must not receive them from the script drain; all
+#    entries behind them stay queued for the receipt worker. A body mentioning auth_mode is data.
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $oidcPath = Join-Path $dir "0000000000000-1-0000000000000000.json"
 $oidcJson = [ordered]@{
@@ -96,16 +96,22 @@ function Invoke-WebRequest {
         [string] $ContentType, $Body)
     $script:OidcRequests.Add([pscustomobject]@{ Url = $Uri; Authorization = $Headers["Authorization"] })
 }
+$beforeDrain = @{}
+Get-ChildItem -LiteralPath $dir -Filter "*.json" -File | ForEach-Object { $beforeDrain[$_.FullName] = [IO.File]::ReadAllText($_.FullName) }
 Invoke-AiMemoryDrainSpool -Max 8
+Invoke-AiMemoryKickDrain
+foreach ($path in $beforeDrain.Keys) {
+    Assert-True ((Test-Path $path) -and [IO.File]::ReadAllText($path) -ceq $beforeDrain[$path]) "worker envelope stays byte-identical"
+}
 Assert-True ((Test-Path $oidcPath) -and [IO.File]::ReadAllText($oidcPath) -ceq $oidcJson) "OIDC entry stays untouched"
 Assert-True (@($script:OidcRequests | Where-Object { $_.Url -match 'event=oidc$' }).Count -eq 0) "OIDC entry is never posted"
-Assert-True (@($script:OidcRequests | Where-Object { $_.Url -match 'event=static$' -and $_.Authorization -ceq 'Bearer probe-bearer' }).Count -eq 1) "static control delivers with its bearer"
+Assert-True (@($script:OidcRequests | Where-Object { $_.Url -match 'event=static$' -and $_.Authorization -ceq 'Bearer probe-bearer' }).Count -eq 0) "static entry is not posted by script drain"
 foreach ($control in @("none", "legacy")) {
-    Assert-True (@($script:OidcRequests | Where-Object { $_.Url -match "event=$control`$" -and -not $_.Authorization }).Count -eq 1) "$control control delivers without a bearer"
+    Assert-True (@($script:OidcRequests | Where-Object { $_.Url -match "event=$control`$" -and -not $_.Authorization }).Count -eq 0) "$control entry is not posted by script drain"
 }
-Assert-True ($script:OidcRequests.Count -eq 3) "only eligible entries are posted"
+Assert-True ($script:OidcRequests.Count -eq 0) "receipt-free drain posts no envelopes"
 $kept = @(Get-ChildItem -LiteralPath $dir -Filter "*.json" -File)
-Assert-True ($kept.Count -eq 1 -and $kept[0].FullName -eq $oidcPath) "only the OIDC entry stays queued"
+Assert-True ($kept.Count -eq 4) "all entries stay queued"
 
 # 8. Every request splats MaximumRedirection 0, matching the native hook.
 $splat = Get-AiMemoryNoProxy

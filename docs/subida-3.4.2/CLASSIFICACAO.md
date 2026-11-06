@@ -815,3 +815,13 @@ resultado: as alterações preexistentes de outra frente foram preservadas e
 `main-after.json` no mesmo diretório de evidências. Não houve migração, alteração
 do relay, uso de dados/serviço/portas protegidos nem push; `80dd19cd` permanece
 excluído. O relato final nativo é a autoridade do veredito.
+
+
+## Fase C — correções da revisão cruzada
+
+As revisões a3 e b foram lidas integralmente como evidência e comparadas aos
+objetos do fork; a base desta fase é `c0daec8d`. Não há alteração de schema.
+
+| Item / origem | Decisão e contrato reconciliado | Prova desta corrida |
+|---|---|---|
+| F1 / `3a4a8d79` | Reconcile no consolidator conserva summary e falhas antigas, mas limita o UPDATE à menor geração `running`; gerações posteriores continuam pendentes. Sem lease ativo, o reconcile manual mantém o contrato anterior. Invariante #16: nenhum lease é consumido ou invalidado e todas as escritas continuam no ator único. | `automatic_reconcile_preserves_newer_pending_generation`: A running, B pending, consolida A, completa A, claim B e segunda inferência. Sem o limite SQL: falha runtime; com ele: passa. Controles existentes preservam failed antiga e lease ativo. |

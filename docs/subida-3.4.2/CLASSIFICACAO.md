@@ -910,3 +910,53 @@ e portas protegidos. target-host foi apenas ignorado, sem remoção.
 
 O orquestrador pode executar a suíte CLI de integração no host e seguir para
 a próxima revisão cruzada. Nenhum item solicitado desta corrida ficou pendente.
+
+## Fase D — checkout primário e reparo de startup
+
+Base: `fd089e10`. A prioridade B1 agora usa o checkout mais próximo do
+executável, identificado pelos mesmos marcadores de `install_layout`
+(`Cargo.toml` com `[workspace]` e `hooks/claude-code/`). O nome do diretório
+de build não participa da decisão. `repo_root_from_dir` já fazia essa busca;
+o único teste de produção com `target` literal no `4b97ced0` estava em
+`hook_source_candidates` e passou a reutilizar esse helper.
+
+| Achado | Commit | Teste | Log negativo em `target/evidence-d/` |
+|---|---|---|---|
+| B1 / `4b97ced0`: bundle no data dir ganhava do checkout com target customizado | `412c00c7` | `checkout_hooks_precede_installed_bundle_with_custom_target_dirs`: `target-host/debug`, `target-x/release` e `build/debug`, com bundle instalado presente | `D1-targets-without.log`: escolheu data dir em vez do checkout |
+| Checkout aninhado: cwd principal não pode tomar a prioridade da worktree do executável | `412c00c7` | `nested_executable_checkout_precedes_the_main_cwd_and_installed_bundle`: exe em `.worktrees/x/target-host/release`, cwd principal | `D1-nested-without.log`: worktree não ficou primária |
+| Guarda contra uma correção ampla demais por prefixo | `412c00c7` | O mesmo teste passa uma raiz externa à worktree; ela permanece depois do bundle instalado | `D1-outer-guard-without.log`: mutação para `starts_with(root)` escolheu `<main>/hooks`; restaurado byte a byte |
+| Nota: reparo date-only gravava sem o pool compartilhado | `c556b26a` | `startup_repair_waits_for_an_independent_wikis_pool_slot`: outra Wiki segura o slot, arquivo fica intacto; após soltar, reparo termina | `D2-repair-without.log`: reparo terminou enquanto o slot estava preso |
+
+Os quatro negativos falharam em runtime: 0 passed, 1 failed, exit 101 cada.
+Os fontes corrigidos voltaram a passar. `negative-summary.json` guarda os
+comandos e hashes dos logs; `mutation-restoration.json` comprova a restauração
+da mutação por prefixo. B1 original passou sem alteração, junto do novo
+controle de binários runtime, `.local/bin` e `usr/bin` fora do checkout.
+As seis fixtures de `install_layout` e o controle existente de lock entre
+Wikis também passaram. Foram 13 testes focados distintos.
+
+A nota coube em 6 linhas de produção: `mutation_lock` → lock da página em
+memória → slot `pool-v1-*`, antes de ler, interpretar e gravar cada arquivo.
+Pelo invariante #16, a chave continua sendo `(workspace, project, path)`;
+Wikis independentes compartilham o slot sem filtrar páginas por operador.
+O reparo SQL permanece no ator único e não cria versões nem migração.
+
+Validação final com Rust/Cargo 1.95.0, `TMPDIR=/tmp/x.reIfdd`, HOME/XDG
+sintéticos e `CARGO_TARGET_DIR=target-host`:
+
+| Comando | passed | failed | ignored |
+|---|---:|---:|---:|
+| `cargo test --locked -p ai-memory-cli --lib` | 2364 | 0 | 3 |
+| `cargo test --locked -p ai-memory-wiki` | 412 | 0 | 1 |
+
+Total: 2776 passed, 0 failed, 4 ignorados preexistentes (três controles Node
+da CLI e uma medição manual da Wiki). Não foi executada a suíte CLI
+`--test suite` nem o workspace completo. Logs finais: `final-package-cli.log`
+e `final-package-wiki.log`. Passaram também clippy dos dois pacotes com
+`--all-targets -- -D warnings`, fmt, diff-check e os checks de
+seções/congelamento do changelog. A primeira tentativa de fmt pediu somente
+a quebra de um assert novo; seu log foi preservado e a validação foi repetida
+após formatar.
+
+Sem mudanças em migrações, testes antigos, serviço ou dados reais. Sem push.
+O relato final nativo é a autoridade do veredito.

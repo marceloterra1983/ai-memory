@@ -960,3 +960,81 @@ após formatar.
 
 Sem mudanças em migrações, testes antigos, serviço ou dados reais. Sem push.
 O relato final nativo é a autoridade do veredito.
+
+## Notas N1 e N4 da revisão rev-porte-342-d
+
+### N1 — decisão sobre tarball dentro de checkout
+
+Mantida a regra de `57de758f`: em `install-hooks`, checkout primário é o
+ancestral mais próximo do executável resolvido que contém `Cargo.toml` com
+`[workspace]` e `hooks/claude-code/`. A busca não verifica onde o binário foi
+compilado nem exige um diretório de build. Um tarball extraído em
+`<checkout>/releases/<versão>/`, sem esses marcadores próprios, herda o
+checkout ancestral. Nesse caso, os hooks vêm de `<checkout>/hooks/<sub>`
+antes do bundle `<checkout>/releases/<versão>/hooks/<sub>` que acompanha o
+binário. Uma worktree aninhada com os marcadores assume essa prioridade no
+lugar do checkout externo.
+
+Aceitamos esse alcance porque a origem dos hooks no fluxo de desenvolvimento
+é o checkout que contém o executável, inclusive com `CARGO_TARGET_DIR`
+customizado. A contrapartida é explícita: colocar um binário de release
+dentro de um checkout pode misturar versões de binário e hooks. A detecção
+por caminho e marcadores não comprova a origem nem a versão do binário.
+Para usar os hooks do tarball nesse cenário, há `--hooks-dir
+<checkout>/releases/<versão>/hooks`; extrair o tarball fora do checkout também
+evita essa prioridade. Um checkout encontrado somente pelo cwd ou manifesto
+continua depois dos bundles instalados. Esta decisão descreve
+`install_layout.rs::repo_root_from_dir` e
+`install_hooks.rs::hook_source_candidates`; não altera produção.
+
+### N4 — precedência do prefixo com hooks em share
+
+Os novos testes `prefix_share_hooks_precede_system_paths_and_cwd_checkout`
+de `install_hooks` e `setup_agent` copiam o harness para
+`<temporário>/prefix/bin/ai-memory` e o reexecutam com cwd em outro checkout
+temporário. Há `session-start.sh` com conteúdos distintos em
+`prefix/share/ai-memory/hooks/claude-code/` e `checkout/hooks/claude-code/`;
+`install_hooks` também tem um bundle concorrente no data dir temporário.
+Os testes chamam `resolve_hooks_dir(None, ...)` e
+`resolve_source(None, ...)`, sem override de fonte, e verificam o diretório
+escolhido e o conteúdo lido. Também exigem que os geradores de candidatos
+usados por esses resolvedores coloquem o prefixo antes dos caminhos fixos
+`/usr/local/share/ai-memory/hooks/claude-code` e
+`/usr/share/ai-memory/hooks/claude-code`. Esses dois caminhos não recebem
+fixtures nem escritas no host. O checkout desta fixture é descoberto pelo
+cwd; a prioridade do checkout ancestral do executável continua sendo N1.
+O lançamento do harness admite repetição limitada somente para
+`ExecutableFileBusy`, que apareceu sob carga paralela no gate completo.
+Um subprocesso que retorna falha de teste encerra o controle sem repetição.
+
+Controles negativos moveram temporariamente o bloco do prefixo nos dois
+geradores de produção. Depois dos caminhos de sistema, ambos os testes
+falharam na ordem de `/usr/local/share`; depois de todos os fallbacks,
+`install_hooks` escolheu o bundle do data dir e `setup_agent` o do checkout.
+Cada execução negativa terminou em `0 passed; 2 failed`, exit 101. Os dois
+fontes foram restaurados byte a byte após cada controle. A execução inicial
+e a posterior à restauração terminaram em `2 passed; 0 failed`, exit 0.
+
+Evidência local em `target-host/evidence-n1n4/`: `prefix-pass-before.log`,
+`negative-system.log`, `negative-checkout.log`, `prefix-pass-after.log`,
+patches das mutações, `restoration-*.json` e metadados com SHA256 dos fontes
+e logs. Com Rust/Cargo 1.95.0, `CARGO_TARGET_DIR=target-host`,
+`--locked --offline`, HOME/XDG/TMPDIR e configuração Git temporários,
+os módulos completos passaram: `commands::install_hooks::`, 257 testes;
+`commands::setup_agent::`, 16 testes; nenhum falhou ou foi ignorado.
+
+Os primeiros ensaios do gate amplo estão preservados em `attempt1/`.
+O runner inicialmente herdava `CODEX_HOME`, fazendo duas fixtures de backfill
+procurarem transcripts fora do home temporário; remover essa variável do
+runner fez os sete controles focados de backfill passarem. O ensaio seguinte
+expôs `ExecutableFileBusy` no harness copiado e motivou a repetição limitada
+descrita acima, restrita aos testes novos. Os controles negativos foram
+refeitos depois desse ajuste.
+
+Passaram também fmt, diff-check, clippy do workspace com `--all-targets
+-- -D warnings`, cargo-deny offline e
+`cargo test --workspace --all-targets --locked --offline` (exit 0).
+`final-summary.json` reúne as saídas e hashes finais; `source-boundary.log`
+confirma que, retirados apenas os dois testes novos em `#[cfg(test)]`, os
+fontes ficam idênticos a `57de758f`. Nenhuma instalação, operação de serviço
+ou push foi executado.

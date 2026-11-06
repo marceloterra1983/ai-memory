@@ -1085,6 +1085,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prefix_share_hooks_precede_system_paths_and_cwd_checkout() {
+        let exe = std::env::current_exe().unwrap();
+        let binary_name = crate::install_layout::shipped_binary_name();
+        // resolve_source must discover the prefix from the running binary.
+        if exe.file_name().unwrap() == binary_name {
+            let prefix = exe.parent().unwrap().parent().unwrap();
+            let source = prefix.join("share/ai-memory/hooks/claude-code");
+            let checkout = std::env::current_dir().unwrap();
+            assert_eq!(
+                crate::install_layout::repo_root_guess(Some(&exe), Some(&checkout)),
+                Some(checkout.clone())
+            );
+            let resolved = resolve_source(None, "claude-code").unwrap();
+            assert_eq!(resolved, source);
+            assert_eq!(
+                fs::read_to_string(resolved.join("session-start.sh")).unwrap(),
+                "# prefix bundle\n"
+            );
+
+            // Keep the fixed /usr paths read-only while checking their rank
+            // in the builder that resolve_source actually calls.
+            let candidates = source_candidates(None, "claude-code", Some(exe));
+            let position = |path: &Path| candidates.iter().position(|p| p == path).unwrap();
+            for rival in [
+                PathBuf::from("/usr/local/share/ai-memory/hooks/claude-code"),
+                PathBuf::from("/usr/share/ai-memory/hooks/claude-code"),
+                checkout.join("hooks/claude-code"),
+            ] {
+                assert!(
+                    position(&source) < position(&rival),
+                    "prefix must precede {}: {candidates:?}",
+                    rival.display()
+                );
+            }
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().join("prefix");
+        let checkout = tmp.path().join("checkout");
+        for (bundle, content) in [
+            (
+                prefix.join("share/ai-memory/hooks/claude-code"),
+                "# prefix bundle\n",
+            ),
+            (checkout.join("hooks/claude-code"), "# checkout bundle\n"),
+        ] {
+            fs::create_dir_all(&bundle).unwrap();
+            fs::write(bundle.join("session-start.sh"), content).unwrap();
+        }
+        fs::write(checkout.join("Cargo.toml"), "[workspace]\nmembers=[]\n").unwrap();
+        let installed = prefix.join("bin").join(binary_name);
+        fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        fs::copy(exe, &installed).unwrap();
+        let mut command = std::process::Command::new(installed);
+        command
+            .args([
+                "--exact",
+                concat!(
+                    module_path!(),
+                    "::prefix_share_hooks_precede_system_paths_and_cwd_checkout"
+                )
+                .split_once("::")
+                .unwrap()
+                .1,
+                "--nocapture",
+            ])
+            .current_dir(checkout);
+        // Like the version probe, allow a freshly copied executable to stop
+        // being busy under parallel load. Assertion failures are never retried.
+        let mut busy_attempts = 0;
+        let output = loop {
+            match command.output() {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && busy_attempts < 4 =>
+                {
+                    busy_attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result.unwrap(),
+            }
+        };
+        assert!(
+            output.status.success(),
+            "prefix resolver subprocess failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    }
+
     /// Nix ships hook sources 0444 and `fs::copy` keeps that mode, so a
     /// second `setup-agent` used to fail copying onto its own staged copy.
     #[cfg(unix)]

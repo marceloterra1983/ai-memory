@@ -159,7 +159,9 @@ so any later rewrite of an affected page (a restore, a hand edit, a
   `stale_after` that equals its date-only `expires_at` to the instant the
   TTL names (`2026-10-01` → `2026-10-01T23:59:59.999999Z`); a
   `stale_after` that differs from `expires_at` was not derived by
-  ai-memory and is left alone.
+  ai-memory and is left alone. File repairs acquire the mutation lock,
+  in-memory page lock and shared `pool-v1-*` slot in that order, so an
+  independent wiki writer finishes before the repair reads the page.
 
 ## Reconcile-delete safety net (opt-in, #929)
 

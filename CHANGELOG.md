@@ -12,6 +12,7 @@ version in [`docs/changelog/`](docs/changelog/):
 ## [Unreleased]
 
 ### Fixed
+- Markdown links that used a network-path URL (`//…`, `\\…`) or any backslash now rewrite to `#`, matching the image sanitiser. The previous `/` allowlist treated `//host` as a same-origin path.
 
 - Kept the executable's nearest checkout hook bundle primary with custom build directories such as `target-host/` and `build/`, including nested worktrees (`D1`, cross-review of `4b97ced0`).
 

@@ -705,10 +705,11 @@ gated by an R2 recall no-regression proof. The shared
 runs resolve only the exact `(workspace, project)` pairs in `[dream].scopes`,
 without creating missing scopes. `enabled = false` stops scheduling; explicit
 `ai-memory dream --workspace <name> --project <name>` planning and `--apply`
-remain available. The default plan performs no inference or writes. Apply
-requires the dedicated local clients configured by
-`dream.llm_endpoint`, `dream.llm_model` and `dream.jev_model`; it never inherits
-the main LLM's credentials or fallback chain.
+remain available. The default plan performs no inference or writes. With no
+`dream.llm_endpoint`, `dream.llm_model` or `dream.jev_model`, apply concatenates
+the two cold bodies and calls no chat model. A cold body over 6000 bytes is
+skipped. The model path still requires those three dedicated local clients
+together; it never inherits the main LLM's credentials or fallback chain.
 
 The local semantic gate checks whether complete source bodies concern the same
 subject. A JSON-schema draft must then copy both complete bodies verbatim, with

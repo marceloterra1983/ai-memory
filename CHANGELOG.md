@@ -11,6 +11,10 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+### Added
+
+- Merged one cold episodic pair by concatenating both bodies when dream has no `llm_endpoint`, `llm_model` or `jev_model`. The title is copied from a source body. A cold body over 6000 bytes is skipped instead of refusing the scope. The two-model path is unchanged, and scheduling stays off by default. (2026-11-12)
+
 ### Fixed
 - Markdown links that used a network-path URL (`//…`, `\\…`) or any backslash now rewrite to `#`, matching the image sanitiser. The previous `/` allowlist treated `//host` as a same-origin path.
 

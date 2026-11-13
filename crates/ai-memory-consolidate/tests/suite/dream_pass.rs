@@ -602,6 +602,60 @@ async fn no_provider_is_a_clean_no_op() {
     assert_eq!(superseded_row_count(&fx), before, "no writes");
 }
 
+/// Decision 12/11/2026: no provider and no semantic gate copies both bodies.
+/// A cold body over 6000 bytes is left untouched and does not fail the scope.
+#[tokio::test]
+async fn literal_merge_copies_both_bodies_and_skips_oversized() {
+    let fx = seed_fixture(true).await;
+    write(&fx, "sessions/a.md", DUP_A).await;
+    write(&fx, "sessions/b.md", DUP_B).await;
+    let big = "x".repeat(6001);
+    write(&fx, "sessions/big.md", &big).await;
+    for path in ["sessions/a.md", "sessions/b.md", "sessions/big.md"] {
+        backdate_latest(&fx, path, COLD_DAYS);
+    }
+    let mut cfg = dream_on();
+    cfg.semantic_gate = None;
+    let report = run_dream_pass(
+        &fx.store.reader,
+        &fx.wiki,
+        None,
+        fx.ws,
+        fx.proj,
+        &DecayParams::default(),
+        0.0,
+        &cfg,
+        &DreamCancel::new(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert!(!report.disabled, "{report:?}");
+    assert_eq!(report.inference_requests, 0);
+    assert_eq!(report.semantic_questions, 0);
+    assert_eq!(report.clusters_merged, 1, "{report:?}");
+    assert_eq!(report.merges.len(), 1, "{report:?}");
+    let merge = &report.merges[0];
+    assert!(merge.applied, "{merge:?}");
+    let body = latest_body(&fx, &merge.survivor);
+    let expected = format!("{DUP_A}\n\n{DUP_B}");
+    let swapped = format!("{DUP_B}\n\n{DUP_A}");
+    assert!(
+        body == expected || body == swapped,
+        "survivor {} body was not the literal pair: {body:?}",
+        merge.survivor
+    );
+    assert!(body.contains("ops.rs") && body.contains("reader.rs"));
+    let loser = &merge.merged[0];
+    let loser_body = latest_body(&fx, loser);
+    assert!(
+        loser_body.contains("merged into") && loser_body.contains(&merge.survivor),
+        "loser {loser} body: {loser_body:?}"
+    );
+    assert_eq!(latest_body(&fx, "sessions/big.md"), big);
+}
+
 /// B3: the default config is OFF, so the pass never runs even with a provider.
 #[tokio::test]
 async fn default_off_never_runs() {
@@ -727,7 +781,14 @@ async fn oversized_member_refuses_inference_without_truncation() {
         "no request may contain a truncated source"
     );
     assert_eq!(superseded_row_count(&fx), 0, "no source may be changed");
-    assert!(result.is_err() || result.unwrap().skipped > 0);
+    let report = result.expect("an oversized cold body is skipped, not a scope error");
+    assert_eq!(report.clusters_merged, 0, "{report:?}");
+    assert_eq!(report.inference_requests, 0, "{report:?}");
+    assert_eq!(latest_body(&fx, "sessions/a.md"), long);
+    assert_eq!(
+        latest_body(&fx, "sessions/b.md"),
+        long.replace("ops.rs", "reader.rs")
+    );
 }
 
 #[tokio::test]

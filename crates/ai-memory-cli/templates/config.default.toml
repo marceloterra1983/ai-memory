@@ -733,7 +733,9 @@ mid_session = "follow-cwd"
 # [dream]
 # Exact scopes select restricted full-document compat embedding even with
 # enabled=false. Manual plans/apply remain available; enabled controls scheduling.
-# Unknown [dream] keys are rejected. Apply requires these dedicated local models:
+# Unknown [dream] keys are rejected. With no llm_endpoint, llm_model or
+# jev_model, apply concatenates the two cold bodies. The model path requires
+# these dedicated local models together:
 # scopes = []
 #   scopes = [{ workspace = "workspace", project = "project" }]
 # enabled = false

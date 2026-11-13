@@ -2018,8 +2018,10 @@ pub use ai_memory_mcp::dream::DreamScope;
 /// `[dream]` — the opt-in LLM dream pass (docs/design-memory-aging.md §B2–B4).
 ///
 /// OFF by default (`enabled = false`): the scheduled job is not started.
-/// Manual plans remain available for exact allowlisted scopes; manual apply
-/// requires dedicated local models. Unknown settings fail closed.
+/// Manual plans remain available for exact allowlisted scopes. Manual apply
+/// with no model is the literal concatenation; the model path requires
+/// `llm_endpoint`, `llm_model` and `jev_model` together. Unknown settings fail
+/// closed.
 ///
 /// Env form: `AI_MEMORY_DREAM__ENABLED=true`,
 /// `AI_MEMORY_DREAM__IDLE_WINDOW_SECS=600`.
@@ -2113,9 +2115,13 @@ impl DreamSettings {
                 );
             }
         }
-        if self.enabled && (self.llm_endpoint.is_none() || self.jev_model.is_none()) {
+        let literal =
+            self.llm_endpoint.is_none() && self.llm_model.is_none() && self.jev_model.is_none();
+        let modeled =
+            self.llm_endpoint.is_some() && self.llm_model.is_some() && self.jev_model.is_some();
+        if self.enabled && !literal && !modeled {
             anyhow::bail!(
-                "dream.enabled requires dedicated local LLM endpoint/model and jev_model"
+                "dream.enabled is literal with no model, or requires llm_endpoint, llm_model and jev_model together"
             );
         }
         if !self.max_eps.is_finite() || !(0.0..=1.0).contains(&self.max_eps) {
@@ -6738,7 +6744,10 @@ input_token_safety_margin = {margin}
             workspace: "fixture".into(),
             project: "app".into(),
         });
-        assert!(settings.validate().is_err());
+        assert!(
+            settings.validate().is_ok(),
+            "enabled with no model is the literal path"
+        );
         settings.llm_endpoint = Some("https://external.invalid/v1".into());
         settings.llm_model = Some("fixture-qwen".into());
         settings.jev_model = Some("fixture-jev".into());

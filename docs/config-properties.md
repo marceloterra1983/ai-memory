@@ -169,8 +169,8 @@ A zero in a numeric key selects the built-in default named in the Default cell.
 
 | Key | Default | Env equivalent | Purpose |
 | --- | --- | --- | --- |
-| `scopes` | `[]` | `AI_MEMORY_DREAM__SCOPES` | Local scope markers; nonempty selects restricted full-document compat embeddings even with dream disabled. Local dream execution is ported separately. |
-| `enabled` | `false` | `AI_MEMORY_DREAM__ENABLED` | Master switch for the LLM pass that rewrites and merges clusters of cold pages. |
+| `scopes` | `[]` | `AI_MEMORY_DREAM__SCOPES` | Exact allowlist. Nonempty selects restricted full-document compat embeddings even with dream disabled. |
+| `enabled` | `false` | `AI_MEMORY_DREAM__ENABLED` | Schedules dream runs. Manual apply with no model concatenates two cold bodies; the model path needs `llm_endpoint`, `llm_model` and `jev_model` together. |
 | `interval_secs` | `3600` | `AI_MEMORY_DREAM__INTERVAL_SECS` | How often the scheduler considers a run. 0 uses 3600. |
 | `idle_window_secs` | `0` (uses 300, `DEFAULT_DREAM_IDLE_WINDOW_SECS`) | `AI_MEMORY_DREAM__IDLE_WINDOW_SECS` | Quiet seconds required before a run starts, and after which returning activity cancels it. |
 | `min_pts` | `0` (uses 2, `DEFAULT_DEDUP_MIN_PTS`) | `AI_MEMORY_DREAM__MIN_PTS` | DBSCAN density floor. |

@@ -1,5 +1,10 @@
 # Local dream
 
+Decision of 12/11/2026: with no `llm_endpoint` and no `jev_model`, apply
+concatenates the two cold bodies literally and does not call a chat model or
+`:8787`. A cold body over 6000 bytes is skipped. `:8789` stays refused. The
+scheduler stays off until a natural cold page exists.
+
 The native dream scheduler and the manual driver share an exact scope
 allowlist, one run at a time, a global cluster allowance and a 300-second round
 deadline. `enabled=false` stops scheduling and still permits manual plans and
@@ -19,9 +24,11 @@ min_cold_pages = 3
 ```
 
 That configuration is valid without local inference settings. Planning needs
-an available local embedder and matching stored vectors. Apply additionally
-requires `llm_endpoint`, `llm_model` and `jev_model`. The draft endpoint must be
-HTTP on literal `127.0.0.1` or `[::1]`, with an explicit port. Jev uses
+an available local embedder and matching stored vectors. Apply with no
+`llm_endpoint`, no `llm_model` and no `jev_model` concatenates the two cold
+bodies and calls neither a chat model nor `:8787`. The model path still
+requires those three together. The draft endpoint must be HTTP on literal
+`127.0.0.1` or `[::1]`, with an explicit port. Jev uses
 `http://127.0.0.1:8787/v1/systemone`; port 8789 is excluded. The dedicated clients
 use no primary-provider credentials, proxies, redirects, retry or fallback.
 Unknown keys in `[dream]` or its scope entries are errors.
@@ -39,8 +46,9 @@ replacement body or inferred scope. A scope outside the allowlist is refused.
 
 Planning performs bounded metadata/vector/file reads without inference or wiki
 writes. A selected cluster contains two episodic, unpinned, uncompacted cold
-pages. The whole scope is refused at a head, vector, candidate, source-byte or
-input-budget ceiling; it is never sampled or truncated. Source expiry instants,
+pages. A cold body over 6000 bytes is skipped and does not refuse the scope.
+The whole scope is still refused at a head, vector, candidate or input-budget
+ceiling; it is never sampled or truncated. Source expiry instants,
 including absence, must match exactly and remain unchanged at apply.
 
 Jev judges only whether the complete sources concern the same subject. Rejected,

@@ -158,10 +158,12 @@ impl DreamRuntime {
         if !self.scopes.contains(&scope) {
             return Err(self.refused(StatusCode::FORBIDDEN, "scope is not in dream.scopes"));
         }
-        if apply && (self.llm.is_none() || self.config.semantic_gate.is_none()) {
+        let literal = self.llm.is_none() && self.config.semantic_gate.is_none();
+        let modeled = self.llm.is_some() && self.config.semantic_gate.is_some();
+        if apply && !literal && !modeled {
             return Err(self.refused(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "local DREAM provider and semantic gate are required for apply",
+                "literal DREAM needs neither provider nor semantic gate; the model path needs both",
             ));
         }
         self.run(&[scope], !apply, false).await

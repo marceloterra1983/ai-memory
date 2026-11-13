@@ -1,10 +1,13 @@
 //! Bounded, local cross-session dream consolidation.
 //!
 //! Planning uses bounded metadata and matching vectors without inference or
-//! writes. Apply requires local nonnumeric relatedness, literal proof of a
-//! structured source-copy draft, and all-source CAS under wiki locks and writer
-//! transaction. Source versions remain reachable through supersession and a
-//! real premerge git checkpoint. No source is promoted out of episodic tier.
+//! writes. Apply is either the model path (local relatedness gate plus a
+//! source-copy draft) or, when both are absent, a deterministic concatenation
+//! of the two complete bodies. A cold body over 6000 bytes is skipped. Either
+//! path still requires literal proof and all-source CAS under wiki locks and
+//! the writer transaction. Source versions remain reachable through
+//! supersession and a real premerge git checkpoint. No source is promoted out
+//! of episodic tier.
 //!
 //! The native scheduler and manual admin driver share a serialized runtime,
 //! exact scope allowlist, global cluster allowance and 300-second deadline.
@@ -345,8 +348,10 @@ struct PlannedCluster {
 }
 
 /// Run one bounded dream pass, with no-create scope resolution supplied by its
-/// driver. Dry-run performs reads only. Apply requires the semantic gate, then
-/// a checkpoint and all-source CAS in the existing wiki/writer path.
+/// driver. Dry-run performs reads only. Apply is the literal concatenation
+/// when the provider and the semantic gate are both absent, or the model path
+/// when both are present. Either path then takes a checkpoint and all-source
+/// CAS in the existing wiki/writer path.
 ///
 /// # Errors
 /// Returns bounded-reader, policy, or safety-limit failures before inference.
@@ -363,7 +368,12 @@ pub async fn run_dream_pass(
     cancel: &DreamCancel,
     dry_run: bool,
 ) -> Result<DreamReport, DreamError> {
-    if !cfg.enabled || cfg.embedding.is_none() || (!dry_run && llm.is_none()) {
+    // A configured gate without a provider stays a disabled no-op. Literal
+    // merge is only the absence of both; it does not call a model or :8787.
+    if !cfg.enabled
+        || cfg.embedding.is_none()
+        || (!dry_run && llm.is_none() && cfg.semantic_gate.is_some())
+    {
         return Ok(DreamReport::disabled("none"));
     }
     let requests_before = network_request_count(llm, cfg);
@@ -426,7 +436,7 @@ pub async fn run_dream_pass(
         }
         if let Some(cold) = cold_entry_for(candidate, &breadth, breadth_weight, params, now_us) {
             if head.body_bytes > DREAM_MAX_MEMBER_BYTES {
-                return Err(DreamError::Limit("source_body_bytes"));
+                continue;
             }
             eligible.insert(cold.id, cold);
             source_heads.insert(candidate.id, head);
@@ -546,7 +556,8 @@ pub async fn run_dream_pass(
             surprisal: cluster_surprisal(&vectors, &existing_vectors),
             sources,
         };
-        if build_merge_request(&semantic_sources(&plan)).is_err() {
+        let literal = llm.is_none() && cfg.semantic_gate.is_none();
+        if !literal && build_merge_request(&semantic_sources(&plan)).is_err() {
             return Err(DreamError::Limit("input_tokens_conservative_bytes"));
         }
         planned.push(plan);
@@ -567,8 +578,12 @@ pub async fn run_dream_pass(
             break;
         }
         if dry_run {
-            merge.reason = "planned_requires_semantic_gate".into();
-        } else if let Some(llm) = llm {
+            merge.reason = if llm.is_none() && cfg.semantic_gate.is_none() {
+                "planned_literal".into()
+            } else {
+                "planned_requires_semantic_gate".into()
+            };
+        } else {
             merge_one_cluster(
                 wiki,
                 llm,
@@ -704,9 +719,41 @@ fn semantic_sources(plan: &PlannedCluster) -> Vec<crate::dream_semantics::DreamS
 }
 
 #[allow(clippy::too_many_arguments)]
+fn literal_title(body: &str) -> Option<String> {
+    let line = body.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let title: String = line.chars().take(80).collect();
+    if title.is_empty() || !body.contains(&title) {
+        None
+    } else {
+        Some(title)
+    }
+}
+
+/// Both complete bodies, in source order, with a title copied from one of them.
+fn literal_merged_page(
+    sources: &[crate::dream_semantics::DreamSemanticSource],
+) -> Option<DreamMergedPage> {
+    if sources.len() != 2 {
+        return None;
+    }
+    let body_markdown = format!("{}\n\n{}", sources[0].body, sources[1].body);
+    let title = literal_title(&sources[0].body).or_else(|| literal_title(&sources[1].body))?;
+    let page = DreamMergedPage {
+        title,
+        body_markdown,
+    };
+    crate::dream_semantics::validate_draft_literals(
+        sources,
+        &page.body_markdown,
+        Some(&page.title),
+    )
+    .ok()?;
+    Some(page)
+}
+
 async fn merge_one_cluster(
     wiki: &Wiki,
-    llm: &(dyn LlmProvider + 'static),
+    llm: Option<&(dyn LlmProvider + 'static)>,
     workspace_id: WorkspaceId,
     project_id: ProjectId,
     plan: &PlannedCluster,
@@ -716,11 +763,12 @@ async fn merge_one_cluster(
     report: &mut DreamReport,
     merge: &mut DreamMerge,
 ) {
-    let Some(gate) = cfg.semantic_gate.as_ref() else {
+    let literal = llm.is_none() && cfg.semantic_gate.is_none();
+    if !literal && cfg.semantic_gate.is_none() {
         merge.reason = "semantic_gate_missing".into();
         report.skipped += 1;
         return;
-    };
+    }
     let actor = ActorContext::anonymous();
     let preflight_cancel = cancel.clone();
     let preflight_refuse: Arc<dyn Fn() -> bool + Send + Sync> =
@@ -756,45 +804,64 @@ async fn merge_one_cluster(
         report.cancelled = true;
         return;
     }
-    report.inference_requests += 1;
-    let timeout =
-        DREAM_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now()));
-    report.semantic_questions += 1;
-    match tokio::time::timeout(timeout, gate.cluster_suitability(&sources)).await {
-        Ok(Ok(decision)) if decision.is_accepted() => {}
-        _ => {
-            merge.reason = "cluster_gate_refused_or_failed".into();
+    let merged: DreamMergedPage = if literal {
+        let Some(page) = literal_merged_page(&sources) else {
+            merge.reason = "draft_literals_refused".into();
             report.skipped += 1;
+            return;
+        };
+        page
+    } else {
+        let Some(gate) = cfg.semantic_gate.as_ref() else {
+            merge.reason = "semantic_gate_missing".into();
+            report.skipped += 1;
+            return;
+        };
+        let Some(llm) = llm else {
+            merge.reason = "semantic_gate_missing".into();
+            report.skipped += 1;
+            return;
+        };
+        report.inference_requests += 1;
+        let timeout = DREAM_REQUEST_TIMEOUT
+            .min(deadline.saturating_duration_since(std::time::Instant::now()));
+        report.semantic_questions += 1;
+        match tokio::time::timeout(timeout, gate.cluster_suitability(&sources)).await {
+            Ok(Ok(decision)) if decision.is_accepted() => {}
+            _ => {
+                merge.reason = "cluster_gate_refused_or_failed".into();
+                report.skipped += 1;
+                return;
+            }
+        }
+        if stopped(cancel, deadline) {
+            report.cancelled = true;
             return;
         }
-    }
-    if stopped(cancel, deadline) {
-        report.cancelled = true;
-        return;
-    }
-    let Ok(request) = build_merge_request(&sources) else {
-        merge.reason = "input_budget".into();
-        report.skipped += 1;
-        return;
-    };
-    report.inference_requests += 1;
-    let timeout =
-        DREAM_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now()));
-    let merged: DreamMergedPage = match tokio::time::timeout(
-        timeout,
-        complete_structured_with_operation_id(
-            llm,
-            request,
-            LlmOperationId::for_workload(LlmWorkload::Dream),
-        ),
-    )
-    .await
-    {
-        Ok(Ok(page)) => page,
-        _ => {
-            merge.reason = "completion_failed_or_timeout".into();
+        let Ok(request) = build_merge_request(&sources) else {
+            merge.reason = "input_budget".into();
             report.skipped += 1;
             return;
+        };
+        report.inference_requests += 1;
+        let timeout = DREAM_REQUEST_TIMEOUT
+            .min(deadline.saturating_duration_since(std::time::Instant::now()));
+        match tokio::time::timeout(
+            timeout,
+            complete_structured_with_operation_id(
+                llm,
+                request,
+                LlmOperationId::for_workload(LlmWorkload::Dream),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(page)) => page,
+            _ => {
+                merge.reason = "completion_failed_or_timeout".into();
+                report.skipped += 1;
+                return;
+            }
         }
     };
     if stopped(cancel, deadline) {
@@ -803,11 +870,12 @@ async fn merge_one_cluster(
     }
     if merged.title.trim().is_empty()
         || merged.body_markdown.trim().is_empty()
-        || merged
-            .title
-            .len()
-            .saturating_add(merged.body_markdown.len())
-            > DREAM_MAX_TOKENS as usize
+        || (!literal
+            && merged
+                .title
+                .len()
+                .saturating_add(merged.body_markdown.len())
+                > DREAM_MAX_TOKENS as usize)
     {
         merge.reason = "empty_or_over_budget_output".into();
         report.skipped += 1;

@@ -11,6 +11,10 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+### Added
+
+- Merged one cold episodic pair by concatenating both bodies when dream has no `llm_endpoint`, `llm_model` or `jev_model`. The title is copied from a source body. A cold body over 6000 bytes is skipped instead of refusing the scope. The two-model path is unchanged, and scheduling stays off by default. (2026-11-12)
+
 ### Fixed
 
 - Kept the executable's nearest checkout hook bundle primary with custom build directories such as `target-host/` and `build/`, including nested worktrees (`D1`, cross-review of `4b97ced0`).

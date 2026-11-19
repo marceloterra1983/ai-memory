@@ -246,19 +246,15 @@ pub(crate) fn anchor_prompts(
     latest_desc: &[ObservationRecord],
     total: u64,
 ) -> AnchorPrompts {
-    let mut items: Vec<RecapItem> = first_asc
-        .iter()
-        .filter(|row| is_operator_prompt(&row.body))
-        .map(item)
-        .collect();
+    let mut items: Vec<RecapItem> = first_asc.iter().filter_map(operator_prompt).collect();
     if total <= first_asc.len() as u64 {
         return AnchorPrompts { items, gap: None };
     }
     let seen: std::collections::HashSet<_> = first_asc.iter().map(|row| row.id).collect();
     let mut tail: Vec<RecapItem> = latest_desc
         .iter()
-        .filter(|row| !seen.contains(&row.id) && is_operator_prompt(&row.body))
-        .map(item)
+        .filter(|row| !seen.contains(&row.id))
+        .filter_map(operator_prompt)
         .collect();
     tail.reverse();
     // When the two reads met, nothing lies unread between them.
@@ -539,7 +535,7 @@ pub(crate) fn select_window(
             break;
         }
         match row.kind.as_str() {
-            "user-prompt" if is_operator_prompt(&row.body) => prompts.push(item(row)),
+            "user-prompt" => prompts.extend(operator_prompt(row)),
             "stop" if last_reply.is_none() && !row.body.trim().is_empty() => {
                 last_reply = Some(item(row));
             }
@@ -559,10 +555,24 @@ pub(crate) fn select_window(
     })
 }
 
-/// Harness markup, task notifications and Codex's injected instructions are
-/// captured as prompts but were never typed by the operator.
-fn is_operator_prompt(body: &str) -> bool {
-    !looks_like_scaffolding(body) && !looks_like_codex_instructions(body)
+/// Claude Code prepends app notices (linked sessions, a side session that
+/// finished a turn) to the operator's message as `<system-reminder>` blocks,
+/// and the hook stores both as one prompt: only the text after them is the
+/// operator's. Harness markup, task notifications and Codex's injected
+/// instructions are captured as prompts but were never typed by the operator.
+fn operator_prompt(row: &ObservationRecord) -> Option<RecapItem> {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+    let mut text = row.body.trim();
+    while let Some(notice) = text.strip_prefix(OPEN) {
+        // An unclosed notice leaves no safe place to cut, so the prompt is dropped.
+        let end = notice.find(CLOSE)?;
+        text = notice[end + CLOSE.len()..].trim_start();
+    }
+    (!looks_like_scaffolding(text) && !looks_like_codex_instructions(text)).then(|| RecapItem {
+        at: row.created_at.clone(),
+        text: escape_untrusted_history(text),
+    })
 }
 
 fn item(row: &ObservationRecord) -> RecapItem {
@@ -897,6 +907,24 @@ mod tests {
         ];
         let window = select_window(&rows, false).unwrap();
         assert_eq!(prompts(&window), ["real"]);
+    }
+
+    /// Claude Code delivers a notice from the app (linked sessions, a side
+    /// session that finished a turn) as `<system-reminder>` blocks at the head
+    /// of the operator's own message; the hook stores both as one prompt.
+    const REMINDED_PROMPT: &str = "<system-reminder>\nLinked sessions now: two are running.\n\
+         </system-reminder>\n<system-reminder>\nThe session \"side\" finished a turn.\n\
+         </system-reminder>\n\n\nAPPLY-THE-CUT";
+
+    #[test]
+    fn operator_text_after_leading_reminders_is_kept_without_them() {
+        let rows = vec![
+            row("pre-compact", "", "2026-10-12T02:55:02Z"),
+            row("user-prompt", REMINDED_PROMPT, "2026-10-12T01:09:00Z"),
+            row("user-prompt", "real", "2026-10-12T01:08:00Z"),
+        ];
+        let window = select_window(&rows, false).unwrap();
+        assert_eq!(prompts(&window), ["real", "APPLY-THE-CUT"]);
     }
 
     #[test]
@@ -1281,6 +1309,40 @@ mod tests {
         assert!(anchor.contains("REAL-TASK"), "{anchor}");
         assert!(!anchor.contains("AGENTS.md instructions"), "{anchor}");
         assert!(!anchor.contains("system-reminder"), "{anchor}");
+    }
+
+    #[test]
+    fn anchor_keeps_operator_text_after_leading_reminders() {
+        let anchor = anchor_of(&["FIRST-TASK", REMINDED_PROMPT], ANCHOR_BUDGET_DEFAULT);
+        assert!(anchor.contains("FIRST-TASK"), "{anchor}");
+        assert!(anchor.contains("APPLY-THE-CUT"), "{anchor}");
+        assert!(!anchor.contains("system-reminder"), "{anchor}");
+        assert!(!anchor.contains("Linked sessions now"), "{anchor}");
+        assert!(!anchor.contains("finished a turn"), "{anchor}");
+    }
+
+    /// Only leading reminders come off, and what is left is judged like any
+    /// prompt: nothing, harness markup or injected instructions stay dropped.
+    #[test]
+    fn reminders_with_nothing_of_the_operators_after_them_stay_dropped() {
+        for body in [
+            "<system-reminder>x</system-reminder>\n\n  ",
+            "<system-reminder>x</system-reminder>\n<task-notification>\n<summary>done</summary>\n</task-notification>",
+            "<system-reminder>x</system-reminder>\n# AGENTS.md instructions for /repo\n\nrules",
+            "<system-reminder>a notice that never closes\n\nAPPLY-THE-CUT",
+        ] {
+            let anchor = anchor_of(&[body], ANCHOR_BUDGET_DEFAULT);
+            assert!(
+                anchor.contains("no operator prompt is recorded"),
+                "{body:?} -> {anchor}"
+            );
+        }
+        let inline = "why does <system-reminder> show up in my prompt?";
+        let anchor = anchor_of(&[inline], ANCHOR_BUDGET_DEFAULT);
+        assert!(
+            anchor.contains("why does &lt;system-reminder&gt; show up") || anchor.contains(inline),
+            "{anchor}"
+        );
     }
 
     #[test]

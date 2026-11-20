@@ -6913,13 +6913,11 @@ mod tests {
 #[path = "consolidator_oracle.rs"]
 pub(crate) mod consolidator_oracle;
 
-/// The frozen base projection, verbatim `projection.rs` as of the
-/// pre-change commit `11ca7c5b`: an independent copy of the old full-load
+/// The frozen base projection from `projection.rs` at `11ca7c5b`, with
+/// later fixes for leading system reminders. An independent copy of the full-load
 /// selection/scoring/residue, used by the equivalence tests to compare the
 /// new streaming projection against the old rule without sharing code with
-/// it. The file is byte-identical to the base module (reproduced with
-/// `git show 11ca7c5b:crates/ai-memory-consolidate/src/projection.rs`), so
-/// a drift of its constants — the even-sample bonus, the recency maximum —
+/// it. A drift of its constants — the even-sample bonus, the recency maximum —
 /// shows up as a prompt diff the oracles that share the current projection
 /// cannot see.
 #[cfg(test)]

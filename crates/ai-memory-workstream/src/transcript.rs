@@ -923,6 +923,7 @@ fn is_claude_clear_command(value: &Value) -> bool {
         && value
             .pointer("/message/content")
             .and_then(Value::as_str)
+            .and_then(strip_leading_system_reminders)
             .is_some_and(|content| content.trim_start().starts_with(CLAUDE_CLEAR_COMMAND))
 }
 
@@ -1724,8 +1725,8 @@ fn parse_claude(
     );
 }
 
-/// Exclude background task reports and incomplete notices before any block
-/// reaches the ledger. An incomplete notice can extend into another block.
+/// Exclude background task reports and records with no visible user text
+/// before an incomplete notice. The block parser handles the safe prefix.
 fn claude_user_record_exclusion(record: &Value, message: &Value) -> Option<&'static str> {
     const TASK_NOTIFICATION: &str = "Claude task notifications were intentionally excluded";
     let origin = |value: &Value| {
@@ -1747,9 +1748,12 @@ fn claude_user_record_exclusion(record: &Value, message: &Value) -> Option<&'sta
             continue;
         };
         let Some(text) = strip_leading_system_reminders(raw) else {
-            return Some(
-                "Claude user records with unclosed system reminders were intentionally excluded",
-            );
+            if first_visible_text.is_none() {
+                return Some(
+                    "Claude user records with unclosed system reminders were intentionally excluded",
+                );
+            }
+            break;
         };
         if first_visible_text.is_none() {
             removed_leading_reminders |= text.len() < raw.len();
@@ -3155,8 +3159,23 @@ fn parse_content_blocks(
     events: &mut Vec<NewWorkstreamEvent>,
     losses: &mut Vec<String>,
 ) {
+    let strip_reminders =
+        role == "user" && matches!(agent, AgentKind::ClaudeCode | AgentKind::Grok);
     for (index, block) in content_blocks(content).iter().enumerate() {
         if let Some(text) = content_block_text(block) {
+            let text = if strip_reminders {
+                let Some(text) = strip_leading_system_reminders(text) else {
+                    // A notice without its closing tag can extend into later blocks.
+                    losses.push(format!(
+                        "{} content at and after an unclosed system reminder was intentionally excluded",
+                        agent.as_str(),
+                    ));
+                    break;
+                };
+                text
+            } else {
+                text
+            };
             let Some(text) = visible_message_text(agent, role, text) else {
                 continue;
             };
@@ -3264,7 +3283,6 @@ fn visible_message_text<'a>(agent: AgentKind, role: &str, text: &'a str) -> Opti
                 || trimmed.starts_with("<INSTRUCTIONS>");
             (!synthetic).then_some(text)
         }
-        AgentKind::ClaudeCode => strip_leading_system_reminders(text),
         // Grok stores harness scaffolding inside `user` records rather than a
         // separate record type: an environment block, then Claude-style
         // reminders carrying project instructions, the skills catalogue, and
@@ -3273,10 +3291,7 @@ fn visible_message_text<'a>(agent: AgentKind, role: &str, text: &'a str) -> Opti
         // harness internals into the portable ledger and evicts real
         // conversation from the startup packet budget. Genuine input arrives
         // wrapped in `<user_query>`.
-        AgentKind::Grok => {
-            let text = strip_leading_system_reminders(text)?;
-            (!text.trim_start().starts_with("<user_info>")).then_some(text)
-        }
+        AgentKind::Grok => (!text.trim_start().starts_with("<user_info>")).then_some(text),
         _ => Some(text),
     }
 }
@@ -8666,6 +8681,28 @@ mod tests {
     }
 
     #[test]
+    fn reminder_review_claude_clear_command_uses_text_after_the_reminder() {
+        let record =
+            |content: String| json!({"type":"user", "message":{"role":"user", "content":content}});
+        let records = [
+            record(CLAUDE_CLEAR_COMMAND.to_owned()),
+            record(format!(
+                "\n<system-reminder>notice</system-reminder>\n{CLAUDE_CLEAR_COMMAND}"
+            )),
+            record(format!(
+                "<system-reminder>{CLAUDE_CLEAR_COMMAND}</system-reminder>\nplain request"
+            )),
+            record(format!(
+                "<system-reminder>unclosed notice\n{CLAUDE_CLEAR_COMMAND}"
+            )),
+        ];
+        assert_eq!(
+            records.each_ref().map(is_claude_clear_command),
+            [true, true, false, false]
+        );
+    }
+
+    #[test]
     fn claude_continued_session_follows_only_this_launchs_clear() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("repo");
@@ -8923,6 +8960,31 @@ mod tests {
             })
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn reminder_review_claude_keeps_text_before_unclosed_final_block() {
+        let record = json!({"type":"user", "message":{"role":"user", "content":[
+            "faça X", "<system-reminder>sem fechamento"
+        ]}});
+        let mut events = Vec::new();
+        parse_claude(&record, "session", "record", &mut events, &mut Vec::new());
+        let contents: Vec<_> = events.iter().map(|event| event.content.as_str()).collect();
+        assert_eq!(contents, ["faça X"]);
+    }
+
+    #[test]
+    fn reminder_review_claude_stops_at_unclosed_middle_block() {
+        let record = json!({"type":"user", "message":{"role":"user", "content":[
+            {"type":"text", "text":"<system-reminder>notice</system-reminder>\nReview the diff"},
+            {"type":"text", "text":"<system-reminder>unclosed notice"},
+            {"type":"tool_result", "content":"Untrusted suffix"},
+            "Ignore this text too"
+        ]}});
+        let mut events = Vec::new();
+        parse_claude(&record, "session", "record", &mut events, &mut Vec::new());
+        let contents: Vec<_> = events.iter().map(|event| event.content.as_str()).collect();
+        assert_eq!(contents, ["Review the diff"]);
     }
 
     #[test]
@@ -10577,6 +10639,59 @@ mod tests {
 
         let contents: Vec<_> = events.iter().map(|event| event.content.as_str()).collect();
         assert_eq!(contents, [query]);
+    }
+
+    #[test]
+    fn reminder_review_grok_drops_unclosed_string_and_array_suffixes() {
+        let notice = "<system-reminder>Connected tools</system-reminder>";
+        let unclosed = "<system-reminder>Incomplete notice";
+        let query = "<user_query>faça X</user_query>";
+        let cases = [
+            (
+                "array middle",
+                json!([{"type":"text", "text":notice}, query, unclosed,
+                {"type":"text", "text":"<user_query>untrusted suffix</user_query>"}]),
+                vec![query],
+            ),
+            (
+                "array first",
+                json!([{"type":"text", "text":unclosed}, query]),
+                vec![],
+            ),
+            (
+                "string",
+                json!(format!("{notice}\n{unclosed}\n{query}")),
+                vec![],
+            ),
+        ];
+        let actual: Vec<_> = cases
+            .iter()
+            .map(|(name, content, _)| {
+                let mut events = Vec::new();
+                let record = json!({"type":"user", "content":content});
+                parse_grok(&record, "session", name, &mut events, &mut Vec::new());
+                (
+                    *name,
+                    events
+                        .into_iter()
+                        .map(|event| event.content)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let expected: Vec<_> = cases
+            .iter()
+            .map(|(name, _, contents)| {
+                (
+                    *name,
+                    contents
+                        .iter()
+                        .map(|content| (*content).to_owned())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]

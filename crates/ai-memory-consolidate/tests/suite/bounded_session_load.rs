@@ -1263,6 +1263,66 @@ async fn streaming_projection_matches_the_frozen_base_projection() {
     }
 }
 
+#[tokio::test]
+async fn reminder_review_projection_and_residue_match_the_frozen_oracle() {
+    let tmp = TempDir::new().unwrap();
+    let (store, _wiki, ws, proj, sid) = seeded_fixture(tmp.path(), 4, false, false).await;
+    let title = "<system-reminder>install ai-memory routing";
+    let body = format!(
+        "{title}\n{}\nerror: synthetic-notice.rs</system-reminder>\nInspect the diff first.\nerror: operator-diagnostic.rs",
+        "á".repeat(100),
+    );
+    let rows = store.reader.observations_for_session(sid).await.unwrap();
+    rusqlite::Connection::open(store.db_path())
+        .unwrap()
+        .execute(
+            "UPDATE observations SET kind = 'user-prompt', title = ?1, body = ?2 WHERE id = ?3",
+            rusqlite::params![title, body, rows[1].id.as_bytes()],
+        )
+        .unwrap();
+    let rows = store.reader.observations_for_session(sid).await.unwrap();
+
+    for limit in [4, 3, 2] {
+        let cfg = ObservationProjectionConfig::new(10_000, limit, 23).with_verbatim_residue(true);
+        let (current, _) = store
+            .reader
+            .read_session_observations_in_scope(ws, proj, sid, move |snap| {
+                project_session_observations(snap, &cfg)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let frozen = frozen::project_observations(
+            &rows,
+            &frozen::ObservationProjectionConfig::new(10_000, limit, 23)
+                .with_verbatim_residue(true),
+        );
+        assert_eq!(current.selected_indices, frozen.selected_indices);
+        assert_eq!(current.truncated_bodies, frozen.truncated_bodies);
+        assert!(
+            current.text == frozen.text,
+            "limit={limit}: {}",
+            first_diff(&current.text, &frozen.text)
+        );
+        assert!(
+            !current.text.contains("<system-reminder>"),
+            "{}",
+            current.text
+        );
+        assert!(
+            !current.text.contains("synthetic-notice.rs"),
+            "{}",
+            current.text
+        );
+        let (main, residue) = current.text.split_once("## Verbatim residue").unwrap();
+        assert!(residue.contains("operator-diagnostic.rs"), "{residue}");
+        if limit >= 3 {
+            assert!(current.selected_indices.contains(&1));
+            assert!(main.contains("body:\nInspect the diff first."), "{main}");
+        }
+    }
+}
+
 /// A session whose `sessions` row froze on a stale project still consolidates
 /// into the project its observations actually landed in, and the gate passes
 /// there. (The schema forbids a sessions row in another workspace, so the

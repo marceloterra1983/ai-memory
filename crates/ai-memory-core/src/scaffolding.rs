@@ -26,6 +26,13 @@
 //! That is narrower than a shape rule, deliberately: a model id somebody
 //! *typed* is now kept, because at that point it is what the user wrote.
 
+use std::borrow::Cow;
+
+use crate::{ObservationKind, truncate_for_title};
+
+/// Opening tag shared by the reminder parser and readers that select prompt bodies.
+pub const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
+
 /// Characters that open a decorated shell prompt rather than prose.
 /// Box-drawing and the powerline separators commonly echoed into a paste.
 const PROMPT_DECORATION: [char; 9] = [
@@ -43,14 +50,32 @@ const PROMPT_DECORATION: [char; 9] = [
 /// Recover the operator's text after leading harness notices. An unclosed
 /// notice leaves no safe place to split and returns `None`.
 pub fn strip_leading_system_reminders(text: &str) -> Option<&str> {
-    const OPEN: &str = "<system-reminder>";
     const CLOSE: &str = "</system-reminder>";
     let mut rest = text;
-    while let Some(notice) = rest.trim_start().strip_prefix(OPEN) {
+    while let Some(notice) = rest.trim_start().strip_prefix(SYSTEM_REMINDER_OPEN) {
         let (_, suffix) = notice.split_once(CLOSE)?;
         rest = suffix.trim_start();
     }
     Some(rest)
+}
+
+/// Use the stored title unless a reminder occupied the capture's first line.
+/// A reminder with no visible prompt has no display title.
+#[must_use]
+pub fn session_prompt_display_title<'a>(title: &'a str, body: &str) -> Option<Cow<'a, str>> {
+    let trimmed_title = title.trim();
+    if !trimmed_title.starts_with(SYSTEM_REMINDER_OPEN)
+        && !((trimmed_title.is_empty() || trimmed_title == ObservationKind::UserPrompt.as_str())
+            && body.trim_start().starts_with(SYSTEM_REMINDER_OPEN))
+    {
+        return Some(Cow::Borrowed(title));
+    }
+    let source = if body.is_empty() { title } else { body };
+    strip_leading_system_reminders(source)?
+        .trim_start()
+        .lines()
+        .next()
+        .map(|line| Cow::Owned(truncate_for_title(line)))
 }
 
 /// `true` when `candidate` reads as harness scaffolding rather than user

@@ -462,6 +462,69 @@ times. The ignored `coding_corpus_replays_offline_with_identical_ab_results`
 smoke test also asserts full evidence recall@10 and identical A/B scores/context;
 it needs a server binary at `target/release/ai-memory`.
 
+### Bundled Brazilian Portuguese corpus (`ptbr-v1`)
+
+`--dataset-variant ptbr-v1` selects four synthetic Brazilian Portuguese
+(`pt-BR`) cases in `evals/fixtures/retrieval/ptbr-v1.json`, pinned by SHA-256
+(`5937003ec4e9e00bafbbf59ed54ac6f465ba407e84c83ccdf6f5eb6cf2229535`) and
+compatible with the existing `coding-v1` retrieval loader and scorer:
+
+```bash
+cargo build -p ai-memory-cli -p ai-memory-eval
+cargo run -p ai-memory-eval -- retrieval --dataset-variant ptbr-v1 \
+    --server-bin target/debug/ai-memory --candidate --concurrency 1
+cargo run -p ai-memory-eval -- retrieval --dataset-variant ptbr-v1 --engine grep
+```
+
+| Case | Category | Expected evidence (`answer_session_ids`) | Stale / partial alternative (`incorrect_session_ids` / half-evidence) |
+|---|---|---|---|
+| `ptbr-decisao-substituida` | `decisao-substituida` | Current `postgres_skip_locked` + `40 segundos` decision | Earlier `redis_streams` + `12 segundos` decision |
+| `ptbr-excecao-regra` | `excecao-regra` | `hotfix_bacen` exception (`fora da janela congelada`, `um revisor de plantão`, `INC-PIX`) | General-rule-only session (`dois revisores`, `janela liberada`) |
+| `ptbr-evidencia-duas-sessoes` | `evidencia-duas-sessoes` | Both diagnosis (`transação longa`, `max_pool_nfe=24`) and fix (`NFE_PREVALIDACAO_FORA_TX=true`) sessions | Single-session hit (`hit@k = 1.0`, `recall_all@k = 0.0`) |
+| `ptbr-troca-agente-handoff` | `troca-agente-handoff` | Handoff session (`cargo test --test assinatura_a3_offline`, `HSM_TOKEN_MODE=simulado`, `v2.4.1`) | Earlier discarded `HSM_TOKEN_MODE=pkcs11_hardware` attempt |
+
+#### Retrieval vs. evidence use and cross-harness handoff
+
+Every case carries an independent `evidence_contract` (`category`,
+`required_facts`, `forbidden_stale_facts`, `requires_multi_session_synthesis`,
+and `supersedes_session_id` where applicable) alongside `answer_session_ids`
+and `incorrect_session_ids`:
+
+- **Retrieval (`hit@k` / `recall@k` / `recall-all@k`)** measures whether
+  `memory_query` puts the evidence session(s) in the top `k` hits.
+- **Evidence use** is verified separately: retrieving a topic session (`hit@k =
+  1.0`) or retrieving both a stale and a current session does not pass if a
+  consumer applies `forbidden_stale_facts`, omits `required_facts`, or uses
+  only one session of `ptbr-evidencia-duas-sessoes`.
+- **Cross-harness handoff** is proved deterministically against an isolated
+  `ai-memory serve` in `crates/ai-memory-cli/tests/suite/harness_switch_e2e.rs`
+  (`ptbr_cross_harness_handoff_real_server_claims_exclusively_and_proves_next_step`):
+  `claude-code` writes and ends/begins the baton, `codex` / `open-code` claims
+  it over `GET /handoff`, `memory_handoff_accept` confirms `consumed_by_hook`
+  only for the claiming session id, another harness/project is refused
+  (`none_pending` / empty `/handoff`), and the parsed `**Next steps**` action
+  is verified deterministically.
+
+Corpus and smoke checks:
+
+```bash
+cargo test -p ai-memory-eval
+cargo test -p ai-memory-cli --test suite harness_switch
+cargo test -p ai-memory-eval --test smoke ptbr_corpus_replays_offline_with_identical_ab_results -- --ignored
+```
+
+Observed offline A/B receipt (`2026-11-20 08:29 BRT`, `ptbr-v1` on isolated `target/debug/ai-memory`, zero-LLM, `AI_MEMORY_CAPTURE_ASSISTANT=true`, `pin_first=false`, `concurrency=1`):
+
+| Metric | Baseline | Identical candidate | Delta |
+|---|---:|---:|---:|
+| hit@1 / hit@3 / hit@5 / hit@10 | 1.000 | 1.000 | +0.000 |
+| recall@1 | 0.875 | 0.875 | +0.000 |
+| recall-all@1 | 0.750 | 0.750 | +0.000 |
+| recall@3 / recall@5 / recall@10 | 1.000 | 1.000 | +0.000 |
+| recall-all@3 / recall-all@5 / recall-all@10 | 1.000 | 1.000 | +0.000 |
+| Estimated context tokens, mean / median | 734.2 / 737.5 | 734.2 / 737.5 | +0.0 |
+| Latency p50 / p95 (ms) | 5 / 5 | 7 / 9 | +2 / +4 |
+
 ### The triple: accuracy + latency + context-tokens
 
 Every run — single-config or A/B — reports three things per slice, not

@@ -9,7 +9,8 @@
 //! which keeps the same 500 questions and evidence labels but replaces
 //! distractor sessions that also held the answer. Other systems publish on
 //! the cleaned file, so a comparison has to say which one it ran.
-//! The small synthetic `coding-v1` corpus is committed for offline smoke runs.
+//! The small synthetic `coding-v1` and Brazilian Portuguese `ptbr-v1` corpora
+//! are committed for offline smoke runs.
 
 use std::path::Path;
 
@@ -64,6 +65,15 @@ pub const VARIANT_CODING_V1: DatasetVariant = DatasetVariant {
     default_path: "evals/fixtures/retrieval/coding-v1.json",
     url: None,
     sha256: "af3382663a3e4e969c8bcfa744b3a794de86cb5932393a88bea16f014193d467",
+};
+
+/// Small synthetic Brazilian Portuguese (`pt-BR`) agent-memory evidence corpus,
+/// bundled for offline retrieval and evidence-use checks.
+pub const VARIANT_PTBR_V1: DatasetVariant = DatasetVariant {
+    name: "ptbr_v1",
+    default_path: "evals/fixtures/retrieval/ptbr-v1.json",
+    url: None,
+    sha256: "5937003ec4e9e00bafbbf59ed54ac6f465ba407e84c83ccdf6f5eb6cf2229535",
 };
 
 /// One chat turn inside a haystack session.
@@ -257,6 +267,275 @@ mod tests {
             }
             assert!(evidence.iter().all(|id| ids.contains(id)));
             assert_eq!(incorrect.len() + evidence.len(), ids.len());
+        }
+    }
+
+    fn ptbr_corpus_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval/ptbr-v1.json")
+    }
+
+    /// Deterministic evidence-use validator: checks that a candidate answer
+    /// uses all required current facts and does not assert forbidden stale
+    /// values as active. Retrieval of a relevant session alone is insufficient.
+    fn answer_uses_expected_evidence(
+        candidate_answer: &str,
+        required_facts: &[String],
+        forbidden_stale_facts: &[String],
+    ) -> bool {
+        let lower = candidate_answer.to_lowercase();
+        let has_all_required = required_facts
+            .iter()
+            .all(|fact| lower.contains(&fact.to_lowercase()));
+        let asserts_stale = forbidden_stale_facts
+            .iter()
+            .any(|stale| lower.contains(&stale.to_lowercase()));
+        has_all_required && !asserts_stale
+    }
+
+    #[test]
+    fn ptbr_corpus_pin_and_independent_labels_are_consistent() {
+        use std::collections::{HashMap, HashSet};
+        let path = ptbr_corpus_path();
+        let questions = load(&path, &VARIANT_PTBR_V1).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(questions.len(), 4);
+
+        let expected_ids = HashSet::from([
+            "ptbr-decisao-substituida",
+            "ptbr-excecao-regra",
+            "ptbr-evidencia-duas-sessoes",
+            "ptbr-troca-agente-handoff",
+        ]);
+        let mut seen_ids = HashSet::new();
+
+        for (q, item) in questions.iter().zip(raw.as_array().unwrap()) {
+            assert!(seen_ids.insert(q.question_id.as_str()));
+            assert!(!q.is_abstention());
+            assert!(!q.gold_answer_text().is_empty());
+
+            let ids: HashSet<_> = q.haystack_session_ids.iter().collect();
+            assert_eq!(ids.len(), q.haystack_session_ids.len());
+            assert!(
+                ids.len() > 10,
+                "recall@10 must not include every session by construction"
+            );
+
+            let evidence: HashSet<_> = q.answer_session_ids.iter().collect();
+            assert!(!evidence.is_empty());
+            let incorrect: HashSet<_> = item["incorrect_session_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+
+            let mut session_texts: HashMap<&str, String> = HashMap::new();
+            for (id, turns) in q.haystack_session_ids.iter().zip(&q.haystack_sessions) {
+                let expected = evidence.contains(id);
+                assert_eq!(
+                    turns.iter().any(Turn::is_evidence),
+                    expected,
+                    "{}: {id}",
+                    q.question_id
+                );
+                assert_eq!(
+                    incorrect.contains(id.as_str()),
+                    !expected,
+                    "incorrect_session_ids must partition the haystack"
+                );
+                let joined = turns
+                    .iter()
+                    .map(|t| t.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                session_texts.insert(id.as_str(), joined);
+            }
+            assert!(evidence.iter().all(|id| ids.contains(id)));
+            assert_eq!(incorrect.len() + evidence.len(), ids.len());
+
+            let contract = &item["evidence_contract"];
+            assert_eq!(
+                contract["category"].as_str(),
+                q.question_type.strip_prefix("ptbr-"),
+                "{}: category must match question_type",
+                q.question_id
+            );
+            let required_facts: Vec<String> = contract["required_facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            assert!(!required_facts.is_empty(), "{}", q.question_id);
+
+            let combined_evidence: String = q
+                .answer_session_ids
+                .iter()
+                .map(|sid| session_texts[sid.as_str()].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for fact in &required_facts {
+                assert!(
+                    combined_evidence.contains(fact),
+                    "{}: evidence sessions missing required fact {fact:?}",
+                    q.question_id
+                );
+            }
+
+            if contract["requires_multi_session_synthesis"].as_bool() == Some(true) {
+                assert_eq!(q.answer_session_ids.len(), 2, "{}", q.question_id);
+                // Neither evidence session alone holds every required fact.
+                for sid in &q.answer_session_ids {
+                    let single = &session_texts[sid.as_str()];
+                    assert!(
+                        !required_facts.iter().all(|f| single.contains(f)),
+                        "{}: single session {sid} should not contain all required facts",
+                        q.question_id
+                    );
+                }
+            } else {
+                let stale_sid = contract["supersedes_session_id"]
+                    .as_str()
+                    .expect("single-evidence cases must identify superseded/general session");
+                assert!(
+                    incorrect.contains(stale_sid),
+                    "{}: {stale_sid} must be in incorrect_session_ids",
+                    q.question_id
+                );
+                let stale_idx = q
+                    .haystack_session_ids
+                    .iter()
+                    .position(|sid| sid == stale_sid)
+                    .unwrap();
+                let current_idx = q
+                    .haystack_session_ids
+                    .iter()
+                    .position(|sid| sid == &q.answer_session_ids[0])
+                    .unwrap();
+                assert!(
+                    q.haystack_dates[stale_idx] < q.haystack_dates[current_idx],
+                    "{}: stale/general session must predate current/exception session",
+                    q.question_id
+                );
+                let stale_facts: Vec<String> = contract["forbidden_stale_facts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+                assert!(!stale_facts.is_empty(), "{}", q.question_id);
+                let stale_text = &session_texts[stale_sid];
+                assert!(
+                    stale_facts.iter().all(|f| stale_text.contains(f)),
+                    "{}: stale session {stale_sid} must carry its own stale facts",
+                    q.question_id
+                );
+            }
+        }
+        assert_eq!(seen_ids, expected_ids);
+    }
+
+    #[test]
+    fn ptbr_corpus_distinguishes_retrieval_from_evidence_use() {
+        use std::collections::HashSet;
+        let path = ptbr_corpus_path();
+        let questions = load(&path, &VARIANT_PTBR_V1).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        for (q, item) in questions.iter().zip(raw.as_array().unwrap()) {
+            let contract = &item["evidence_contract"];
+            let required: Vec<String> = contract["required_facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            let forbidden: Vec<String> = contract["forbidden_stale_facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+
+            // 1. Applying the evidence turns passes the use check.
+            let current_text: String = q
+                .answer_session_ids
+                .iter()
+                .flat_map(|sid| {
+                    let idx = q
+                        .haystack_session_ids
+                        .iter()
+                        .position(|id| id == sid)
+                        .unwrap();
+                    q.haystack_sessions[idx]
+                        .iter()
+                        .filter(|t| t.is_evidence())
+                        .map(|t| t.content.as_str())
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            // Strip explicit rejection clauses ("Descartar ...") when checking
+            // a clean current-answer synthesis: gold_answer_text without
+            // restating stale tokens satisfies positive use, while using a
+            // stale/partial session fails.
+            let positive_only = format!(
+                "{} {}",
+                required.join(" "),
+                if q.question_id == "ptbr-evidencia-duas-sessoes" {
+                    q.gold_answer_text()
+                } else {
+                    String::new()
+                }
+            );
+            assert!(
+                answer_uses_expected_evidence(&positive_only, &required, &forbidden),
+                "{}: expected current facts to satisfy evidence use",
+                q.question_id
+            );
+
+            // 2. Negative control: full evidence retrieval (hit@10 = 1.0) does
+            // NOT guarantee valid evidence use if the consumer relies on the
+            // superseded/general/single session.
+            if contract["requires_multi_session_synthesis"].as_bool() == Some(true) {
+                let first_sid = &q.answer_session_ids[0];
+                let idx = q
+                    .haystack_session_ids
+                    .iter()
+                    .position(|id| id == first_sid)
+                    .unwrap();
+                let partial_text = q.haystack_sessions[idx][0].content.as_str();
+                assert!(
+                    !answer_uses_expected_evidence(partial_text, &required, &forbidden),
+                    "{}: partial single-session evidence must fail evidence use even with hit@1=1.0",
+                    q.question_id
+                );
+                let mut retrieved = HashSet::new();
+                retrieved.insert(first_sid.as_str());
+                assert_eq!(retrieved.len(), 1);
+            } else {
+                let stale_sid = contract["supersedes_session_id"].as_str().unwrap();
+                let idx = q
+                    .haystack_session_ids
+                    .iter()
+                    .position(|id| id == stale_sid)
+                    .unwrap();
+                let stale_text = q.haystack_sessions[idx][0].content.as_str();
+                assert!(
+                    !answer_uses_expected_evidence(stale_text, &required, &forbidden),
+                    "{}: stale/general session must fail evidence use even when retrieved",
+                    q.question_id
+                );
+                // Even if both stale and current were retrieved, echoing stale
+                // facts as active fails evidence use.
+                let mixed_stale_answer = format!("{current_text}\n{}", forbidden.join(" "));
+                assert!(
+                    !answer_uses_expected_evidence(&mixed_stale_answer, &required, &forbidden),
+                    "{}: mixing stale facts as active must fail evidence use",
+                    q.question_id
+                );
+            }
         }
     }
 

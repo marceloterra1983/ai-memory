@@ -214,12 +214,25 @@ impl Fixture {
     }
 
     async fn call_tool(&self, name: &str, arguments: Value) -> Value {
-        let text = self
+        self.call_tool_with_headers(name, arguments, &[]).await
+    }
+
+    async fn call_tool_with_headers(
+        &self,
+        name: &str,
+        arguments: Value,
+        headers: &[(&str, &str)],
+    ) -> Value {
+        let mut req = self
             .client
             .post(format!("{}/mcp", self.base))
             .bearer_auth(TOKEN)
             .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
+            .header("accept", "application/json, text/event-stream");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let text = req
             .body(
                 json!({
                     "jsonrpc": "2.0",
@@ -484,4 +497,468 @@ async fn the_next_harness_is_pointed_at_where_a_cut_off_harness_stopped() {
         json!({ "source": "startup" }),
     ));
     assert_eq!(pointed_session(&context), None, "{context}");
+}
+
+/// Real-server PT-BR cross-harness handoff: writer (`claude-code`) and
+/// readers (`codex` / `open-code`) are distinct harnesses on an isolated temp
+/// `ai-memory serve`. Covers automatic `session-end` handoff + `GET /handoff`
+/// claim + `consumed_by_hook` identity + single-use exclusivity + explicit
+/// `next_steps` extraction & negative scope/harness controls.
+#[tokio::test]
+async fn ptbr_cross_harness_handoff_real_server_claims_exclusively_and_proves_next_step() {
+    let fx = Fixture::start().await;
+    let cc_session = "cc-ptbr-handoff-writer-01";
+    let cc_id = SessionId::from_native(cc_session).to_string();
+    let codex_session = "019a0000-0000-7000-8000-00000000a301";
+    let opencode_session = "ses-opencode-ptbr-reader-02";
+
+    // 1. Writer harness (`claude-code`) records a PT-BR unresolved question
+    //    (superseding an older `pkcs11_hardware` attempt) and ends cleanly.
+    fx.claude("session-start", cc_session, json!({ "source": "startup" }));
+    fx.claude(
+        "user-prompt",
+        cc_session,
+        json!({
+            "prompt": "Qual o próximo passo obrigatório para o assinador_xml após descartar HSM_TOKEN_MODE=pkcs11_hardware: rodar cargo test --test assinatura_a3_offline com HSM_TOKEN_MODE=simulado antes da tag v2.4.1?"
+        }),
+    );
+    fx.wait_for_observations(&cc_id, 1).await;
+    fx.claude("session-end", cc_session, json!({ "reason": "exit" }));
+    fx.wait_for_open_handoffs(1).await;
+
+    let listed = fx
+        .call_tool(
+            "memory_handoff_list",
+            json!({ "workspace": WORKSPACE, "project": PROJECT }),
+        )
+        .await;
+    assert_eq!(listed["handoffs"][0]["from_agent"], "claude-code");
+
+    // 2. Reader harness (`codex`) claims the baton via its real SessionStart
+    //    hook path (`GET /handoff?agent=codex`).
+    let codex_ctx = additional_context(&fx.native_hook(
+        "codex",
+        "session-start",
+        json!({
+            "session_id": codex_session,
+            "cwd": fx.project_dir(),
+            "source": "startup",
+        }),
+    ));
+    assert!(
+        codex_ctx.contains("pending handoff from previous session"),
+        "codex must receive the claimed handoff block:\n{codex_ctx}"
+    );
+    assert!(codex_ctx.contains("from `claude-code`"), "{codex_ctx}");
+    assert!(
+        codex_ctx.contains("cargo test --test assinatura_a3_offline")
+            && codex_ctx.contains("HSM_TOKEN_MODE=simulado")
+            && codex_ctx.contains("v2.4.1"),
+        "codex handoff must carry the PT-BR next step:\n{codex_ctx}"
+    );
+
+    // 3. Exclusivity & identity proof: open list is now empty; only `codex`'s
+    //    exact session sees `consumed_by_hook`; another harness (`open-code`)
+    //    receives `none_pending` and an empty `GET /handoff`.
+    let after_claim = fx
+        .call_tool(
+            "memory_handoff_list",
+            json!({ "workspace": WORKSPACE, "project": PROJECT }),
+        )
+        .await;
+    assert_eq!(after_claim["handoffs"].as_array().unwrap().len(), 0);
+
+    let codex_confirm = fx
+        .call_tool_with_headers(
+            "memory_handoff_accept",
+            json!({ "workspace": WORKSPACE, "project": PROJECT }),
+            &[("x-memory-actor-session-id", codex_session)],
+        )
+        .await;
+    assert_eq!(
+        codex_confirm["status"], "consumed_by_hook",
+        "{codex_confirm}"
+    );
+    assert!(codex_confirm["handoff"].is_null());
+
+    let outsider_mcp = fx
+        .call_tool_with_headers(
+            "memory_handoff_accept",
+            json!({ "workspace": WORKSPACE, "project": PROJECT }),
+            &[("x-memory-actor-session-id", opencode_session)],
+        )
+        .await;
+    assert_eq!(outsider_mcp["status"], "none_pending", "{outsider_mcp}");
+    assert!(outsider_mcp["handoff"].is_null());
+
+    let outsider_hook = fx
+        .client
+        .get(format!("{}/handoff", fx.base))
+        .query(&[
+            ("agent", "open-code"),
+            ("workspace", WORKSPACE),
+            ("project", PROJECT),
+            ("session_id", opencode_session),
+            ("cwd", fx.project_dir().to_str().unwrap()),
+        ])
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !outsider_hook.contains("pending handoff"),
+        "already-claimed baton must stay exclusive: {outsider_hook}"
+    );
+
+    // 4. Explicit structured `next_steps` handoff: negative control on another
+    //    project, then `open-code` claims over `GET /handoff` and parses the
+    //    exact `**Next steps**` action deterministically.
+    let expected_cmd = "cargo test --test assinatura_a3_offline -- --exact valida_lote_rps";
+    let expected_env = "HSM_TOKEN_MODE=simulado";
+    let begun = fx
+        .call_tool(
+            "memory_handoff_begin",
+            json!({
+                "workspace": WORKSPACE,
+                "project": PROJECT,
+                "summary": "Parser RPS do assinador_xml concluído; validação offline pendente.",
+                "open_questions": ["Confirmar tag v2.4.1 após validação offline"],
+                "next_steps": [expected_cmd, expected_env],
+                "files_touched": ["crates/assinador_xml/src/lote.rs"],
+                "shared": true,
+            }),
+        )
+        .await;
+    assert!(begun["handoff_id"].as_str().is_some(), "{begun}");
+
+    // Negative control: wrong project must neither receive nor consume it.
+    let wrong_project_hook = fx
+        .client
+        .get(format!("{}/handoff", fx.base))
+        .query(&[
+            ("agent", "open-code"),
+            ("workspace", WORKSPACE),
+            ("project", "projeto-errado"),
+            ("session_id", "wrong-proj-session"),
+        ])
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !wrong_project_hook.contains(expected_cmd),
+        "handoff leaked to unrelated project: {wrong_project_hook}"
+    );
+
+    // Reader (`open-code`) claims over the real `GET /handoff` route.
+    let oc_claimed = fx
+        .client
+        .get(format!("{}/handoff", fx.base))
+        .query(&[
+            ("agent", "open-code"),
+            ("workspace", WORKSPACE),
+            ("project", PROJECT),
+            ("session_id", opencode_session),
+            ("cwd", fx.project_dir().to_str().unwrap()),
+        ])
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let history_block = oc_claimed
+        .split_once("<!-- ai-memory:untrusted-history:start -->")
+        .and_then(|(_, tail)| tail.split_once("<!-- ai-memory:untrusted-history:end -->"))
+        .map(|(inner, _)| inner)
+        .expect("claimed handoff must delimit untrusted history block");
+    let next_steps_section = history_block
+        .split("**Next steps**\n")
+        .nth(1)
+        .and_then(|tail| tail.split("\n**").next())
+        .expect("claimed handoff must contain **Next steps** section");
+    let parsed_steps: Vec<&str> = next_steps_section
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .collect();
+    assert_eq!(parsed_steps, vec![expected_cmd, expected_env]);
+    assert!(
+        !next_steps_section.contains("pkcs11_hardware"),
+        "discarded mode must not appear as next step"
+    );
+
+    // Deterministic application check: the parsed action maps to the exact
+    // command + env var, and `codex` cannot re-claim what `open-code` took.
+    let applied_env = parsed_steps
+        .iter()
+        .find_map(|s| s.strip_prefix("HSM_TOKEN_MODE="))
+        .unwrap();
+    assert_eq!(applied_env, "simulado");
+    assert_eq!(parsed_steps[0], expected_cmd);
+
+    let oc_confirm = fx
+        .call_tool_with_headers(
+            "memory_handoff_accept",
+            json!({
+                "workspace": WORKSPACE,
+                "project": PROJECT,
+                "handoff_id": begun["handoff_id"],
+            }),
+            &[("x-memory-actor-session-id", opencode_session)],
+        )
+        .await;
+    assert_eq!(oc_confirm["status"], "consumed_by_hook", "{oc_confirm}");
+    let codex_steal = fx
+        .call_tool_with_headers(
+            "memory_handoff_accept",
+            json!({
+                "workspace": WORKSPACE,
+                "project": PROJECT,
+                "handoff_id": begun["handoff_id"],
+            }),
+            &[("x-memory-actor-session-id", codex_session)],
+        )
+        .await;
+    assert_eq!(codex_steal["status"], "none_pending", "{codex_steal}");
+    let fresh_codex = fx
+        .call_tool_with_headers(
+            "memory_handoff_accept",
+            json!({ "workspace": WORKSPACE, "project": PROJECT }),
+            &[("x-memory-actor-session-id", "codex-fresh-session-04")],
+        )
+        .await;
+    assert_eq!(fresh_codex["status"], "none_pending", "{fresh_codex}");
+}
+
+/// Replays the pinned `ptbr-v1.json` corpus against a real isolated
+/// `ai-memory serve` binary (`POST /hook/batch` + `memory_query`), proving both
+/// retrieval (`answer_session_ids` in top-10) and the retrieval-vs-use
+/// boundary (required current facts vs stale/single-session negative controls).
+#[tokio::test]
+async fn ptbr_corpus_real_server_distinguishes_retrieval_from_evidence_use() {
+    let fixture_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/fixtures/retrieval/ptbr-v1.json");
+    let cases: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(&fixture_path).expect("read ptbr-v1.json"))
+            .expect("parse ptbr-v1.json");
+    assert_eq!(cases.len(), 4);
+
+    let fx = Fixture::start().await;
+    let workspace = "ptbr-eval-ws";
+
+    for case in &cases {
+        let qid = case["question_id"].as_str().unwrap();
+        let project = format!("ptbr-{qid}");
+        let cwd = format!("/tmp/ptbr/{project}");
+        let dates = case["haystack_dates"].as_array().unwrap();
+        let sids = case["haystack_session_ids"].as_array().unwrap();
+        let sessions = case["haystack_sessions"].as_array().unwrap();
+
+        let mut batch = Vec::new();
+        let mut raw_to_uuid = std::collections::HashMap::new();
+        for ((sid_v, date_v), turns_v) in sids.iter().zip(dates).zip(sessions) {
+            let raw_sid = sid_v.as_str().unwrap();
+            let date = date_v.as_str().unwrap();
+            let stored = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                format!("{project}\n{raw_sid}").as_bytes(),
+            )
+            .to_string();
+            raw_to_uuid.insert(raw_sid.to_string(), stored.clone());
+
+            let push_item = |event: &str, extra: Value| {
+                let mut url = format!(
+                    "/hook?event={event}&agent=claude-code&workspace={workspace}&project={project}&session_id={stored}"
+                );
+                if event == "stop" {
+                    url.push_str("&capture_assistant=1");
+                }
+                let mut body = json!({ "session_id": stored, "cwd": cwd });
+                if let Some(obj) = extra.as_object() {
+                    body.as_object_mut().unwrap().extend(obj.clone());
+                }
+                json!({ "url": url, "body": body })
+            };
+
+            batch.push(push_item(
+                "session-start",
+                json!({ "hook_event_name": "SessionStart", "source": "startup" }),
+            ));
+            for turn in turns_v.as_array().unwrap() {
+                let role = turn["role"].as_str().unwrap();
+                let content = turn["content"].as_str().unwrap();
+                let stamped = format!("[session date: {date}] {content}");
+                if role == "user" {
+                    batch.push(push_item(
+                        "user-prompt-submit",
+                        json!({ "hook_event_name": "UserPromptSubmit", "prompt": stamped }),
+                    ));
+                } else if role == "assistant" {
+                    batch.push(push_item(
+                        "stop",
+                        json!({
+                            "hook_event_name": "Stop",
+                            "_ai_memory_assistant": { "version": 1, "excerpt": stamped },
+                        }),
+                    ));
+                }
+            }
+            batch.push(push_item(
+                "session-end",
+                json!({ "hook_event_name": "SessionEnd", "reason": "exit" }),
+            ));
+        }
+
+        // Retry until the server accepts every batch item (mirrors evals ingest).
+        let mut pending = batch;
+        for pass in 0..30 {
+            if pending.is_empty() {
+                break;
+            }
+            let resp = fx
+                .client
+                .post(format!("{}/hook/batch", fx.base))
+                .bearer_auth(TOKEN)
+                .json(&pending)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
+            let accepted: std::collections::HashSet<usize> = resp["accepted_indices"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as usize))
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    let n = resp["accepted"].as_u64().unwrap_or(0) as usize;
+                    (0..n).collect()
+                });
+            pending = pending
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !accepted.contains(i))
+                .map(|(_, item)| item)
+                .collect();
+            if !pending.is_empty() {
+                assert!(pass < 29, "{qid}: hook batch still pending");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+
+        let query_resp = fx
+            .call_tool(
+                "memory_query",
+                json!({
+                    "query": case["question"].as_str().unwrap(),
+                    "workspace": workspace,
+                    "project": project,
+                    "limit": 10,
+                    "pin_first": false,
+                }),
+            )
+            .await;
+        let hits = query_resp["hits"].as_array().unwrap();
+        let hit_paths: Vec<&str> = hits.iter().filter_map(|h| h["path"].as_str()).collect();
+
+        // 1. Retrieval check: every expected evidence session appears in top-10.
+        let mut retrieved_uuids = Vec::new();
+        for ans_sid in case["answer_session_ids"].as_array().unwrap() {
+            let sid = ans_sid.as_str().unwrap();
+            let stored_uuid = &raw_to_uuid[sid];
+            let expected_path = format!("sessions/{stored_uuid}.md");
+            let _hit = hits
+                .iter()
+                .find(|h| h["path"].as_str() == Some(expected_path.as_str()))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{qid}: missing evidence session {sid} ({expected_path}) in {hit_paths:?}"
+                    )
+                });
+            retrieved_uuids.push(stored_uuid.clone());
+        }
+
+        // 2. Evidence-use check vs. retrieval: `memory_query` snippets are
+        //    bounded previews, so consuming the retrieved session means
+        //    reading its stored observations (`memory_read_session_observations`)
+        //    and verifying all required facts are present, while negative
+        //    controls (stale/general or single-session slice) fail the use
+        //    contract even when retrieved.
+        let mut evidence_bodies = Vec::new();
+        for stored_uuid in &retrieved_uuids {
+            let obs_resp = fx
+                .call_tool(
+                    "memory_read_session_observations",
+                    json!({
+                        "session_id": stored_uuid,
+                        "order": "asc",
+                        "limit": 20,
+                        "workspace": workspace,
+                        "project": project,
+                    }),
+                )
+                .await;
+            let bodies: Vec<&str> = obs_resp["observations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|o| o["body"].as_str())
+                .collect();
+            evidence_bodies.push(bodies.join("\n"));
+        }
+        let combined_evidence = evidence_bodies.join("\n").to_lowercase();
+        let required: Vec<&str> = case["evidence_contract"]["required_facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for fact in &required {
+            assert!(
+                combined_evidence.contains(&fact.to_lowercase()),
+                "{qid}: retrieved session evidence missing required fact {fact:?}: {combined_evidence}"
+            );
+        }
+
+        if case["evidence_contract"]["requires_multi_session_synthesis"].as_bool() == Some(true) {
+            assert_eq!(evidence_bodies.len(), 2);
+            let first_only = evidence_bodies[0].to_lowercase();
+            assert!(
+                !required
+                    .iter()
+                    .all(|f| first_only.contains(&f.to_lowercase())),
+                "{qid}: single retrieved session should not satisfy multi-session evidence use"
+            );
+        } else {
+            let stale_sid = case["evidence_contract"]["supersedes_session_id"]
+                .as_str()
+                .unwrap();
+            let stale_idx = sids
+                .iter()
+                .position(|v| v.as_str() == Some(stale_sid))
+                .unwrap();
+            let stale_text = sessions[stale_idx][0]["content"]
+                .as_str()
+                .unwrap()
+                .to_lowercase();
+            assert!(
+                !required
+                    .iter()
+                    .all(|f| stale_text.contains(&f.to_lowercase())),
+                "{qid}: stale/general session must not satisfy required current facts"
+            );
+        }
+    }
 }

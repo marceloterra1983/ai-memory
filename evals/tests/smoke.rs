@@ -206,3 +206,113 @@ fn empty_retrieval_selection_does_not_write_a_report() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("no scorable questions"));
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn ptbr_corpus_grep_scores_and_preserves_coding_v1_compatibility() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    for (variant_flag, dataset_name) in [("ptbr-v1", "ptbr_v1"), ("coding-v1", "coding_v1")] {
+        let out = tempfile::tempdir().unwrap();
+        let status = Command::new(env!("CARGO_BIN_EXE_ai-memory-eval"))
+            .current_dir(&repo_root)
+            .args([
+                "retrieval",
+                "--dataset-variant",
+                variant_flag,
+                "--engine",
+                "grep",
+            ])
+            .arg("--out")
+            .arg(out.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{variant_flag} grep run failed");
+
+        let run_dir = std::fs::read_dir(out.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .expect("run dir created");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(run_dir.join("report.json")).unwrap()).unwrap();
+        assert_eq!(report["dataset"], dataset_name);
+        assert_eq!(report["questions_scored"], 4);
+        assert_eq!(report["slices"]["overall"]["recall_at"]["10"], 1.0);
+        assert_eq!(report["slices"]["overall"]["recall_all_at"]["10"], 1.0);
+        assert!(run_dir.join("report.md").exists());
+    }
+}
+
+/// Offline server replay for the Brazilian Portuguese corpus (`ptbr-v1`).
+/// Checks `AI_MEMORY_EVAL_SERVER_BIN`, `target/release/ai-memory`, then
+/// `target/debug/ai-memory`.
+#[test]
+#[ignore = "needs a built server binary; uses the bundled offline ptbr-v1 corpus"]
+fn ptbr_corpus_replays_offline_with_identical_ab_results() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let server_bin = std::env::var_os("AI_MEMORY_EVAL_SERVER_BIN")
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| {
+            let rel = repo_root.join("target/release/ai-memory");
+            rel.exists().then_some(rel)
+        })
+        .unwrap_or_else(|| repo_root.join("target/debug/ai-memory"));
+    assert!(
+        server_bin.exists(),
+        "build the server first (cargo build -p ai-memory-cli)"
+    );
+
+    let out = tempfile::tempdir().unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_ai-memory-eval"))
+        .current_dir(&repo_root)
+        .args([
+            "retrieval",
+            "--dataset-variant",
+            "ptbr-v1",
+            "--candidate",
+            "--server-env",
+            "AI_MEMORY_CAPTURE_ASSISTANT=true",
+            "--query-arg",
+            "pin_first=false",
+            "--concurrency",
+            "1",
+        ])
+        .arg("--server-bin")
+        .arg(&server_bin)
+        .arg("--out")
+        .arg(out.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "ptbr-v1 server replay failed");
+
+    let run_dir = std::fs::read_dir(out.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(run_dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["baseline"]["dataset"], "ptbr_v1");
+    assert_eq!(report["baseline"]["config"], report["candidate"]["config"]);
+    assert_eq!(report["baseline"]["questions_scored"], 4);
+    assert_eq!(report["candidate"]["questions_scored"], 4);
+    for question in report["baseline"]["per_question"].as_array().unwrap() {
+        assert_eq!(
+            question["recall_at"]["10"], 1.0,
+            "missing expected evidence: {}",
+            question["question_id"]
+        );
+        assert_eq!(
+            question["recall_all_at"]["10"], 1.0,
+            "missing full multi-session evidence: {}",
+            question["question_id"]
+        );
+    }
+    for metric in ["hit_at", "recall_at", "recall_all_at"] {
+        for k in ["1", "3", "5", "10"] {
+            assert_eq!(report["delta"][metric][k], 0.0, "{metric}@{k}");
+        }
+    }
+    assert_eq!(report["delta"]["context_tokens_mean"], 0.0);
+    assert_eq!(report["delta"]["context_tokens_median"], 0.0);
+}

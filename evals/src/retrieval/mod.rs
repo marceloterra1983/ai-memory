@@ -61,8 +61,9 @@ pub struct RetrievalArgs {
     #[arg(long)]
     dataset: Option<PathBuf>,
 
-    /// Pinned dataset: `s` or `s-cleaned` for LongMemEval, or the bundled
-    /// offline coding-session corpus `coding-v1`.
+    /// Pinned dataset: `s` or `s-cleaned` for LongMemEval, the bundled
+    /// offline coding-session corpus `coding-v1`, or the Brazilian Portuguese
+    /// corpus `ptbr-v1`.
     #[arg(long, value_enum, default_value_t = Variant::S)]
     dataset_variant: Variant,
 
@@ -233,6 +234,7 @@ enum Variant {
     S,
     SCleaned,
     CodingV1,
+    PtbrV1,
 }
 
 impl Variant {
@@ -241,6 +243,7 @@ impl Variant {
             Self::S => &dataset::VARIANT_S,
             Self::SCleaned => &dataset::VARIANT_S_CLEANED,
             Self::CodingV1 => &dataset::VARIANT_CODING_V1,
+            Self::PtbrV1 => &dataset::VARIANT_PTBR_V1,
         }
     }
 }
@@ -900,6 +903,25 @@ fn run_grep(
 mod tests {
     use super::*;
     use clap::Parser as _;
+
+    #[test]
+    fn variant_ptbr_v1_parses_and_maps_to_pinned_dataset() {
+        let cli = crate::Cli::try_parse_from([
+            "ai-memory-eval",
+            "retrieval",
+            "--dataset-variant",
+            "ptbr-v1",
+        ])
+        .unwrap();
+        let crate::Command::Retrieval(args) = cli.command else {
+            panic!("expected retrieval arguments");
+        };
+        assert_eq!(args.dataset_variant.pinned().name, "ptbr_v1");
+        assert_eq!(
+            args.dataset_variant.pinned().default_path,
+            "evals/fixtures/retrieval/ptbr-v1.json"
+        );
+    }
 
     #[test]
     fn candidate_reranker_supports_inheritance_and_explicit_overrides() {

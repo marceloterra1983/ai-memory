@@ -1,0 +1,608 @@
+[
+  {
+    "question_id": "ptbr-decisao-substituida",
+    "question_type": "ptbr-decisao-substituida",
+    "question": "Qual fila persistente e qual timeout estão vigentes para o faturamento_api após a substituição da decisão anterior?",
+    "answer": "Para o faturamento_api vigora a fila postgres_skip_locked com timeout de 40 segundos, substituindo redis_streams e 12 segundos.",
+    "question_date": "2026/10/24 (Sat) 12:00",
+    "haystack_dates": [
+      "2026/10/01 09:00",
+      "2026/10/02 09:00",
+      "2026/10/03 09:00",
+      "2026/10/04 09:00",
+      "2026/10/05 09:00",
+      "2026/10/06 09:00",
+      "2026/10/07 09:00",
+      "2026/10/08 09:00",
+      "2026/10/09 09:00",
+      "2026/10/10 09:00",
+      "2026/10/11 09:00",
+      "2026/10/12 09:00"
+    ],
+    "haystack_session_ids": [
+      "ptbr-decisao-substituida-logs",
+      "ptbr-decisao-substituida-anterior",
+      "ptbr-decisao-substituida-testes",
+      "ptbr-decisao-substituida-docs",
+      "ptbr-decisao-substituida-assets",
+      "ptbr-decisao-substituida-release",
+      "ptbr-decisao-substituida-metricas",
+      "ptbr-decisao-substituida-config",
+      "ptbr-decisao-substituida-oauth",
+      "ptbr-decisao-substituida-backup",
+      "ptbr-decisao-substituida-atual",
+      "ptbr-decisao-substituida-formato"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "Os registros estruturados preservam identificadores de requisição e removem cabeçalhos de autorização. A rotação mantém sete dias."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Decisão inicial para o serviço faturamento_api: usar a fila redis_streams com retenção de 24 horas e timeout de 12 segundos nas publicações."
+        },
+        {
+          "role": "assistant",
+          "content": "Registrado: proposta inicial do faturamento_api definida em redis_streams com timeout de 12 segundos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "A suíte de integração cria bancos temporários isolados e remove os diretórios ao final de cada execução."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O guia de migração precisa de um link no menu principal da documentação. Ajuste a âncora do título antes de publicar."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O cache de arquivos estáticos usa hash do conteúdo. A folha de estilos é gerada em desenvolvimento e versionada no repositório."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O roteiro de entrega exige compilação por plataforma e conferência dos resumos criptográficos dos pacotes."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O coletor de telemetria exporta contadores limitados. Evite colocar caminhos locais ou nomes de usuários nos rótulos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "As variáveis de ambiente sobrescrevem o arquivo TOML na inicialização antes da validação dos tipos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O login OAuth usa retorno local no navegador e guarda o token de atualização no cofre do usuário."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "A cópia de segurança on-line gera um instantâneo consistente do SQLite separado dos arquivos Markdown."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Substituição da decisão anterior do faturamento_api: a fila redis_streams perdeu mensagens no reinício, então o padrão vigente agora é a fila persistente postgres_skip_locked com timeout de 40 segundos e retenção de 72 horas. Descartar redis_streams e 12 segundos.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Atualizado: faturamento_api passa a usar exclusivamente postgres_skip_locked e timeout de 40 segundos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Execute o formatador antes de commitar e mantenha comentários curtos explicando o motivo de cada trava."
+        }
+      ]
+    ],
+    "answer_session_ids": [
+      "ptbr-decisao-substituida-atual"
+    ],
+    "incorrect_session_ids": [
+      "ptbr-decisao-substituida-logs",
+      "ptbr-decisao-substituida-anterior",
+      "ptbr-decisao-substituida-testes",
+      "ptbr-decisao-substituida-docs",
+      "ptbr-decisao-substituida-assets",
+      "ptbr-decisao-substituida-release",
+      "ptbr-decisao-substituida-metricas",
+      "ptbr-decisao-substituida-config",
+      "ptbr-decisao-substituida-oauth",
+      "ptbr-decisao-substituida-backup",
+      "ptbr-decisao-substituida-formato"
+    ],
+    "evidence_contract": {
+      "category": "decisao-substituida",
+      "supersedes_session_id": "ptbr-decisao-substituida-anterior",
+      "required_facts": [
+        "postgres_skip_locked",
+        "40 segundos"
+      ],
+      "forbidden_stale_facts": [
+        "redis_streams",
+        "12 segundos"
+      ],
+      "requires_multi_session_synthesis": false,
+      "session_roles": {
+        "ptbr-decisao-substituida-anterior": "decisao_anterior",
+        "ptbr-decisao-substituida-atual": "decisao_atual"
+      }
+    }
+  },
+  {
+    "question_id": "ptbr-excecao-regra",
+    "question_type": "ptbr-excecao-regra",
+    "question": "Qual exceção à regra geral de publicação se aplica a um hotfix_bacen do conciliador_pix durante incidente de liquidação?",
+    "answer": "Para hotfix_bacen do conciliador_pix em incidente de liquidação, a exceção permite publicar fora da janela congelada com apenas um revisor de plantão e registro do protocolo INC-PIX.",
+    "question_date": "2026/10/24 (Sat) 12:00",
+    "haystack_dates": [
+      "2026/10/01 09:00",
+      "2026/10/02 09:00",
+      "2026/10/03 09:00",
+      "2026/10/04 09:00",
+      "2026/10/05 09:00",
+      "2026/10/06 09:00",
+      "2026/10/07 09:00",
+      "2026/10/08 09:00",
+      "2026/10/09 09:00",
+      "2026/10/10 09:00",
+      "2026/10/11 09:00",
+      "2026/10/12 09:00"
+    ],
+    "haystack_session_ids": [
+      "ptbr-excecao-regra-logs",
+      "ptbr-excecao-regra-testes",
+      "ptbr-excecao-regra-geral",
+      "ptbr-excecao-regra-docs",
+      "ptbr-excecao-regra-assets",
+      "ptbr-excecao-regra-release",
+      "ptbr-excecao-regra-metricas",
+      "ptbr-excecao-regra-config",
+      "ptbr-excecao-regra-oauth",
+      "ptbr-excecao-regra-excecao",
+      "ptbr-excecao-regra-backup",
+      "ptbr-excecao-regra-formato"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "Os registros estruturados preservam identificadores de requisição e removem cabeçalhos de autorização. A rotação mantém sete dias."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "A suíte de integração cria bancos temporários isolados e remove os diretórios ao final de cada execução."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Regra geral de publicação do conciliador_pix: toda entrega em produção exige janela liberada e aprovação de dois revisores."
+        },
+        {
+          "role": "assistant",
+          "content": "Anotada a regra geral do conciliador_pix: dois revisores e respeito à janela liberada."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O guia de migração precisa de um link no menu principal da documentação. Ajuste a âncora do título antes de publicar."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O cache de arquivos estáticos usa hash do conteúdo. A folha de estilos é gerada em desenvolvimento e versionada no repositório."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O roteiro de entrega exige compilação por plataforma e conferência dos resumos criptográficos dos pacotes."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O coletor de telemetria exporta contadores limitados. Evite colocar caminhos locais ou nomes de usuários nos rótulos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "As variáveis de ambiente sobrescrevem o arquivo TOML na inicialização antes da validação dos tipos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O login OAuth usa retorno local no navegador e guarda o token de atualização no cofre do usuário."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Exceção aprovada à regra geral de publicação do conciliador_pix: quando houver incidente de liquidação e rótulo hotfix_bacen, é permitido publicar fora da janela congelada com apenas um revisor de plantão, desde que o protocolo INC-PIX seja gravado na trilha de auditoria.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Exceção registrada para hotfix_bacen no conciliador_pix: um revisor de plantão, fora da janela congelada, com protocolo INC-PIX."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "A cópia de segurança on-line gera um instantâneo consistente do SQLite separado dos arquivos Markdown."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Execute o formatador antes de commitar e mantenha comentários curtos explicando o motivo de cada trava."
+        }
+      ]
+    ],
+    "answer_session_ids": [
+      "ptbr-excecao-regra-excecao"
+    ],
+    "incorrect_session_ids": [
+      "ptbr-excecao-regra-logs",
+      "ptbr-excecao-regra-testes",
+      "ptbr-excecao-regra-geral",
+      "ptbr-excecao-regra-docs",
+      "ptbr-excecao-regra-assets",
+      "ptbr-excecao-regra-release",
+      "ptbr-excecao-regra-metricas",
+      "ptbr-excecao-regra-config",
+      "ptbr-excecao-regra-oauth",
+      "ptbr-excecao-regra-backup",
+      "ptbr-excecao-regra-formato"
+    ],
+    "evidence_contract": {
+      "category": "excecao-regra",
+      "supersedes_session_id": "ptbr-excecao-regra-geral",
+      "required_facts": [
+        "fora da janela congelada",
+        "um revisor de plantão",
+        "INC-PIX"
+      ],
+      "forbidden_stale_facts": [
+        "dois revisores",
+        "janela liberada"
+      ],
+      "requires_multi_session_synthesis": false,
+      "session_roles": {
+        "ptbr-excecao-regra-geral": "regra_geral",
+        "ptbr-excecao-regra-excecao": "excecao_aplicavel"
+      }
+    }
+  },
+  {
+    "question_id": "ptbr-evidencia-duas-sessoes",
+    "question_type": "ptbr-evidencia-duas-sessoes",
+    "question": "Por que o importador_nfe esgotava o limite max_pool_nfe=24 e qual ajuste com NFE_PREVALIDACAO_FORA_TX resolveu o gargalo?",
+    "answer": "O importador_nfe abria transação longa antes de validar o certificado A1, esgotando max_pool_nfe=24; a correção moveu a validação do certificado A1 para fora da transação com NFE_PREVALIDACAO_FORA_TX=true.",
+    "question_date": "2026/10/24 (Sat) 12:00",
+    "haystack_dates": [
+      "2026/10/01 09:00",
+      "2026/10/02 09:00",
+      "2026/10/03 09:00",
+      "2026/10/04 09:00",
+      "2026/10/05 09:00",
+      "2026/10/06 09:00",
+      "2026/10/07 09:00",
+      "2026/10/08 09:00",
+      "2026/10/09 09:00",
+      "2026/10/10 09:00",
+      "2026/10/11 09:00",
+      "2026/10/12 09:00"
+    ],
+    "haystack_session_ids": [
+      "ptbr-duas-sessoes-logs",
+      "ptbr-duas-sessoes-testes",
+      "ptbr-duas-sessoes-docs",
+      "ptbr-duas-sessoes-diagnostico",
+      "ptbr-duas-sessoes-assets",
+      "ptbr-duas-sessoes-release",
+      "ptbr-duas-sessoes-metricas",
+      "ptbr-duas-sessoes-config",
+      "ptbr-duas-sessoes-correcao",
+      "ptbr-duas-sessoes-oauth",
+      "ptbr-duas-sessoes-backup",
+      "ptbr-duas-sessoes-formato"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "Os registros estruturados preservam identificadores de requisição e removem cabeçalhos de autorização. A rotação mantém sete dias."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "A suíte de integração cria bancos temporários isolados e remove os diretórios ao final de cada execução."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O guia de migração precisa de um link no menu principal da documentação. Ajuste a âncora do título antes de publicar."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Diagnóstico no importador_nfe: o serviço esgotava o limite max_pool_nfe=24 porque cada lote abria uma transação longa no banco antes de validar o certificado A1.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Causa raiz isolada no importador_nfe: transação longa aberta antes de validar o certificado A1 esgota max_pool_nfe=24."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O cache de arquivos estáticos usa hash do conteúdo. A folha de estilos é gerada em desenvolvimento e versionada no repositório."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O roteiro de entrega exige compilação por plataforma e conferência dos resumos criptográficos dos pacotes."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O coletor de telemetria exporta contadores limitados. Evite colocar caminhos locais ou nomes de usuários nos rótulos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "As variáveis de ambiente sobrescrevem o arquivo TOML na inicialização antes da validação dos tipos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Correção aplicada no importador_nfe: movemos a checagem do certificado A1 para fora da transação e habilitamos NFE_PREVALIDACAO_FORA_TX=true, mantendo a fila estável.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Ajuste validado no importador_nfe: checagem prévia fora da transação com NFE_PREVALIDACAO_FORA_TX=true eliminou o gargalo."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O login OAuth usa retorno local no navegador e guarda o token de atualização no cofre do usuário."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "A cópia de segurança on-line gera um instantâneo consistente do SQLite separado dos arquivos Markdown."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Execute o formatador antes de commitar e mantenha comentários curtos explicando o motivo de cada trava."
+        }
+      ]
+    ],
+    "answer_session_ids": [
+      "ptbr-duas-sessoes-diagnostico",
+      "ptbr-duas-sessoes-correcao"
+    ],
+    "incorrect_session_ids": [
+      "ptbr-duas-sessoes-logs",
+      "ptbr-duas-sessoes-testes",
+      "ptbr-duas-sessoes-docs",
+      "ptbr-duas-sessoes-assets",
+      "ptbr-duas-sessoes-release",
+      "ptbr-duas-sessoes-metricas",
+      "ptbr-duas-sessoes-config",
+      "ptbr-duas-sessoes-oauth",
+      "ptbr-duas-sessoes-backup",
+      "ptbr-duas-sessoes-formato"
+    ],
+    "evidence_contract": {
+      "category": "evidencia-duas-sessoes",
+      "required_facts": [
+        "transação longa",
+        "max_pool_nfe=24",
+        "NFE_PREVALIDACAO_FORA_TX=true"
+      ],
+      "forbidden_stale_facts": [],
+      "requires_multi_session_synthesis": true,
+      "session_roles": {
+        "ptbr-duas-sessoes-diagnostico": "diagnostico_sessao_1",
+        "ptbr-duas-sessoes-correcao": "correcao_sessao_2"
+      }
+    }
+  },
+  {
+    "question_id": "ptbr-troca-agente-handoff",
+    "question_type": "ptbr-troca-agente-handoff",
+    "question": "Na troca de agente por handoff do assinador_xml, qual próximo passo obrigatório e qual modo de token ficaram pendentes para o agente receptor?",
+    "answer": "O próximo passo obrigatório pendente é executar cargo test --test assinatura_a3_offline com HSM_TOKEN_MODE=simulado antes de publicar a tag v2.4.1.",
+    "question_date": "2026/10/24 (Sat) 12:00",
+    "haystack_dates": [
+      "2026/10/01 09:00",
+      "2026/10/02 09:00",
+      "2026/10/03 09:00",
+      "2026/10/04 09:00",
+      "2026/10/05 09:00",
+      "2026/10/06 09:00",
+      "2026/10/07 09:00",
+      "2026/10/08 09:00",
+      "2026/10/09 09:00",
+      "2026/10/10 09:00",
+      "2026/10/11 09:00",
+      "2026/10/12 09:00"
+    ],
+    "haystack_session_ids": [
+      "ptbr-handoff-logs",
+      "ptbr-handoff-testes",
+      "ptbr-handoff-docs",
+      "ptbr-handoff-assets",
+      "ptbr-handoff-tentativa-anterior",
+      "ptbr-handoff-release",
+      "ptbr-handoff-metricas",
+      "ptbr-handoff-config",
+      "ptbr-handoff-oauth",
+      "ptbr-handoff-backup",
+      "ptbr-handoff-formato",
+      "ptbr-handoff-passagem-bastao"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "Os registros estruturados preservam identificadores de requisição e removem cabeçalhos de autorização. A rotação mantém sete dias."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "A suíte de integração cria bancos temporários isolados e remove os diretórios ao final de cada execução."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O guia de migração precisa de um link no menu principal da documentação. Ajuste a âncora do título antes de publicar."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O cache de arquivos estáticos usa hash do conteúdo. A folha de estilos é gerada em desenvolvimento e versionada no repositório."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Tentativa inicial no assinador_xml: o script legado usava HSM_TOKEN_MODE=pkcs11_hardware no slot zero, mas falhou sem leitor físico conectado."
+        },
+        {
+          "role": "assistant",
+          "content": "Tentativa com HSM_TOKEN_MODE=pkcs11_hardware descartada por falta do leitor físico."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O roteiro de entrega exige compilação por plataforma e conferência dos resumos criptográficos dos pacotes."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O coletor de telemetria exporta contadores limitados. Evite colocar caminhos locais ou nomes de usuários nos rótulos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "As variáveis de ambiente sobrescrevem o arquivo TOML na inicialização antes da validação dos tipos."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "O login OAuth usa retorno local no navegador e guarda o token de atualização no cofre do usuário."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "A cópia de segurança on-line gera um instantâneo consistente do SQLite separado dos arquivos Markdown."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Execute o formatador antes de commitar e mantenha comentários curtos explicando o motivo de cada trava."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Passagem de bastão (handoff) do claude-code para o codex no assinador_xml: o parser do lote RPS foi concluído; próximo passo obrigatório para o agente receptor é executar cargo test --test assinatura_a3_offline com HSM_TOKEN_MODE=simulado antes de publicar a tag v2.4.1.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Handoff do assinador_xml pronto para troca de agente: próximo passo obrigatório é cargo test --test assinatura_a3_offline com HSM_TOKEN_MODE=simulado antes da tag v2.4.1."
+        }
+      ]
+    ],
+    "answer_session_ids": [
+      "ptbr-handoff-passagem-bastao"
+    ],
+    "incorrect_session_ids": [
+      "ptbr-handoff-logs",
+      "ptbr-handoff-testes",
+      "ptbr-handoff-docs",
+      "ptbr-handoff-assets",
+      "ptbr-handoff-tentativa-anterior",
+      "ptbr-handoff-release",
+      "ptbr-handoff-metricas",
+      "ptbr-handoff-config",
+      "ptbr-handoff-oauth",
+      "ptbr-handoff-backup",
+      "ptbr-handoff-formato"
+    ],
+    "evidence_contract": {
+      "category": "troca-agente-handoff",
+      "supersedes_session_id": "ptbr-handoff-tentativa-anterior",
+      "writer_harness": "claude-code",
+      "reader_harness": "codex",
+      "required_facts": [
+        "cargo test --test assinatura_a3_offline",
+        "HSM_TOKEN_MODE=simulado",
+        "v2.4.1"
+      ],
+      "forbidden_stale_facts": [
+        "HSM_TOKEN_MODE=pkcs11_hardware",
+        "slot zero"
+      ],
+      "requires_multi_session_synthesis": false,
+      "session_roles": {
+        "ptbr-handoff-tentativa-anterior": "tentativa_anterior",
+        "ptbr-handoff-passagem-bastao": "handoff_proximo_passo"
+      }
+    }
+  }
+]

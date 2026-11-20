@@ -506,7 +506,8 @@ questions graded on both sides and reports the denominator.
 
 JSON and Markdown reports for server runs record the SHA-256 of the
 selected `--server-bin` executable. The `commit` field records the
-evaluator checkout, which can differ from the server build.
+evaluator checkout, which can differ from the server build. Reports name
+environment overrides by key. The values are passed to the server only.
 
 ```bash
 # Determinism check — baseline == candidate ⇒ accuracy/context delta = 0:

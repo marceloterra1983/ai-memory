@@ -108,7 +108,7 @@ pub struct RetrievalArgs {
     ks: Vec<usize>,
 
     /// Score only whole ranked hits within this estimated title/snippet token
-    /// budget. Both A/B sides and the optional harness QA read the same prefix.
+    /// budget. Each A/B side scores the prefix its optional QA reads.
     #[arg(long)]
     context_token_budget: Option<usize>,
 
@@ -302,8 +302,8 @@ impl Knobs {
             "embeddings={embeddings} reranker={}",
             if reranker { "on" } else { "off" }
         );
-        for (k, v) in &env {
-            summary.push_str(&format!(" env:{k}={v}"));
+        for (key, _) in &env {
+            summary.push_str(&format!(" env:{key}"));
         }
         for (k, v) in &query_args {
             summary.push_str(&format!(" arg:{k}={v}"));
@@ -961,7 +961,7 @@ mod tests {
             "candidate",
             "local",
             true,
-            &["AI_MEMORY_LLM_PROVIDER=openai".into()],
+            &["AI_MEMORY_EVAL_PROBE=synthetic-test-value-only".into()],
             &["include_expired=true".into()],
             IngestMode::Hooks,
             DatePrefix::Turn,
@@ -969,7 +969,9 @@ mod tests {
         .unwrap();
         assert!(k.summary.contains("embeddings=local"));
         assert!(k.summary.contains("reranker=on"));
-        assert!(k.summary.contains("env:AI_MEMORY_LLM_PROVIDER=openai"));
+        assert!(k.summary.contains("env:AI_MEMORY_EVAL_PROBE"));
+        assert!(!k.summary.contains("synthetic-test-value-only"));
+        assert_eq!(k.launch_config().env[0].1, "synthetic-test-value-only");
         assert!(k.summary.contains("arg:include_expired=true"));
         assert_eq!(k.mode, "local-embeddings");
         // Default ablations stay out of the summary (baseline reports

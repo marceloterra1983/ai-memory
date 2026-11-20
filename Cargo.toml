@@ -151,7 +151,18 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 # rmcp 3.x speaks the MCP 2026-07-28 revision (stateless `server/discover`,
 # per-request `_meta` negotiation) while keeping the legacy `initialize`
 # handshake, so both-era clients connect without a shim (#1924).
-rmcp = { version = "3.11", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"] }
+# Pin https://github.com/modelcontextprotocol/rust-sdk/pull/1474 to omit chrono
+# (RUSTSEC-2026-0543). Once a crates.io release supports these features with
+# chrono absent from the lockfile, drop the pin, the Git allowlist entry in
+# deny.toml, and the SDK source hash in flake.nix.
+rmcp = { version = "3.11", git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "9043cdfa8694d83bf506c2f3eb0313ec173edd7e", default-features = false, features = [
+    "base64",
+    "server",
+    "macros",
+    "transport-io",
+    "transport-streamable-http-server",
+    "schemars",
+] }
 schemars = "1"
 axum = "0.8"
 # Same `http` 1.x rmcp/axum use, so handlers can read the injected

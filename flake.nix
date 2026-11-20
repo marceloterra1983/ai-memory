@@ -367,6 +367,7 @@
                 lockFile = ./Cargo.lock;
                 outputHashes = {
                   "zip-8.6.0" = "sha256-cnLvGK9nhGeYqJYA6kjlYTYChH0fXs2q27rWvHEZWpg=";
+                  "rmcp-3.11.0" = "sha256-uDI5SFaiXwq+tcbEpdsI3UbKhlRfQS/7wpoMLH+jsYI=";
                 };
               };
 

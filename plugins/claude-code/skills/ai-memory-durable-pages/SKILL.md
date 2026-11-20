@@ -68,6 +68,12 @@ TTL, normal search, recent, and briefing reads hide the page; the next forget
 sweep deletes it. A TTL outranks `pinned`, so do not combine them unless the user
 has deliberately requested that behavior.
 
+When the user provides operational dates and a source, pass
+`effective_validity: {from, until?, source: {path, commit}}` to
+`memory_write_page`. Use explicit `YYYY-MM-DD` dates. The start is inclusive,
+the optional end is exclusive, and the source identifies the file and
+commit supporting the interval.
+
 ## Writing a session's pages yourself
 
 When the user asks to consolidate the session you are taking part in, write its pages with your own model instead of the server's: read the session's raw observations first (the retrieval skill covers that read), then write each page with `memory_write_page` passing the same `session_id`, which records the session as evidence and settles its queued consolidation job. Match the server's multi-page layout, at most five pages:

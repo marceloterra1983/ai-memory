@@ -39,6 +39,11 @@ This rule applies only to project-scoped calls. For cross-project retrieval, `gl
 - For "what did this session do" or "where did it stop", start with `memory_briefing` to keep the lookup small. If that is not enough, call the session observations tool with `order: "desc"`, a narrow `kinds` filter such as `["user-prompt", "stop", "session-end"]`, a small `limit` (5-10), and a small `body_max_chars` (200-400). Widen `limit`/`body_max_chars`/`kinds` only if the narrow read is insufficient. Do not also read a `sessions/<id>.md` page for the same session in the same lookup, because it repeats the content returned by the observations call.
 - After a context compaction, re-ground before continuing: read the injected post-compaction anchor, or else call the session observations tool with `session_id: "current"` (or your session id) and `kinds: ["user-prompt", "stop"]`, and trust those recorded prompts over the summary. The handoff skill covers the details.
 
+For an operational-date audit, pass `effective_on` as `YYYY-MM-DD` and
+search one authorized project. Add `as_of` when the user also asks which
+version was known at a specific instant. Keep the search project-scoped and
+cite the page version and its recorded source.
+
 ## Broaden on miss
 
 If a current-project search is empty or thin, do not conclude the knowledge was never recorded. It may live in a sibling project such as infra, ops, or a related app.

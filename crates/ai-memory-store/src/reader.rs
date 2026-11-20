@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use ai_memory_core::scaffolding::{SYSTEM_REMINDER_OPEN, session_prompt_display_title};
 use ai_memory_core::{
     AgentKind, AgentMessage, AutoImproveProposalId, AutoImproveRunId, FAILED_TOOL_OUTCOME_LINE,
     Handoff, HandoffContent, HandoffId, HandoffLifecycle, HandoffOrigin, HandoffScope,
@@ -23,7 +24,7 @@ use ai_memory_core::{
 use jiff::Timestamp;
 use parking_lot::Mutex;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, named_params, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 // `ai_memory_core::Tier` is referenced via fully-qualified path inside the
@@ -15683,12 +15684,14 @@ pub struct SessionToolTitles {
 pub struct SessionPromptTitles {
     /// User prompts the session holds (the uncapped total).
     pub total: usize,
-    /// The first titles in capture order: every one of them when the session
-    /// holds at most `head + tail` prompts, else the first `head`.
+    /// Visible titles among all prompts when they fit, or among the first
+    /// `head` captures when the session exceeds the cap.
     pub first: Vec<String>,
-    /// The last `tail` titles in capture order, only when the session holds
-    /// more than `head + tail` prompts.
+    /// Visible titles among the last `tail` captures when the session exceeds
+    /// the cap.
     pub last: Vec<String>,
+    /// One-based capture positions for the visible titles in `first` then `last`.
+    pub capture_ordinals: Vec<usize>,
 }
 
 /// What a page prints about one observation, without the body.
@@ -15700,7 +15703,7 @@ pub struct SessionLine {
     pub extension: Option<String>,
     /// Source event name, if any.
     pub source_event: Option<String>,
-    /// The first [`SESSION_LINE_TITLE_CHARS`] characters of the title.
+    /// The first [`SESSION_LINE_TITLE_CHARS`] characters of the display title.
     pub title: String,
     /// When the observation happened.
     pub created_at: Timestamp,
@@ -15708,6 +15711,20 @@ pub struct SessionLine {
 
 /// Title characters a [`SessionLine`] keeps.
 pub const SESSION_LINE_TITLE_CHARS: usize = 80;
+
+// SQLite trims only ASCII space by default. Match Rust's Unicode White_Space
+// set so both sides recognize the same reminder candidates.
+const RUST_WHITESPACE: &str = concat!(
+    "\t\n\u{b}\u{c}\r \u{85}\u{a0}\u{1680}",
+    "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}",
+    "\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}",
+);
+
+const PROMPT_REMINDER_SQL: &str = "(\
+    substr(ltrim(title, :whitespace), 1, length(:reminder)) = :reminder \
+    OR (trim(title, :whitespace) IN ('', :prompt_kind) \
+        AND substr(ltrim(body, :whitespace), 1, length(:reminder)) = :reminder)\
+)";
 
 /// The kinds that make a session worth a summary page: a user prompt or a tool
 /// use. The writer's lifecycle-only end
@@ -15719,10 +15736,8 @@ pub const SUBSTANTIVE_OBSERVATION_KIND_SQL: &str =
     "kind IN ('user-prompt', 'pre-tool-use', 'post-tool-use')";
 
 impl SessionObservationSnapshot<'_> {
-    /// Rows this snapshot has deserialized into an [`Observation`] or a
-    /// [`SessionLine`] so far. Aggregates and the prompt-title queries (the
-    /// bounded list and the one-row-at-a-time title walk) are not counted:
-    /// they return counters and short strings, not rows.
+    /// Rows this snapshot has read for [`Observation`] or [`SessionLine`]
+    /// values so far. Aggregates and the prompt-title queries are excluded.
     #[must_use]
     pub fn rows_read(&self) -> usize {
         self.rows_read.get()
@@ -15840,8 +15855,7 @@ impl SessionObservationSnapshot<'_> {
     ///
     /// A page prints at most the first `head` and the last `tail` titles, so
     /// this reads at most `head + tail` titles plus one `COUNT(*)`, whatever
-    /// the session holds. Titles are short by construction (the router
-    /// truncates them for display).
+    /// the session holds. Only reminder candidates return their body.
     ///
     /// # Errors
     /// Propagates any SQL error.
@@ -15853,19 +15867,35 @@ impl SessionObservationSnapshot<'_> {
             |row| row.get::<_, i64>(0),
         )?;
         let total = usize::try_from(total).unwrap_or(usize::MAX);
-        if total <= head + tail {
-            return Ok(SessionPromptTitles {
-                total,
-                first: self.prompt_title_window(total, ObservationOrder::Asc)?,
-                last: Vec::new(),
-            });
-        }
-        let mut last = self.prompt_title_window(tail, ObservationOrder::Desc)?;
-        last.reverse();
+        let (first, last) = if total <= head + tail {
+            (
+                self.prompt_title_window(total, ObservationOrder::Asc)?,
+                Vec::new(),
+            )
+        } else {
+            let mut last = self.prompt_title_window(tail, ObservationOrder::Desc)?;
+            last.reverse();
+            (self.prompt_title_window(head, ObservationOrder::Asc)?, last)
+        };
+        let mut capture_ordinals = Vec::new();
+        let mut visible_window = |offset: usize, window: Vec<Option<String>>| {
+            window
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, title)| {
+                    let title = title?;
+                    capture_ordinals.push(offset + index + 1);
+                    Some(title)
+                })
+                .collect()
+        };
+        let first = visible_window(0, first);
+        let last = visible_window(total - last.len(), last);
         Ok(SessionPromptTitles {
             total,
-            first: self.prompt_title_window(head, ObservationOrder::Asc)?,
+            first,
             last,
+            capture_ordinals,
         })
     }
 
@@ -15877,24 +15907,35 @@ impl SessionObservationSnapshot<'_> {
         &self,
         limit: usize,
         order: ObservationOrder,
-    ) -> StoreResult<Vec<String>> {
+    ) -> StoreResult<Vec<Option<String>>> {
         let direction = match order {
             ObservationOrder::Asc => "ASC",
             ObservationOrder::Desc => "DESC",
         };
         let sql = format!(
-            "SELECT title FROM observations \
-             WHERE session_id = ?1 AND kind = ?2 \
-             ORDER BY created_at {direction}, rowid {direction} LIMIT ?3"
+            "SELECT title, CASE WHEN {PROMPT_REMINDER_SQL} THEN body END \
+             FROM observations WHERE session_id = :session_id AND kind = :prompt_kind \
+             ORDER BY created_at {direction}, rowid {direction} LIMIT :limit"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(
-            params![
-                self.session_id,
-                ObservationKind::UserPrompt.as_str(),
-                i64::try_from(limit).unwrap_or(i64::MAX),
-            ],
-            |row| row.get(0),
+            named_params! {
+                ":session_id": self.session_id,
+                ":prompt_kind": ObservationKind::UserPrompt.as_str(),
+                ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+                ":whitespace": RUST_WHITESPACE,
+                ":reminder": SYSTEM_REMINDER_OPEN,
+            },
+            |row| {
+                let title: String = row.get(0)?;
+                let body: Option<String> = row.get(1)?;
+                Ok(match body {
+                    Some(body) => {
+                        session_prompt_display_title(&title, &body).map(|title| title.into_owned())
+                    }
+                    None => Some(title),
+                })
+            },
         )?;
         let mut out = Vec::with_capacity(limit);
         for title in rows {
@@ -15915,30 +15956,22 @@ impl SessionObservationSnapshot<'_> {
         [preamble, reminder_prefix]: [&str; 2],
         mut visit: impl FnMut(&str, Option<&str>) -> bool,
     ) -> StoreResult<()> {
-        // SQLite trims only ASCII space by default. Match Rust's Unicode
-        // White_Space set so both sides recognize the same title candidates.
-        const RUST_WHITESPACE: &str = concat!(
-            "\t\n\u{b}\u{c}\r \u{85}\u{a0}\u{1680}",
-            "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}",
-            "\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}",
-        );
-        let mut stmt = self.conn.prepare_cached(
+        let sql = format!(
             "SELECT title, CASE \
-                WHEN trim(title, ?5) = ?3 THEN body \
-                WHEN substr(ltrim(title, ?5), 1, length(?4)) = ?4 THEN body \
-                WHEN trim(title, ?5) IN ('', ?2) \
-                    AND substr(ltrim(body, ?5), 1, length(?4)) = ?4 THEN body \
+                WHEN trim(title, :whitespace) = :preamble THEN body \
+                WHEN {PROMPT_REMINDER_SQL} THEN body \
              END \
-             FROM observations WHERE session_id = ?1 AND kind = ?2 \
+             FROM observations WHERE session_id = :session_id AND kind = :prompt_kind \
              ORDER BY created_at ASC, rowid ASC",
-        )?;
-        let mut rows = stmt.query(params![
-            self.session_id,
-            ObservationKind::UserPrompt.as_str(),
-            preamble,
-            reminder_prefix,
-            RUST_WHITESPACE,
-        ])?;
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let mut rows = stmt.query(named_params! {
+            ":session_id": self.session_id,
+            ":prompt_kind": ObservationKind::UserPrompt.as_str(),
+            ":preamble": preamble,
+            ":reminder": reminder_prefix,
+            ":whitespace": RUST_WHITESPACE,
+        })?;
         while let Some(row) = rows.next()? {
             let title: String = row.get(0)?;
             let body: Option<String> = row.get(1)?;
@@ -15949,7 +15982,7 @@ impl SessionObservationSnapshot<'_> {
         Ok(())
     }
 
-    /// The first `limit` rows of the session, oldest first, as page lines.
+    /// Visible page lines among the first `limit` rows, oldest first.
     ///
     /// # Errors
     /// Propagates any SQL error.
@@ -15957,7 +15990,7 @@ impl SessionObservationSnapshot<'_> {
         self.lines(limit, ObservationOrder::Asc)
     }
 
-    /// The last `limit` rows of the session, oldest first, as page lines.
+    /// Visible page lines among the last `limit` rows, oldest first.
     ///
     /// # Errors
     /// Propagates any SQL error.
@@ -15973,18 +16006,33 @@ impl SessionObservationSnapshot<'_> {
             ObservationOrder::Desc => "DESC",
         };
         let sql = format!(
-            "SELECT kind, extension, source_event, substr(title, 1, ?3), created_at \
-             FROM observations WHERE session_id = ?1 \
-             ORDER BY created_at {direction}, rowid {direction} LIMIT ?2"
+            "SELECT kind, extension, source_event, substr(title, 1, :title_chars), created_at, \
+                    CASE WHEN kind = :prompt_kind AND {PROMPT_REMINDER_SQL} THEN body END, title \
+             FROM observations WHERE session_id = :session_id \
+             ORDER BY created_at {direction}, rowid {direction} LIMIT :limit"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let mut rows = stmt.query(params![
-            self.session_id,
-            i64::try_from(limit).unwrap_or(i64::MAX),
-            i64::try_from(SESSION_LINE_TITLE_CHARS).unwrap_or(80),
-        ])?;
+        let mut rows = stmt.query(named_params! {
+            ":session_id": self.session_id,
+            ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+            ":title_chars": i64::try_from(SESSION_LINE_TITLE_CHARS).unwrap_or(80),
+            ":prompt_kind": ObservationKind::UserPrompt.as_str(),
+            ":whitespace": RUST_WHITESPACE,
+            ":reminder": SYSTEM_REMINDER_OPEN,
+        })?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
+            self.rows_read.set(self.rows_read.get() + 1);
+            let title = match row.get::<_, Option<String>>(5)? {
+                Some(body) => {
+                    let title: String = row.get(6)?;
+                    let Some(title) = session_prompt_display_title(&title, &body) else {
+                        continue;
+                    };
+                    title.chars().take(SESSION_LINE_TITLE_CHARS).collect()
+                }
+                None => row.get(3)?,
+            };
             let kind_str: String = row.get(0)?;
             let created_us: i64 = row.get(4)?;
             out.push(SessionLine {
@@ -15993,14 +16041,13 @@ impl SessionObservationSnapshot<'_> {
                     .map_err(StoreError::from)?,
                 extension: row.get(1)?,
                 source_event: row.get(2)?,
-                title: row.get(3)?,
+                title,
                 created_at: Timestamp::from_microsecond(created_us).map_err(|e| {
                     StoreError::Memory(ai_memory_core::MemoryError::MalformedRecord(format!(
                         "bad timestamp: {e}"
                     )))
                 })?,
             });
-            self.rows_read.set(self.rows_read.get() + 1);
         }
         Ok(out)
     }

@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use ai_memory_core::{Observation, ObservationKind};
+use ai_memory_core::scaffolding::SYSTEM_REMINDER_OPEN;
+use ai_memory_core::{Observation, ObservationKind, strip_leading_system_reminders};
 
 use crate::{
     keep_tokens::{has_residue_error_line, mine_residue_tokens},
@@ -375,17 +376,18 @@ fn render_verbatim_residue(
     let mut pass_zero = Vec::new();
     for idx in selected {
         let observation = &observations[*idx];
-        if observation.body.chars().count() <= per_body_excerpt_chars
-            || carries_routing_text(observation)
-        {
+        let Some(body) = eligible_residue_body(observation) else {
             continue;
-        }
-        let tail: String = observation
-            .body
-            .chars()
-            .skip(per_body_excerpt_chars)
-            .collect();
-        pass_zero.push((*idx, normalize_residue_text(&tail)));
+        };
+        let Some((cutoff, _)) = body.char_indices().nth(per_body_excerpt_chars) else {
+            continue;
+        };
+        let tail_start = if body != observation.body {
+            body[..cutoff].rfind('\n').map_or(0, |line| line + 1)
+        } else {
+            cutoff
+        };
+        pass_zero.push((*idx, normalize_residue_text(&body[tail_start..])));
     }
 
     let pass_one_indices: HashSet<usize> = observations
@@ -407,14 +409,13 @@ fn render_verbatim_residue(
     let mut pass_one: Vec<(usize, String)> = observations
         .iter()
         .enumerate()
-        .filter(|(idx, observation)| {
-            pass_one_indices.contains(idx) && !carries_routing_text(observation)
-        })
+        .filter(|(idx, _)| pass_one_indices.contains(idx))
         .filter_map(|(idx, observation)| {
+            let body = eligible_residue_body(observation)?;
             let text = if observation.kind == ObservationKind::UserPrompt {
                 user_written(&observation.body)?
             } else {
-                residue_slice(&observation.body)?
+                residue_slice(body)?
             };
             Some((idx, normalize_residue_text(&text)))
         })
@@ -427,13 +428,10 @@ fn render_verbatim_residue(
     let mut pass_two: Vec<(usize, String)> = observations
         .iter()
         .enumerate()
-        .filter(|(idx, observation)| {
-            !selected_set.contains(idx)
-                && !pass_one_indices.contains(idx)
-                && !carries_routing_text(observation)
-        })
+        .filter(|(idx, _)| !selected_set.contains(idx) && !pass_one_indices.contains(idx))
         .filter_map(|(idx, observation)| {
-            residue_slice(&observation.body).map(|text| (idx, normalize_residue_text(&text)))
+            let body = eligible_residue_body(observation)?;
+            residue_slice(body).map(|text| (idx, normalize_residue_text(&text)))
         })
         .collect();
     pass_two.sort_by(|(left, left_text), (right, right_text)| {
@@ -611,8 +609,9 @@ fn render_observation_block(
     obs: &Observation,
     per_body_excerpt_chars: usize,
 ) -> RenderedBlock {
-    let (body, truncated, omitted) = excerpt_body(&obs.body, per_body_excerpt_chars);
-    let title = cap_text_with_marker(&obs.title, MAX_RENDERED_TITLE_CHARS, "observation title");
+    let (title, body) = observation_text(obs).unwrap_or_default();
+    let (body, truncated, omitted) = excerpt_body(body, per_body_excerpt_chars);
+    let title = cap_text_with_marker(title, MAX_RENDERED_TITLE_CHARS, "observation title");
     let mut text = format!(
         "\n--- observation {}/{} ---\nid: {}\nkind: {}\ntitle: {}\nimportance: {}\ncreated_at: {}\n",
         idx + 1,
@@ -768,24 +767,40 @@ fn observation_score(obs: &Observation, idx: usize, total: usize) -> i32 {
     if idx == 0 || idx + 1 == total {
         score += 100;
     }
-    if has_high_signal_terms(obs) {
+    let (title, body) = observation_text(obs).unwrap_or_default();
+    if has_high_signal_terms(title, body) {
         score += 45;
     }
     if obs.importance >= 9 {
         score += 45;
     }
-    if obs.body.contains("```") {
+    if body.contains("```") {
         score += 8;
     }
-    if carries_routing_text(obs) {
+    if carries_routing_text(title, body) {
         score -= 80;
     }
     score
 }
 
-fn carries_routing_text(obs: &Observation) -> bool {
-    let body_prefix = obs.body.chars().take(4_000).collect::<String>();
-    let text = format!("{}\n{}", obs.title, body_prefix).to_ascii_lowercase();
+fn observation_text(obs: &Observation) -> Option<(&str, &str)> {
+    if obs.kind == ObservationKind::UserPrompt {
+        let body = strip_leading_system_reminders(&obs.body)?;
+        if body != obs.body || obs.title.trim_start().starts_with(SYSTEM_REMINDER_OPEN) {
+            return Some(("", body));
+        }
+    }
+    Some((&obs.title, &obs.body))
+}
+
+fn eligible_residue_body(obs: &Observation) -> Option<&str> {
+    let (title, body) = observation_text(obs)?;
+    (!carries_routing_text(title, body)).then_some(body)
+}
+
+fn carries_routing_text(title: &str, body: &str) -> bool {
+    let body_prefix = body.chars().take(4_000).collect::<String>();
+    let text = format!("{title}\n{body_prefix}").to_ascii_lowercase();
     text.contains("long-term memory (ai-memory)")
         || text.contains("install ai-memory routing")
         || text.contains("memory_query searches only one project")
@@ -798,9 +813,9 @@ fn recency_score(idx: usize, total: usize) -> i32 {
     (idx.saturating_mul(MAX_RECENCY_SCORE as usize) / (total - 1)) as i32
 }
 
-fn has_high_signal_terms(obs: &Observation) -> bool {
-    let body_prefix = obs.body.chars().take(4_000).collect::<String>();
-    let text = format!("{}\n{}", obs.title, body_prefix).to_ascii_lowercase();
+fn has_high_signal_terms(title: &str, body: &str) -> bool {
+    let body_prefix = body.chars().take(4_000).collect::<String>();
+    let text = format!("{title}\n{body_prefix}").to_ascii_lowercase();
     [
         "root cause",
         "fix",

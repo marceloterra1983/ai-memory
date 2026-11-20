@@ -17,6 +17,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ai_memory_core::scaffolding::SYSTEM_REMINDER_OPEN;
+#[cfg(test)]
+use ai_memory_core::scaffolding::session_prompt_display_title;
 use ai_memory_core::{
     AgentKind, FAILED_TOOL_OUTCOME_LINE, NewPage, Observation, ObservationKind, PagePath,
     ProjectId, SessionId, TOOL_BODY_HEADER_MAX_CHARS, TOOL_BODY_SEPARATOR, Tier, WorkspaceId,
@@ -46,7 +49,6 @@ pub(crate) const PROMPT_TITLES_MAX: usize = RAW_OBSERVATION_MAX_LINES;
 pub(crate) const PROMPT_TITLES_HEAD: usize = RAW_OBSERVATION_HEAD_LINES;
 pub(crate) const PROMPT_TITLES_TAIL: usize = PROMPT_TITLES_MAX - PROMPT_TITLES_HEAD;
 const SUBAGENT_PROMPT_PREAMBLE: &str = "You are a subagent spawned by another session.";
-const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
 
 /// Build a [`NewPage`] from the digest of a session's observations.
 ///
@@ -248,7 +250,7 @@ pub struct SessionDigest {
     /// at most [`PROMPT_TITLES_MAX`], otherwise the first
     /// [`PROMPT_TITLES_HEAD`] and the last [`PROMPT_TITLES_TAIL`], each in
     /// capture order.
-    prompt_titles: Vec<String>,
+    prompt_titles: Vec<(usize, String)>,
     /// User prompts the session holds (the true total; the list above is
     /// bounded).
     prompt_count: usize,
@@ -401,18 +403,22 @@ fn assistant_response(obs: &Observation) -> Option<String> {
 }
 
 #[cfg(test)]
-fn session_line(obs: &Observation) -> SessionLine {
-    SessionLine {
+fn session_line(obs: &Observation) -> Option<SessionLine> {
+    let title = if obs.kind == ObservationKind::UserPrompt {
+        session_prompt_display_title(&obs.title, &obs.body)?
+    } else {
+        std::borrow::Cow::Borrowed(obs.title.as_str())
+    };
+    Some(SessionLine {
         kind: obs.kind,
         extension: obs.extension.clone(),
         source_event: obs.source_event.clone(),
-        title: obs
-            .title
+        title: title
             .chars()
             .take(ai_memory_store::SESSION_LINE_TITLE_CHARS)
             .collect(),
         created_at: obs.created_at,
-    }
+    })
 }
 
 fn build_digest(
@@ -455,8 +461,11 @@ fn build_digest(
     // The prompt titles the page lists: bounded the way the raw-observation
     // list is, with the true prompt count beside them.
     let prompts = snapshot.prompt_titles(PROMPT_TITLES_HEAD, PROMPT_TITLES_TAIL)?;
-    let mut prompt_titles = prompts.first;
-    prompt_titles.extend(prompts.last);
+    let prompt_titles = prompts
+        .capture_ordinals
+        .into_iter()
+        .zip(prompts.first.into_iter().chain(prompts.last))
+        .collect();
 
     // A title behind a preamble or reminder has to come from the body, even
     // when capture had to fall back to the kind name. Stop once it is settled.
@@ -646,8 +655,8 @@ impl PromptTitleScan {
             };
             let removed_reminders = text.len() < body.len();
             if preamble || removed_reminders {
-                // A bare subagent body can include IDE lines before the task.
-                if !removed_reminders || !looks_like_markup_block(text) {
+                // The subagent preamble can precede IDE lines before the task.
+                if preamble || !looks_like_markup_block(text) {
                     self.found = title_from_prompt_body(text);
                 }
                 return self.found.is_none();
@@ -865,24 +874,25 @@ fn render_body(session_id: SessionId, digest: &SessionDigest, title: &str) -> St
 
     if digest.prompt_count > 0 {
         buf.push_str("## Prompts\n\n");
-        if digest.prompt_count <= PROMPT_TITLES_MAX {
-            for (i, title) in digest.prompt_titles.iter().enumerate() {
-                buf.push_str(&format!("{}. {title}\n", i + 1));
-            }
+        let capped = digest.prompt_count > PROMPT_TITLES_MAX;
+        let split = if capped {
+            digest
+                .prompt_titles
+                .partition_point(|(ordinal, _)| *ordinal <= PROMPT_TITLES_HEAD)
         } else {
-            let (head, tail) = digest.prompt_titles.split_at(PROMPT_TITLES_HEAD);
-            for (i, title) in head.iter().enumerate() {
-                buf.push_str(&format!("{}. {title}\n", i + 1));
-            }
+            digest.prompt_titles.len()
+        };
+        let (head, tail) = digest.prompt_titles.split_at(split);
+        for (ordinal, title) in head {
+            buf.push_str(&format!("{ordinal}. {title}\n"));
+        }
+        if capped {
             let omitted = digest.prompt_count - PROMPT_TITLES_HEAD - PROMPT_TITLES_TAIL;
             buf.push_str(&format!(
                 "\n_... {omitted} prompts omitted from the middle (showing first {PROMPT_TITLES_HEAD} and last {PROMPT_TITLES_TAIL})._\n\n",
             ));
-            for (i, title) in tail.iter().enumerate() {
-                buf.push_str(&format!(
-                    "{}. {title}\n",
-                    digest.prompt_count - PROMPT_TITLES_TAIL + i + 1
-                ));
+            for (ordinal, title) in tail {
+                buf.push_str(&format!("{ordinal}. {title}\n"));
             }
         }
         buf.push('\n');
@@ -1011,16 +1021,19 @@ impl SessionDigest {
     pub(crate) fn from_observations(session_id: SessionId, observations: &[Observation]) -> Self {
         let total = observations.len();
         let (first_lines, last_lines) = if total <= RAW_OBSERVATION_MAX_LINES {
-            (observations.iter().map(session_line).collect(), Vec::new())
+            (
+                observations.iter().filter_map(session_line).collect(),
+                Vec::new(),
+            )
         } else {
             (
                 observations[..RAW_OBSERVATION_HEAD_LINES]
                     .iter()
-                    .map(session_line)
+                    .filter_map(session_line)
                     .collect(),
                 observations[total - RAW_OBSERVATION_TAIL_LINES..]
                     .iter()
-                    .map(session_line)
+                    .filter_map(session_line)
                     .collect(),
             )
         };
@@ -1046,26 +1059,22 @@ impl SessionDigest {
                     .or_insert(0) += 1;
             }
         }
-        let prompt_titles_all: Vec<String> = observations
+        let prompts = observations
             .iter()
-            .filter(|o| o.kind == ObservationKind::UserPrompt)
-            .map(|o| o.title.clone())
+            .filter(|obs| obs.kind == ObservationKind::UserPrompt);
+        let prompt_count = prompts.clone().count();
+        let prompt_titles = prompts
+            .enumerate()
+            .filter(|(index, _)| {
+                prompt_count <= PROMPT_TITLES_MAX
+                    || *index < PROMPT_TITLES_HEAD
+                    || *index >= prompt_count - PROMPT_TITLES_TAIL
+            })
+            .filter_map(|(index, obs)| {
+                let title = session_prompt_display_title(&obs.title, &obs.body)?;
+                Some((index + 1, title.into_owned()))
+            })
             .collect();
-        // The store's bounded read keeps every title when the session fits in
-        // the cap and the first/last slice when it does not; mirror that here
-        // so the row-list digest and the database digest stay equal.
-        let (prompt_count, prompt_titles) = if prompt_titles_all.len() <= PROMPT_TITLES_MAX {
-            (prompt_titles_all.len(), prompt_titles_all)
-        } else {
-            (
-                prompt_titles_all.len(),
-                prompt_titles_all[..PROMPT_TITLES_HEAD]
-                    .iter()
-                    .chain(prompt_titles_all[prompt_titles_all.len() - PROMPT_TITLES_TAIL..].iter())
-                    .cloned()
-                    .collect(),
-            )
-        };
         Self {
             total,
             substantive: observations.iter().any(|o| {

@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use ai_memory_core::scaffolding::SYSTEM_REMINDER_OPEN;
 use ai_memory_core::{Observation, ObservationKind, strip_leading_system_reminders};
 use ai_memory_store::{SessionObservationSnapshot, StoreError, StoreResult};
 
@@ -441,18 +442,24 @@ fn residue_candidate_pass(obs: &Observation) -> Option<ResiduePass> {
 }
 
 fn eligible_residue_body(obs: &Observation) -> Option<&str> {
-    let body = if obs.kind == ObservationKind::UserPrompt {
-        strip_leading_system_reminders(&obs.body)?
-    } else {
-        &obs.body
-    };
+    let (title, body) = observation_text(obs)?;
+    (!carries_routing_text(title, body)).then_some(body)
+}
+
+fn observation_text(obs: &Observation) -> Option<(&str, &str)> {
+    if obs.kind != ObservationKind::UserPrompt {
+        return Some((&obs.title, &obs.body));
+    }
+    let body = strip_leading_system_reminders(&obs.body)?;
     // The capture title can be the first line of a notice rather than input.
-    let title = if body.len() < obs.body.len() {
+    let title = if body.len() < obs.body.len()
+        || obs.title.trim_start().starts_with(SYSTEM_REMINDER_OPEN)
+    {
         ""
     } else {
         &obs.title
     };
-    (!carries_routing_text(title, body)).then_some(body)
+    Some((title, body))
 }
 
 /// The residue text a candidate row contributes: pass one renders the
@@ -894,22 +901,24 @@ fn residue_initial_state<'a>(
         };
         let block = render_observation_block(total, *idx, observation, per_body_excerpt_chars);
         seen.extend(mine_residue_tokens(&block.text, usize::MAX));
-        if observation.body.chars().count() <= per_body_excerpt_chars {
+        if !block.truncated {
             continue;
         }
         let Some(body) = eligible_residue_body(observation) else {
             continue;
         };
-        // The primary excerpt's budget still starts at the raw body's first
-        // character, including any notice it already printed.
-        let notice_chars = observation.body[..observation.body.len() - body.len()]
-            .chars()
-            .count();
-        let tail: String = body
-            .chars()
-            .skip(per_body_excerpt_chars.saturating_sub(notice_chars))
-            .collect();
-        pass_zero.push((*idx, normalize_residue_text(&tail)));
+        let cutoff = body
+            .char_indices()
+            .nth(per_body_excerpt_chars)
+            .map_or(body.len(), |(index, _)| index);
+        // A diagnostic previously behind a notice can now straddle the excerpt
+        // boundary. Keep the complete line so the residue miner recognizes it.
+        let tail_start = if body.len() < observation.body.len() {
+            body[..cutoff].rfind('\n').map_or(0, |index| index + 1)
+        } else {
+            cutoff
+        };
+        pass_zero.push((*idx, normalize_residue_text(&body[tail_start..])));
     }
     (seen, pass_zero)
 }
@@ -1159,8 +1168,9 @@ fn render_observation_block(
     obs: &Observation,
     per_body_excerpt_chars: usize,
 ) -> RenderedBlock {
-    let (body, truncated, omitted) = excerpt_body(&obs.body, per_body_excerpt_chars);
-    let title = cap_text_with_marker(&obs.title, MAX_RENDERED_TITLE_CHARS, "observation title");
+    let (title, body) = observation_text(obs).unwrap_or_default();
+    let (body, truncated, omitted) = excerpt_body(body, per_body_excerpt_chars);
+    let title = cap_text_with_marker(title, MAX_RENDERED_TITLE_CHARS, "observation title");
     let mut text = format!(
         "\n--- observation {}/{} ---\nid: {}\nkind: {}\ntitle: {}\nimportance: {}\ncreated_at: {}\n",
         idx + 1,
@@ -1319,16 +1329,17 @@ fn observation_score(obs: &Observation, idx: usize, total: usize) -> i32 {
     if idx == 0 || idx + 1 == total {
         score += 100;
     }
-    if has_high_signal_terms(obs) {
+    let (title, body) = observation_text(obs).unwrap_or_default();
+    if has_high_signal_terms(title, body) {
         score += 45;
     }
     if obs.importance >= 9 {
         score += 45;
     }
-    if obs.body.contains("```") {
+    if body.contains("```") {
         score += 8;
     }
-    if carries_routing_text(&obs.title, &obs.body) {
+    if carries_routing_text(title, body) {
         score -= 80;
     }
     score
@@ -1349,9 +1360,9 @@ fn recency_score(idx: usize, total: usize) -> i32 {
     (idx.saturating_mul(MAX_RECENCY_SCORE as usize) / (total - 1)) as i32
 }
 
-fn has_high_signal_terms(obs: &Observation) -> bool {
-    let body_prefix = obs.body.chars().take(4_000).collect::<String>();
-    let text = format!("{}\n{}", obs.title, body_prefix).to_ascii_lowercase();
+fn has_high_signal_terms(title: &str, body: &str) -> bool {
+    let body_prefix = body.chars().take(4_000).collect::<String>();
+    let text = format!("{title}\n{body_prefix}").to_ascii_lowercase();
     [
         "root cause",
         "fix",
@@ -1966,6 +1977,53 @@ mod tests {
 
         assert!(residue.contains("real-tail-diagnostic"), "{residue}");
         assert!(!residue.contains("notice-only-diagnostic"), "{residue}");
+    }
+
+    #[test]
+    fn reminder_review_scores_the_request_without_reminder_terms() {
+        let long_notice = "á".repeat(4_200);
+        let cases = [
+            (
+                "routing terms in notice",
+                "install ai-memory routing",
+                "faça X",
+            ),
+            ("high signal in notice", "error fix", "faça X"),
+            ("code fence in notice", "```rust\nfixture\n```", "faça X"),
+            (
+                "real high signal after a long notice",
+                long_notice.as_str(),
+                "Fix the regression",
+            ),
+            (
+                "real routing request",
+                "notice",
+                "install ai-memory routing",
+            ),
+        ];
+        let scores: Vec<_> = cases
+            .iter()
+            .map(|(name, notice, prompt)| {
+                let title = format!("<system-reminder>{}", notice.lines().next().unwrap());
+                let wrapped = obs(
+                    1,
+                    ObservationKind::UserPrompt,
+                    &title,
+                    &format!("<system-reminder>{notice}</system-reminder>\n{prompt}"),
+                    5,
+                );
+                let bare = obs(1, ObservationKind::UserPrompt, prompt, prompt, 5);
+                (
+                    *name,
+                    observation_score(&wrapped, 1, 4),
+                    observation_score(&bare, 1, 4),
+                )
+            })
+            .collect();
+        assert!(
+            scores.iter().all(|(_, wrapped, bare)| wrapped == bare),
+            "{scores:?}"
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@
 
 #[rustfmt::skip]
 mod full_load {
+    use std::borrow::Cow;
     use std::collections::BTreeMap;
 
     use ai_memory_core::{
@@ -142,7 +143,7 @@ fn derive_title(observations: &[Observation], session_id: SessionId) -> String {
             };
             let removed_reminders = body.len() < obs.body.len();
             if preamble || removed_reminders {
-                if (!removed_reminders || !looks_like_markup_block(body))
+                if (preamble || !looks_like_markup_block(body))
                     && let Some(title) = body.lines().map(str::trim)
                         .find(|line| !looks_like_title_scaffolding(line))
                 {
@@ -401,7 +402,9 @@ fn render_body(
     if !prompts.is_empty() {
         buf.push_str("## Prompts\n\n");
         for (i, p) in prompts.iter().enumerate() {
-            buf.push_str(&format!("{}. {}\n", i + 1, p.title));
+            if let Some(title) = prompt_display_title(p) {
+                buf.push_str(&format!("{}. {title}\n", i + 1));
+            }
         }
         buf.push('\n');
     }
@@ -494,13 +497,32 @@ fn render_raw_observations(buf: &mut String, observations: &[Observation]) {
 }
 
 fn render_raw_observation(buf: &mut String, obs: &Observation) {
+    let title = if obs.kind == ObservationKind::UserPrompt {
+        let Some(title) = prompt_display_title(obs) else { return };
+        title
+    } else {
+        Cow::Borrowed(obs.title.as_str())
+    };
     let kind = observation_kind_label(obs);
     buf.push_str(&format!(
         "- `{}` @ {} — {}\n",
         kind,
         human_ts(&obs.created_at),
-        obs.title.chars().take(80).collect::<String>(),
+        title.chars().take(80).collect::<String>(),
     ));
+}
+
+pub(super) fn prompt_display_title(obs: &Observation) -> Option<Cow<'_, str>> {
+    let title = obs.title.trim();
+    let fallback_title = title.is_empty() || title == "user-prompt";
+    if title.starts_with(SYSTEM_REMINDER_OPEN)
+        || (fallback_title && obs.body.trim_start().starts_with(SYSTEM_REMINDER_OPEN))
+    {
+        let source = if obs.body.is_empty() { &obs.title } else { &obs.body };
+        let line = strip_leading_system_reminders(source)?.trim_start().lines().next()?;
+        return Some(Cow::Owned(truncate_for_title(line)));
+    }
+    Some(Cow::Borrowed(&obs.title))
 }
 
 fn observation_kind_label(obs: &Observation) -> String {
@@ -735,6 +757,8 @@ fn derive_open_questions(
 }
 }
 
+use std::borrow::Cow;
+
 use ai_memory_core::{
     AgentKind, NewSession, ObservationId, ObservationKind, ProjectId, SessionId, WorkspaceId,
 };
@@ -887,10 +911,10 @@ impl Fixture {
         // The oracle predates the prompt-list cap: fold its full prompt list
         // down to the capped form the new path prints before comparing, so a
         // session over the cap still compares byte for byte everywhere else.
-        let prompt_titles: Vec<String> = rows
+        let prompt_titles: Vec<_> = rows
             .iter()
             .filter(|r| r.kind == ObservationKind::UserPrompt)
-            .map(|r| r.title.clone())
+            .map(full_load::prompt_display_title)
             .collect();
         assert_eq!(
             new_page.body,
@@ -982,7 +1006,7 @@ impl Fixture {
 /// its real position in the session — so the rest of the page still compares
 /// byte for byte. Sessions with at most `PROMPT_TITLES_MAX` prompts come
 /// back untouched, which is what keeps the small-session tests exact.
-fn prompt_capped_body(body: &str, titles: &[String]) -> String {
+fn prompt_capped_body(body: &str, titles: &[Option<Cow<'_, str>>]) -> String {
     use crate::synth::{PROMPT_TITLES_HEAD, PROMPT_TITLES_MAX, PROMPT_TITLES_TAIL};
     if titles.len() <= PROMPT_TITLES_MAX {
         return body.to_string();
@@ -993,11 +1017,14 @@ fn prompt_capped_body(body: &str, titles: &[String]) -> String {
         .expect("the oracle page lists its prompts");
     // Rebuild the old section from `titles` instead of slicing the body, so
     // a title that looks like a heading cannot move the boundary.
-    let old_section: String = titles
-        .iter()
-        .enumerate()
-        .map(|(i, t)| format!("{}. {t}\n", i + 1))
-        .collect();
+    let numbered = |titles: &[Option<Cow<'_, str>>], offset: usize| -> String {
+        titles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, title)| Some(format!("{}. {}\n", offset + i + 1, title.as_deref()?)))
+            .collect()
+    };
+    let old_section = numbered(titles, 0);
     let end = start + heading.len() + old_section.len();
     debug_assert!(
         body[end..].starts_with('\n'),
@@ -1007,20 +1034,12 @@ fn prompt_capped_body(body: &str, titles: &[String]) -> String {
         &titles[..PROMPT_TITLES_HEAD],
         &titles[titles.len() - PROMPT_TITLES_TAIL..],
     );
-    let mut capped = String::new();
-    for (i, t) in head.iter().enumerate() {
-        capped.push_str(&format!("{}. {t}\n", i + 1));
-    }
+    let mut capped = numbered(head, 0);
     capped.push_str(&format!(
         "\n_... {} prompts omitted from the middle (showing first {PROMPT_TITLES_HEAD} and last {PROMPT_TITLES_TAIL})._\n\n",
         titles.len() - PROMPT_TITLES_MAX
     ));
-    for (i, t) in tail.iter().enumerate() {
-        capped.push_str(&format!(
-            "{}. {t}\n",
-            titles.len() - PROMPT_TITLES_TAIL + i + 1
-        ));
-    }
+    capped.push_str(&numbered(tail, titles.len() - PROMPT_TITLES_TAIL));
     let mut out = String::with_capacity(body.len());
     out.push_str(&body[..start]);
     out.push_str(heading);
@@ -1353,6 +1372,158 @@ async fn leading_system_reminders_render_equivalently() {
     assert_eq!(
         handoff.open_questions,
         ["Unresolved question: Como faço X?"]
+    );
+}
+
+#[tokio::test]
+async fn reminder_review_session_prompt_lists_preserve_capture_ordinals() {
+    let fx = fixture().await;
+    let long_prompt = format!("{} fin", "ã".repeat(82));
+    let shown = format!("{}…", "ã".repeat(79));
+    let sid = fx
+        .seed(&[
+            row(
+                ObservationKind::UserPrompt,
+                "\u{2003}<system-reminder>notice in title",
+                "<system-reminder>notice in body</system-reminder>\nRevise o diff\nDetalhes",
+                0,
+            ),
+            row(
+                ObservationKind::UserPrompt,
+                "user-prompt",
+                &format!(
+                    "\u{2003}\n<system-reminder>another notice</system-reminder>\n{long_prompt}"
+                ),
+                1,
+            ),
+            row(
+                ObservationKind::UserPrompt,
+                "<system-reminder>unclosed notice",
+                "<system-reminder>unclosed notice",
+                2,
+            ),
+            row(
+                ObservationKind::UserPrompt,
+                "Ask about <system-reminder>",
+                "Different body for the recorded title",
+                3,
+            ),
+            row(
+                ObservationKind::UserPrompt,
+                "",
+                "\u{2003}<system-reminder>notice\nonly</system-reminder>\nTeste i18n",
+                4,
+            ),
+            row(
+                ObservationKind::UserPrompt,
+                "<system-reminder>notice alone",
+                "<system-reminder>notice alone</system-reminder>",
+                5,
+            ),
+        ])
+        .await;
+    fx.assert_equivalent("session prompt lists and raw observations", sid)
+        .await;
+    let digest = SessionDigest::load(&fx.store.reader, fx.ws, fx.proj, sid)
+        .await
+        .unwrap();
+    let page = super::synthesize_session_page(fx.ws, fx.proj, sid, AgentKind::ClaudeCode, &digest);
+    let (_, lists) = page.body.split_once("## Prompts\n\n").unwrap();
+    let (prompts, raw) = lists.split_once("## Raw observations\n\n").unwrap();
+    assert_eq!(
+        prompts,
+        format!("1. Revise o diff\n2. {shown}\n4. Ask about <system-reminder>\n5. Teste i18n\n\n"),
+    );
+    let raw_titles: Vec<_> = raw
+        .lines()
+        .filter_map(|line| line.split_once(" — "))
+        .map(|(_, title)| title)
+        .collect();
+    assert_eq!(
+        raw_titles,
+        [
+            "Revise o diff",
+            &shown,
+            "Ask about <system-reminder>",
+            "Teste i18n"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn reminder_review_capped_prompt_lists_keep_the_original_windows() {
+    use crate::synth::{PROMPT_TITLES_HEAD, PROMPT_TITLES_MAX, PROMPT_TITLES_TAIL};
+
+    let fx = fixture().await;
+    let count = PROMPT_TITLES_MAX + 3;
+    let tail_start = count - PROMPT_TITLES_TAIL + 1;
+    let unclosed = "<system-reminder>unclosed notice";
+    let rows: Vec<_> = (1..=count)
+        .map(|ordinal| {
+            let mut title = format!("recorded prompt {ordinal}");
+            let mut body = "plain request".to_owned();
+            if ordinal == PROMPT_TITLES_HEAD || ordinal == tail_start {
+                title = unclosed.to_owned();
+                body = unclosed.to_owned();
+            } else if ordinal == count {
+                title = "user-prompt".to_owned();
+                body =
+                    "\n<system-reminder>final notice</system-reminder>\nFinal request".to_owned();
+            }
+            row(ObservationKind::UserPrompt, &title, &body, ordinal as i64)
+        })
+        .collect();
+    let sid = fx.seed(&rows).await;
+    fx.assert_equivalent("capped prompt lists and raw observations", sid)
+        .await;
+    let digest = SessionDigest::load(&fx.store.reader, fx.ws, fx.proj, sid)
+        .await
+        .unwrap();
+    let page = super::synthesize_session_page(fx.ws, fx.proj, sid, AgentKind::ClaudeCode, &digest);
+    let (_, lists) = page.body.split_once("## Prompts\n\n").unwrap();
+    let (prompts, raw) = lists.split_once("## Raw observations\n\n").unwrap();
+    let expected: Vec<_> = (1..PROMPT_TITLES_HEAD)
+        .chain(tail_start + 1..count)
+        .map(|ordinal| format!("{ordinal}. recorded prompt {ordinal}"))
+        .chain([format!("{count}. Final request")])
+        .collect();
+    let numbered: Vec<_> = prompts
+        .lines()
+        .filter(|line| line.contains(". ") && !line.starts_with('_'))
+        .collect();
+    assert_eq!(
+        numbered.len(),
+        expected.len(),
+        "final entry: {:?}",
+        numbered.last()
+    );
+    assert_eq!(numbered, expected);
+    assert!(prompts.contains("3 prompts omitted from the middle"));
+    assert!(raw.contains("3 raw observations omitted from the middle"));
+    assert!(raw.contains(" — Final request\n"));
+    assert!(!page.body.contains("<system-reminder>"));
+}
+
+#[tokio::test]
+async fn reminder_review_subagent_title_scans_past_ide_after_a_reminder() {
+    let fx = fixture().await;
+    let sid = fx
+        .seed(&subagent_preamble(
+            "<system-reminder>n</system-reminder>\n<ide_opened_file>f</ide_opened_file>\nReview the diff",
+        ))
+        .await;
+    let reader = &fx.store.reader;
+    let rows = reader.observations_for_session(sid).await.unwrap();
+    let digest = SessionDigest::load(reader, fx.ws, fx.proj, sid)
+        .await
+        .unwrap();
+    let oracle =
+        full_load::synthesize_session_page(fx.ws, fx.proj, sid, AgentKind::ClaudeCode, &rows);
+    let page = super::synthesize_session_page(fx.ws, fx.proj, sid, AgentKind::ClaudeCode, &digest);
+    assert_eq!(
+        [oracle.title, page.title],
+        ["Review the diff"; 2],
+        "oracle, store"
     );
 }
 

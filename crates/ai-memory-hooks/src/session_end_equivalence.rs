@@ -133,6 +133,7 @@ fn derive_title(observations: &[Observation], session_id: SessionId) -> String {
         if preamble || obs.title.trim_start().starts_with(SYSTEM_REMINDER_OPEN) {
             rejected_subagent_preamble |= preamble;
             if let Some(body) = strip_leading_system_reminders(&obs.body)
+                && !looks_like_markup_block(body)
                 && let Some(title) = body.lines().map(str::trim)
                     .find(|line| !looks_like_title_scaffolding(line))
             {
@@ -1299,23 +1300,31 @@ async fn leading_system_reminders_render_equivalently() {
             row(
                 ObservationKind::UserPrompt,
                 "<system-reminder>",
-                "<system-reminder>Called Read</system-reminder>\n\nfaça X",
+                "<system-reminder>Task finished</system-reminder>\n\
+                 <task-notification>\n<task-id>t1</task-id>\n</task-notification>\n\
+                 Read the output file to retrieve the result.",
                 1,
+            ),
+            row(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
+                "<system-reminder>Called Read</system-reminder>\n\nfaça X",
+                2,
             ),
             row(
                 ObservationKind::UserPrompt,
                 "<system-reminder>",
                 "<system-reminder>Another notice</system-reminder>\n\n\
                  <system-reminder>More context</system-reminder>\nComo faço X?",
-                2,
+                3,
             ),
             row(
                 ObservationKind::UserPrompt,
                 "<system-reminder>",
                 "<system-reminder>Notice only</system-reminder>",
-                3,
+                4,
             ),
-            end(4),
+            end(5),
         ])
         .await;
 
@@ -1326,7 +1335,7 @@ async fn leading_system_reminders_render_equivalently() {
     let agent = AgentKind::ClaudeCode;
     let page = super::synthesize_session_page(fx.ws, fx.proj, sid, agent, &digest);
     assert_eq!(page.title, "faça X");
-    assert_eq!(stats.prompt_bodies_read, 1);
+    assert_eq!(stats.prompt_bodies_read, 2);
     assert!(page.body.contains("the final prompt was never answered"));
 
     let handoff =

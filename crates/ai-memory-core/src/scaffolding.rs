@@ -32,6 +32,7 @@ use crate::{ObservationKind, truncate_for_title};
 
 /// Opening tag shared by the reminder parser and readers that select prompt bodies.
 pub const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
+const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
 
 /// Characters that open a decorated shell prompt rather than prose.
 /// Box-drawing and the powerline separators commonly echoed into a paste.
@@ -50,13 +51,48 @@ const PROMPT_DECORATION: [char; 9] = [
 /// Recover the operator's text after leading harness notices. An unclosed
 /// notice leaves no safe place to split and returns `None`.
 pub fn strip_leading_system_reminders(text: &str) -> Option<&str> {
-    const CLOSE: &str = "</system-reminder>";
     let mut rest = text;
     while let Some(notice) = rest.trim_start().strip_prefix(SYSTEM_REMINDER_OPEN) {
-        let (_, suffix) = notice.split_once(CLOSE)?;
+        let (_, suffix) = notice.split_once(SYSTEM_REMINDER_CLOSE)?;
         rest = suffix.trim_start();
     }
     Some(rest)
+}
+
+/// Compact the leading notices of an oversized, already scrubbed prompt.
+/// A closed omission marker lets readers recover the operator's text after
+/// the caller applies its byte cap.
+#[must_use]
+pub fn compact_leading_system_reminders(text: &str, cap: usize) -> Cow<'_, str> {
+    if text.len() <= cap {
+        return Cow::Borrowed(text);
+    }
+    let Some(rest) = strip_leading_system_reminders(text) else {
+        return Cow::Borrowed(text);
+    };
+    let omitted = text.len() - rest.len();
+    if omitted == 0 {
+        return Cow::Borrowed(text);
+    }
+
+    // The prompt can still exceed the cap after compaction. Keep an existing
+    // marker so a second pass preserves the original omission count.
+    const OMITTED_SUFFIX: &str = " bytes omitted]";
+    let prior_count = text[..omitted]
+        .strip_prefix(SYSTEM_REMINDER_OPEN)
+        .and_then(|notice| notice.strip_prefix('['))
+        .and_then(|notice| notice.strip_suffix('\n'))
+        .and_then(|notice| notice.strip_suffix(SYSTEM_REMINDER_CLOSE))
+        .and_then(|notice| notice.strip_suffix(OMITTED_SUFFIX));
+    if prior_count
+        .is_some_and(|count| !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Cow::Borrowed(text);
+    }
+
+    Cow::Owned(format!(
+        "{SYSTEM_REMINDER_OPEN}[{omitted}{OMITTED_SUFFIX}{SYSTEM_REMINDER_CLOSE}\n{rest}"
+    ))
 }
 
 /// Use the stored title unless a reminder occupied the capture's first line.
@@ -233,6 +269,31 @@ mod tests {
         ] {
             assert_eq!(strip_leading_system_reminders(text), expected, "{text:?}");
         }
+    }
+
+    #[test]
+    fn reminder_cap_helper_is_idempotent_above_the_cap() {
+        let notices = " \n<system-reminder>aviso é</system-reminder>\n\n<system-reminder>aviso 2</system-reminder>\n\u{2003}";
+        let operator = "faça X ".repeat(20);
+        let prompt = format!("{notices}{operator}");
+        let marker = format!(
+            "<system-reminder>[{} bytes omitted]</system-reminder>\n",
+            notices.len()
+        );
+        let cap = 80;
+        let once = compact_leading_system_reminders(&prompt, cap);
+        assert!(once.starts_with(&marker), "first pass did not compact");
+        assert_eq!(
+            strip_leading_system_reminders(&once),
+            Some(operator.as_str())
+        );
+        assert!(
+            once.len() > cap,
+            "the second pass must still see an oversized body"
+        );
+        let twice = compact_leading_system_reminders(&once, cap);
+        assert_eq!(twice, once);
+        assert!(matches!(twice, Cow::Borrowed(_)));
     }
 
     #[test]

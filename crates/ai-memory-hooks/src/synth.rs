@@ -20,7 +20,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use ai_memory_core::{
     AgentKind, FAILED_TOOL_OUTCOME_LINE, NewPage, Observation, ObservationKind, PagePath,
     ProjectId, SessionId, TOOL_BODY_HEADER_MAX_CHARS, TOOL_BODY_SEPARATOR, Tier, WorkspaceId,
-    looks_like_markup_block, looks_like_scaffolding, truncate_for_title, truncate_utf8_bytes,
+    looks_like_markup_block, looks_like_scaffolding, strip_leading_system_reminders,
+    truncate_for_title, truncate_utf8_bytes,
 };
 use ai_memory_store::{
     ObservationOrder, ReaderPool, SessionKindSummary, SessionLine, SessionObservationSnapshot,
@@ -45,6 +46,7 @@ pub(crate) const PROMPT_TITLES_MAX: usize = RAW_OBSERVATION_MAX_LINES;
 pub(crate) const PROMPT_TITLES_HEAD: usize = RAW_OBSERVATION_HEAD_LINES;
 pub(crate) const PROMPT_TITLES_TAIL: usize = PROMPT_TITLES_MAX - PROMPT_TITLES_HEAD;
 const SUBAGENT_PROMPT_PREAMBLE: &str = "You are a subagent spawned by another session.";
+const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
 
 /// Build a [`NewPage`] from the digest of a session's observations.
 ///
@@ -97,14 +99,19 @@ pub fn synthesize_session_page(
     }
 }
 
-/// A user prompt's text for the handoff and the abrupt-ending check: the body
-/// when there is one, the title otherwise.
-fn prompt_text(obs: &Observation) -> &str {
-    if obs.body.is_empty() {
-        obs.title.as_str()
-    } else {
-        obs.body.as_str()
+/// A user prompt's text for the handoff and the abrupt-ending check, with
+/// leading reminders removed before checking for other harness blocks.
+fn prompt_text(obs: &Observation) -> Option<&str> {
+    if obs.kind != ObservationKind::UserPrompt {
+        return None;
     }
+    let original = if obs.body.is_empty() {
+        &obs.title
+    } else {
+        &obs.body
+    };
+    let text = strip_leading_system_reminders(original)?;
+    (!looks_like_markup_block(text) && (!text.is_empty() || original.is_empty())).then_some(text)
 }
 
 /// One user prompt, as far as the open-question heuristics read it.
@@ -364,23 +371,28 @@ fn micros_to_timestamp(micros: i64) -> StoreResult<Timestamp> {
 /// The handoff prompt predicate: a user prompt whose text is not empty and not
 /// a harness block delivered as a user turn (`<task-notification>`).
 fn handoff_prompt(obs: &Observation) -> Option<String> {
-    if obs.kind != ObservationKind::UserPrompt {
-        return None;
-    }
-    let text = prompt_text(obs);
-    (!text.is_empty() && !looks_like_markup_block(text)).then(|| text.to_string())
+    prompt_text(obs)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }
 
 /// The open-question prompt predicate: a user prompt that is not a harness
 /// block. An empty text still counts, as it always did.
 fn question_prompt(obs: &Observation) -> Option<PromptFact> {
-    if obs.kind != ObservationKind::UserPrompt || looks_like_markup_block(prompt_text(obs)) {
-        return None;
-    }
-    Some(PromptFact {
-        title: obs.title.clone(),
-        body: obs.body.clone(),
-    })
+    let text = prompt_text(obs)?;
+    let title = if text.len() < obs.body.len()
+        || obs.title.trim_start().starts_with(SYSTEM_REMINDER_OPEN)
+    {
+        title_from_prompt_body(text).unwrap_or_default()
+    } else {
+        obs.title.clone()
+    };
+    let body = if obs.body.is_empty() && text.len() == obs.title.len() {
+        String::new()
+    } else {
+        text.to_owned()
+    };
+    Some(PromptFact { title, body })
 }
 
 /// Stop bodies exist only after the assistant-capture double opt-in.
@@ -446,15 +458,17 @@ fn build_digest(
     let mut prompt_titles = prompts.first;
     prompt_titles.extend(prompts.last);
 
-    // Bodies only for a title that could be the subagent preamble: the title
-    // rule is the one reader of a prompt body, and the walk stops once the
-    // title is settled.
+    // A title behind a preamble or reminder has to come from the body. The
+    // scan stops once the title is settled.
     let mut title_scan = PromptTitleScan::default();
     let mut prompt_bodies_read = 0;
-    snapshot.scan_prompts(SUBAGENT_PROMPT_PREAMBLE, |title, body| {
-        prompt_bodies_read += usize::from(body.is_some());
-        title_scan.push(title, body.unwrap_or(""))
-    })?;
+    snapshot.scan_prompts(
+        [SUBAGENT_PROMPT_PREAMBLE, SYSTEM_REMINDER_OPEN],
+        |title, body| {
+            prompt_bodies_read += usize::from(body.is_some());
+            title_scan.push(title, body.unwrap_or(""))
+        },
+    )?;
     let title = match title_scan.finish() {
         PromptTitle::Found(title) => title,
         PromptTitle::RejectedPreamble => format!("Session {session_id}"),
@@ -619,17 +633,11 @@ impl PromptTitleScan {
     /// Feed the next prompt in capture order. Returns `false` once the title
     /// is found: later prompts cannot change it.
     fn push(&mut self, title: &str, body: &str) -> bool {
-        if title.trim() == SUBAGENT_PROMPT_PREAMBLE {
-            self.rejected_subagent_preamble = true;
-            if let Some(line) = body
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty() && !looks_like_title_scaffolding(line))
-            {
-                self.found = Some(truncate_for_title(line));
-                return false;
-            }
-            return true;
+        let preamble = title.trim() == SUBAGENT_PROMPT_PREAMBLE;
+        if preamble || title.trim_start().starts_with(SYSTEM_REMINDER_OPEN) {
+            self.rejected_subagent_preamble |= preamble;
+            self.found = strip_leading_system_reminders(body).and_then(title_from_prompt_body);
+            return self.found.is_none();
         }
         if !title.is_empty() && !looks_like_scaffolding(title) {
             self.found = Some(title.to_string());
@@ -673,6 +681,13 @@ fn title_without_candidate(session_id: SessionId, total: usize) -> String {
         return "session".to_string();
     }
     format!("Session {session_id}")
+}
+
+fn title_from_prompt_body(body: &str) -> Option<String> {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !looks_like_title_scaffolding(line))
+        .map(truncate_for_title)
 }
 
 fn looks_like_title_scaffolding(candidate: &str) -> bool {
@@ -1423,6 +1438,67 @@ mod tests {
                 "{scaffold:?} must be skipped in favour of the next real prompt"
             );
         }
+    }
+
+    #[test]
+    fn leading_system_reminders_title_uses_the_first_usable_body_line() {
+        let observations = [
+            obs_with_body(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
+                "<system-reminder>Unclosed notice\nDo not title the session with this.",
+            ),
+            obs_with_body(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
+                "<system-reminder>Called Read</system-reminder>\n\n\
+                 <system-reminder>Second notice</system-reminder>\n\n\
+                 <environment_context>\n\nfaça X\nMais detalhes",
+            ),
+        ];
+        let page = synthesize_session_page(
+            WorkspaceId::new(),
+            ProjectId::new(),
+            SessionId::new(),
+            AgentKind::ClaudeCode,
+            &observations,
+        );
+
+        assert_eq!(page.title, "faça X");
+    }
+
+    #[test]
+    fn leading_system_reminders_are_removed_from_handoff_and_question_prompts() {
+        let observations = [
+            obs_with_body(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
+                "<system-reminder>Called Read</system-reminder>\n\n\
+                 <system-reminder>Second notice</system-reminder>\nfaça X",
+            ),
+            obs_with_body(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
+                "<system-reminder>Notice only</system-reminder>\n  ",
+            ),
+            obs_with_body(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
+                "<system-reminder>Unclosed notice\nIs this a question?",
+            ),
+        ];
+        let digest = tally_session(&observations);
+        let facts = digest.handoff_facts();
+
+        assert_eq!(facts.first_prompt.as_deref(), Some("faça X"));
+        assert_eq!(facts.last_prompt.as_deref(), Some("faça X"));
+        assert_eq!(
+            facts.question_prompt,
+            Some(PromptFact {
+                title: "faça X".into(),
+                body: "faça X".into(),
+            })
+        );
     }
 
     #[test]

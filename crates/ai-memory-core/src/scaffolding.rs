@@ -40,6 +40,19 @@ const PROMPT_DECORATION: [char; 9] = [
     '\u{276f}', // ❯
 ];
 
+/// Recover the operator's text after leading harness notices. An unclosed
+/// notice leaves no safe place to split and returns `None`.
+pub fn strip_leading_system_reminders(text: &str) -> Option<&str> {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+    let mut rest = text;
+    while let Some(notice) = rest.trim_start().strip_prefix(OPEN) {
+        let (_, suffix) = notice.split_once(CLOSE)?;
+        rest = suffix.trim_start();
+    }
+    Some(rest)
+}
+
 /// `true` when `candidate` reads as harness scaffolding rather than user
 /// prose, and so should not become a page title.
 ///
@@ -165,6 +178,37 @@ pub fn looks_like_codex_memory_agent_prompt(candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leading_system_reminders_leave_the_operator_text() {
+        for (text, expected) in [
+            ("  faça X\n", Some("  faça X\n")),
+            (
+                "faça X com <system-reminder> na linha",
+                Some("faça X com <system-reminder> na linha"),
+            ),
+            (
+                "<task-notification>done</task-notification>\nfaça X",
+                Some("<task-notification>done</task-notification>\nfaça X"),
+            ),
+            (
+                "<system-reminder>notice</system-reminder>\nfaça X",
+                Some("faça X"),
+            ),
+            (
+                "  <system-reminder>first</system-reminder>\n\n \t<system-reminder>second</system-reminder>\n\nfaça X\n",
+                Some("faça X\n"),
+            ),
+            ("<system-reminder>notice</system-reminder>\n  ", Some("")),
+            ("<system-reminder>notice\nfaça X", None),
+            (
+                "<system-reminder>first</system-reminder>\n\n<system-reminder>unclosed\nfaça X",
+                None,
+            ),
+        ] {
+            assert_eq!(strip_leading_system_reminders(text), expected, "{text:?}");
+        }
+    }
 
     #[test]
     fn the_two_shape_classes_are_scaffolding() {

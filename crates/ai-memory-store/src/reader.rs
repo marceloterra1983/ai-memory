@@ -15904,8 +15904,8 @@ impl SessionObservationSnapshot<'_> {
     }
 
     /// Walk the session's user prompts in capture order, one resident at a
-    /// time, feeding `visit` each title and, only when the title contains
-    /// `body_for_titles_like`, the prompt's body. The walk stops at the first
+    /// time, feeding `visit` each title and, only when the title contains one
+    /// of `body_for_titles_like`, the prompt's body. The walk stops at the first
     /// `false`, so a caller that settles the page title reads bodies no
     /// further than the prompt that named it: a session full of subagent
     /// preambles costs the bodies up to the first usable one, not all of
@@ -15915,18 +15915,19 @@ impl SessionObservationSnapshot<'_> {
     /// Propagates any SQL error.
     pub fn scan_prompts(
         &self,
-        body_for_titles_like: &str,
+        body_for_titles_like: [&str; 2],
         mut visit: impl FnMut(&str, Option<&str>) -> bool,
     ) -> StoreResult<()> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT title, CASE WHEN instr(title, ?3) > 0 THEN body END \
+            "SELECT title, CASE WHEN instr(title, ?3) > 0 OR instr(title, ?4) > 0 THEN body END \
              FROM observations WHERE session_id = ?1 AND kind = ?2 \
              ORDER BY created_at ASC, rowid ASC",
         )?;
         let mut rows = stmt.query(params![
             self.session_id,
             ObservationKind::UserPrompt.as_str(),
-            body_for_titles_like,
+            body_for_titles_like[0],
+            body_for_titles_like[1],
         ])?;
         while let Some(row) = rows.next()? {
             let title: String = row.get(0)?;

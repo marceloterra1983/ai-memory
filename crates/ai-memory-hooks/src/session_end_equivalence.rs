@@ -5,9 +5,8 @@
 //! bounded queries. The claim is that nothing the page, the handoff or the
 //! lifecycle-only decision contain changed, so this file keeps the original
 //! code as the oracle: `full_load` below is `synth.rs` and the handoff half of
-//! `router.rs` at the commit before the change, byte for byte except for the
-//! two `pub(super)` that let the tests call it and the imports it needs from
-//! its new home. It exists in test code only.
+//! `router.rs` at the commit before the change, with later prompt-reading
+//! fixes mirrored there. It exists in test code only.
 //!
 //! Each test seeds sessions into a real store, runs the oracle on the rows
 //! `observations_for_session` returns, runs the production path on the same
@@ -26,7 +25,7 @@ mod full_load {
     use ai_memory_core::{
         AgentKind, NewHandoff, NewPage, Observation, ObservationKind, PagePath, ProjectId,
         SessionId, Tier, WorkspaceId, looks_like_markup_block, looks_like_scaffolding,
-        truncate_for_title,
+        strip_leading_system_reminders, truncate_for_title,
     };
     use jiff::tz::TimeZone;
 
@@ -39,6 +38,7 @@ mod full_load {
     const RAW_OBSERVATION_TAIL_LINES: usize =
         RAW_OBSERVATION_MAX_LINES - RAW_OBSERVATION_HEAD_LINES;
     const SUBAGENT_PROMPT_PREAMBLE: &str = "You are a subagent spawned by another session.";
+    const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
 
 /// Build a [`NewPage`] from the observations collected during a session.
 ///
@@ -129,13 +129,12 @@ fn derive_title(observations: &[Observation], session_id: SessionId) -> String {
         if obs.kind != ObservationKind::UserPrompt {
             continue;
         }
-        if obs.title.trim() == SUBAGENT_PROMPT_PREAMBLE {
-            rejected_subagent_preamble = true;
-            if let Some(title) = obs
-                .body
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty() && !looks_like_title_scaffolding(line))
+        let preamble = obs.title.trim() == SUBAGENT_PROMPT_PREAMBLE;
+        if preamble || obs.title.trim_start().starts_with(SYSTEM_REMINDER_OPEN) {
+            rejected_subagent_preamble |= preamble;
+            if let Some(body) = strip_leading_system_reminders(&obs.body)
+                && let Some(title) = body.lines().map(str::trim)
+                    .find(|line| !looks_like_title_scaffolding(line))
             {
                 return truncate_for_title(title);
             }
@@ -431,20 +430,12 @@ fn abrupt_ending_note(observations: &[Observation]) -> Option<&'static str> {
     let has_session_end = observations
         .iter()
         .any(|o| o.kind == ObservationKind::SessionEnd);
-    // Harness blocks delivered as a user turn are not the user's question.
-    let last_prompt = observations.iter().rev().find(|o| {
-        let text = if o.body.is_empty() { &o.title } else { &o.body };
-        o.kind == ObservationKind::UserPrompt && !looks_like_markup_block(text)
-    });
+    let last_prompt = observations.iter().rev().find_map(prompt_text);
 
     if last_stop.is_none()
-        && let Some(prompt) = last_prompt
+        && let Some(text) = last_prompt
     {
-        let text = if prompt.body.is_empty() {
-            prompt.title.trim()
-        } else {
-            prompt.body.trim()
-        };
+        let text = text.trim();
         if text.ends_with('?') || text.ends_with('？') {
             return Some(
                 "Session ended without a normal stop; the final prompt was never answered.",
@@ -516,6 +507,15 @@ fn human_ts(ts: &jiff::Timestamp) -> String {
         .to_string()
 }
 
+fn prompt_text(obs: &Observation) -> Option<&str> {
+    if obs.kind != ObservationKind::UserPrompt {
+        return None;
+    }
+    let original = if obs.body.is_empty() { &obs.title } else { &obs.body };
+    let text = strip_leading_system_reminders(original)?;
+    (!looks_like_markup_block(text) && (!text.is_empty() || original.is_empty())).then_some(text)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_auto_handoff(
     workspace_id: WorkspaceId,
@@ -527,16 +527,6 @@ pub(super) fn build_auto_handoff(
     owner_user: Option<String>,
     turn_checkpoint: bool,
 ) -> NewHandoff {
-    // Prefer obs.body (the full prompt) over obs.title (first-line +
-    // truncated to 80 chars for log/list display). When body is
-    // empty fall back to title so we never produce an empty entry.
-    fn pick_text(obs: &ai_memory_core::Observation) -> &str {
-        if !obs.body.is_empty() {
-            obs.body.as_str()
-        } else {
-            obs.title.as_str()
-        }
-    }
     /// Cap so a single 10-page prompt doesn't blow up the handoff.
     /// The body is already scrubbed at insert time; this is just a
     /// length budget. 1500 chars ≈ 250 words ≈ a paragraph.
@@ -554,10 +544,7 @@ pub(super) fn build_auto_handoff(
     for obs in observations {
         match obs.kind {
             ObservationKind::UserPrompt => {
-                let text = pick_text(obs);
-                // A harness block delivered as a user turn (`<task-notification>`)
-                // is not a request to continue from.
-                if !text.is_empty() && !ai_memory_core::looks_like_markup_block(text) {
+                if let Some(text) = prompt_text(obs).filter(|text| !text.is_empty()) {
                     prompts.push(text.to_string());
                 }
             }
@@ -671,10 +658,9 @@ fn derive_open_questions(
         observations.iter().rev().find(|o| o.kind == kind)
     };
 
-    // Harness blocks delivered as a user turn are not the user's question.
-    let last_prompt_obs = observations.iter().rev().find(|o| {
-        let text = if o.body.is_empty() { &o.title } else { &o.body };
-        o.kind == ObservationKind::UserPrompt && !ai_memory_core::looks_like_markup_block(text)
+    let last_prompt_body = observations.iter().rev().find_map(|obs| {
+        let text = prompt_text(obs)?;
+        Some(if obs.body.is_empty() && text.len() == obs.title.len() { "" } else { text })
     });
     let last_tool = last_of_kind(ObservationKind::PostToolUse);
     let last_stop = last_of_kind(ObservationKind::Stop);
@@ -683,8 +669,8 @@ fn derive_open_questions(
         .any(|o| o.kind == ObservationKind::SessionEnd);
 
     // Heuristic 1: last prompt is a question → it is the open question.
-    if let Some(p) = last_prompt_obs {
-        let body = p.body.trim();
+    if let Some(text) = last_prompt_body {
+        let body = text.trim();
         if body.ends_with('?') || body.ends_with('？') {
             return vec![format!("Unresolved question: {}", cap_handoff_text(body))];
         }
@@ -1302,6 +1288,53 @@ async fn small_and_boundary_sessions_render_identically() {
         let sid = fx.seed(&rows).await;
         fx.assert_equivalent(name, sid).await;
     }
+}
+
+#[tokio::test]
+async fn leading_system_reminders_render_equivalently() {
+    let fx = fixture().await;
+    let sid = fx
+        .seed(&[
+            start(0),
+            row(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
+                "<system-reminder>Called Read</system-reminder>\n\nfaça X",
+                1,
+            ),
+            row(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
+                "<system-reminder>Another notice</system-reminder>\n\n\
+                 <system-reminder>More context</system-reminder>\nComo faço X?",
+                2,
+            ),
+            row(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
+                "<system-reminder>Notice only</system-reminder>",
+                3,
+            ),
+            end(4),
+        ])
+        .await;
+
+    fx.assert_equivalent("leading system reminders", sid).await;
+    let (digest, stats) = SessionDigest::load_with_stats(&fx.store.reader, fx.ws, fx.proj, sid)
+        .await
+        .unwrap();
+    let agent = AgentKind::ClaudeCode;
+    let page = super::synthesize_session_page(fx.ws, fx.proj, sid, agent, &digest);
+    assert_eq!(page.title, "faça X");
+    assert_eq!(stats.prompt_bodies_read, 1);
+    assert!(page.body.contains("the final prompt was never answered"));
+
+    let handoff =
+        super::render_auto_handoff(fx.ws, fx.proj, agent, sid, None, &digest, None, false);
+    assert_eq!(
+        handoff.open_questions,
+        ["Unresolved question: Como faço X?"]
+    );
 }
 
 /// A couple of thousand mixed rows, with each way a session can end.

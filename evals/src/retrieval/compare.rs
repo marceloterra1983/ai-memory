@@ -54,6 +54,10 @@ struct SavedReport {
     config: String,
     #[serde(default)]
     mode: String,
+    #[serde(default)]
+    server_bin_sha256: Option<String>,
+    #[serde(default)]
+    context_token_budget: Option<usize>,
     per_question: Vec<SavedQuestion>,
 }
 
@@ -150,7 +154,15 @@ struct TypeCounts {
 
 fn label(report: &SavedReport) -> String {
     let commit: String = report.commit.chars().take(8).collect();
-    format!("{} ({}) at {commit}", report.config, report.mode)
+    let mut label = format!("{} ({}) at {commit}", report.config, report.mode);
+    if let Some(hash) = &report.server_bin_sha256 {
+        let prefix: String = hash.chars().take(12).collect();
+        label.push_str(&format!(" (server SHA-256 `{prefix}…`)"));
+    }
+    if let Some(budget) = report.context_token_budget {
+        label.push_str(&format!(" ({budget} estimated context tokens max)"));
+    }
+    label
 }
 
 fn compare(
@@ -170,6 +182,11 @@ fn compare(
         .into_iter()
         .chain(fts.map(|report| ("FTS", report)))
     {
+        if report.context_token_budget != baseline.context_token_budget {
+            bail!(
+                "{side} uses a different context budget. Rerun with matching --context-token-budget values"
+            );
+        }
         for question in &report.per_question {
             if question.hit_at.keys().ne(&ks) || question.recall_at.keys().ne(&ks) {
                 bail!(
@@ -588,5 +605,25 @@ mod tests {
         .unwrap();
         let error = load(&ab).unwrap_err().to_string();
         assert!(error.contains("is an A/B report"), "{error}");
+    }
+
+    #[test]
+    fn budgeted_comparisons_require_equal_budgets_and_identify_each_binary() {
+        let mut baseline = report("a", vec![question("q1", "user", Some(5))]);
+        let mut candidate = report("b", vec![question("q1", "user", Some(5))]);
+        baseline.context_token_budget = Some(10);
+        baseline.server_bin_sha256 = Some("a".repeat(64));
+        candidate.server_bin_sha256 = Some("b".repeat(64));
+        assert!(
+            compare(&baseline, &candidate, None)
+                .unwrap_err()
+                .to_string()
+                .contains("candidate uses a different context budget")
+        );
+        candidate.context_token_budget = Some(10);
+        let md = to_markdown(&compare(&baseline, &candidate, None).unwrap());
+        assert!(md.contains("server SHA-256 `aaaaaaaaaaaa…`"));
+        assert!(md.contains("server SHA-256 `bbbbbbbbbbbb…`"));
+        assert!(md.contains("10 estimated context tokens max"));
     }
 }

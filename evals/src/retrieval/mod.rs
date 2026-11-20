@@ -474,15 +474,6 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
             args.server_bin.display()
         );
     }
-    let server_bin = args
-        .server_bin
-        .canonicalize()
-        .context("resolving eval server binary")?;
-    let mut digest = Sha256::new();
-    std::io::copy(&mut std::fs::File::open(&server_bin)?, &mut digest)
-        .context("reading eval server binary for its SHA-256")?;
-    let server_bin_sha256 = format!("{:x}", digest.finalize());
-
     let mut baseline = Knobs::parse(
         "baseline",
         &args.embeddings,
@@ -530,6 +521,9 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
             "--context-token-budget requires server-side answer=false; use --qa for budgeted synthesis"
         );
     }
+
+    let bin_dir = tempfile::tempdir().context("creating eval server binary snapshot directory")?;
+    let (server_bin, server_bin_sha256) = snapshot_server_binary(&args.server_bin, bin_dir.path())?;
 
     if !args.no_embedding_cache {
         let root = std::path::absolute(EMBEDDING_CACHE_DIR)
@@ -619,6 +613,21 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
     }
     println!("run dir: {}", run_dir.display());
     Ok(())
+}
+
+fn snapshot_server_binary(
+    source: &std::path::Path,
+    root: &std::path::Path,
+) -> Result<(PathBuf, String)> {
+    let name = source
+        .file_name()
+        .context("eval server binary needs a file name")?;
+    let snapshot = root.join(name);
+    std::fs::copy(source, &snapshot).context("copying eval server binary")?;
+    let mut digest = Sha256::new();
+    std::io::copy(&mut std::fs::File::open(&snapshot)?, &mut digest)
+        .context("hashing the eval server snapshot")?;
+    Ok((snapshot, format!("{:x}", digest.finalize())))
 }
 
 /// Everything a config run shares with its A/B twin.
@@ -903,6 +912,23 @@ fn run_grep(
 mod tests {
     use super::*;
     use clap::Parser as _;
+
+    #[test]
+    fn server_snapshot_is_independent_of_rebuilds_at_the_input_path() {
+        let root = tempfile::tempdir().unwrap();
+        let snapshot_dir = tempfile::tempdir().unwrap();
+        let source = root.path().join("ai-memory.exe");
+        std::fs::write(&source, b"baseline binary").unwrap();
+        let (snapshot, checksum) = snapshot_server_binary(&source, snapshot_dir.path()).unwrap();
+        std::fs::write(&source, b"rebuilt binary").unwrap();
+
+        assert_eq!(snapshot.file_name(), source.file_name());
+        assert_eq!(std::fs::read(snapshot).unwrap(), b"baseline binary");
+        assert_eq!(
+            checksum,
+            format!("{:x}", Sha256::digest(b"baseline binary"))
+        );
+    }
 
     #[test]
     fn variant_ptbr_v1_parses_and_maps_to_pinned_dataset() {

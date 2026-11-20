@@ -567,8 +567,8 @@ prefix. The number is the documented title/snippet chars/4 estimate. The
 prefix, so both combinations are rejected. The QA delta uses only the
 questions graded on both sides and reports the denominator.
 
-JSON and Markdown reports for server runs record the SHA-256 of the
-selected `--server-bin` executable. The `commit` field records the
+Both sides run a private snapshot of the selected `--server-bin` executable.
+JSON and Markdown reports record the SHA-256 of that snapshot. `commit` records the
 evaluator checkout, which can differ from the server build. Reports name
 environment overrides by key. The values are passed to the server only.
 
@@ -605,9 +605,10 @@ run directory or the file), pairs questions by id, and prints:
   first;
 - per question type, how many moved earlier and how many later.
 
-Use matching `--ks` values for the baseline, candidate, and optional FTS
-run. The comparison requires at least one shared question and checks the
-measured cutoffs in each row before reporting any gain or loss.
+Use matching `--ks` and `--context-token-budget` values for the baseline,
+candidate, and optional FTS run. The comparison requires at least one shared
+question and checks the measured cutoffs in each row before reporting any
+gain or loss. The run labels identify the binaries by hash when available.
 
 ```bash
 cargo run --release -p ai-memory-eval -- retrieval-compare \

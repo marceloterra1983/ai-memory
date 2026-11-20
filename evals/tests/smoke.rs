@@ -208,6 +208,43 @@ fn empty_retrieval_selection_does_not_write_a_report() {
 }
 
 #[test]
+fn context_budget_rejects_engines_and_answers_that_ignore_it() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let binary = env!("CARGO_BIN_EXE_ai-memory-eval");
+    for (extra, diagnostic) in [
+        (["--engine", "grep"], "requires --engine server"),
+        (
+            ["--query-arg", "answer=true"],
+            "requires server-side answer=false",
+        ),
+        (
+            ["--candidate-query-arg", "answer=true"],
+            "requires server-side answer=false",
+        ),
+    ] {
+        let out = tempfile::tempdir().unwrap();
+        let result = Command::new(binary)
+            .current_dir(&repo_root)
+            .args([
+                "retrieval",
+                "--dataset-variant",
+                "coding-v1",
+                "--context-token-budget",
+                "10",
+            ])
+            .args(extra)
+            .args(["--server-bin", binary])
+            .arg("--out")
+            .arg(out.path())
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(diagnostic));
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn ptbr_corpus_grep_scores_and_preserves_coding_v1_compatibility() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     for (variant_flag, dataset_name) in [("ptbr-v1", "ptbr_v1"), ("coding-v1", "coding_v1")] {

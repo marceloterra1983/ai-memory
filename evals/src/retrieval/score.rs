@@ -40,8 +40,7 @@ pub struct QuestionScore {
     /// Wall clock of this question's ingest, milliseconds (0 for `grep`).
     #[serde(default)]
     pub ingest_ms: u128,
-    /// Raw observation hits the server returned (it falls back to them only
-    /// when page search finds nothing).
+    /// Raw observation hits retained after any evaluated context budget.
     #[serde(default)]
     pub raw_hits: usize,
     /// End-to-end QA outcome (R2b, opt-in): a candidate answer graded

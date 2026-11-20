@@ -58,9 +58,7 @@ pub struct QueryOutcome {
     /// puts in front of the agent, so this is the context cost of the
     /// retrieval, not of the underlying full pages.
     pub context_tokens: usize,
-    /// Raw observation hits in the response. The server only falls back to
-    /// them when page search returns nothing, so a non-zero count marks a
-    /// question answered from observations.
+    /// Raw observation hits retained in the evaluated context.
     pub raw_hits: usize,
 }
 
@@ -80,6 +78,8 @@ impl QueryOutcome {
                 true
             })
             .count();
+        let page_hits = self.contexts.len() - self.raw_hits;
+        self.raw_hits = kept.saturating_sub(page_hits);
         self.contexts.truncate(kept);
         self.retrieved.truncate(kept);
         self.context_tokens = estimate_tokens(chars);
@@ -399,13 +399,14 @@ mod tests {
             }),
             latency: Duration::ZERO,
             context_tokens: 3,
-            raw_hits: 0,
+            raw_hits: 2,
         };
         outcome.limit_context(2);
         assert_eq!(outcome.context_tokens, 1);
         assert_eq!(outcome.retrieved.len(), 1);
         assert_eq!(outcome.retrieved[0].session_uuid, Some(ids[0]));
         assert_eq!(outcome.contexts[0].snippet, "ação");
+        assert_eq!(outcome.raw_hits, 0);
         assert!(outcome.answer.is_none());
 
         outcome.limit_context(0);

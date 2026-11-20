@@ -496,11 +496,17 @@ pub fn ab_to_markdown(r: &AbReport) -> String {
     ));
     if let (Some(paired), Some(dq)) = (&r.delta.qa_paired, r.delta.qa_accuracy) {
         md.push_str(&format!(
-            "| QA accuracy ({} paired) | {:.3} | {:.3} | {:+.3} |\n",
+            "| QA accuracy ({}/{} paired) | {:.3} | {:.3} | {:+.3} |\n",
             paired.graded,
+            r.candidate.questions_scored,
             paired.baseline_correct as f64 / paired.graded as f64,
             paired.candidate_correct as f64 / paired.graded as f64,
             dq
+        ));
+    } else if r.baseline.qa.is_some() && r.candidate.qa.is_some() {
+        md.push_str(&format!(
+            "| QA accuracy (0/{} paired) | — | — | — |\n",
+            r.candidate.questions_scored,
         ));
     }
     md.push_str(METRIC_NOTES);
@@ -728,7 +734,7 @@ mod tests {
             serde_json::json!({"graded": 1, "baseline_correct": 1, "candidate_correct": 0})
         );
         assert!(
-            ab_to_markdown(&ab).contains("| QA accuracy (1 paired) | 1.000 | 0.000 | -1.000 |")
+            ab_to_markdown(&ab).contains("| QA accuracy (1/2 paired) | 1.000 | 0.000 | -1.000 |")
         );
 
         let mut candidate = ab.candidate;

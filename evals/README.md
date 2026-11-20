@@ -493,6 +493,20 @@ off when the baseline uses `--reranker`. Supplying candidate environment
 variables or query arguments replaces the corresponding baseline list.
 A selection with no scorable questions exits with an error before writing
 a report. Use `abstention` to evaluate questions with no supporting evidence.
+Fixtures may use an empty `evidence` list for an unanswerable question. Its
+score mean and standard deviation are `null`, since there were no hits.
+
+Set `--context-token-budget 400` to compare evidence under a shared budget.
+The server harness keeps whole ranked hits up to the first one that would
+exceed the budget. Retrieval metrics and opt-in `--qa` see that same
+prefix. The number is the documented title/snippet chars/4 estimate. The
+`grep` control has no snippets and server-side `answer=true` bypasses the
+prefix, so both combinations are rejected. The QA delta uses only the
+questions graded on both sides and reports the denominator.
+
+JSON and Markdown reports for server runs record the SHA-256 of the
+selected `--server-bin` executable. The `commit` field records the
+evaluator checkout, which can differ from the server build.
 
 ```bash
 # Determinism check — baseline == candidate ⇒ accuracy/context delta = 0:

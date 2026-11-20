@@ -125,8 +125,8 @@ struct Signals {
     lexical_coverage: f64,
     top_score: f64,
     top_score_margin: Option<f64>,
-    score_mean: f64,
-    score_stddev: f64,
+    score_mean: Option<f64>,
+    score_stddev: Option<f64>,
     snippet_matching_term_density: f64,
     snippet_chars: usize,
     belief_mean: Option<f64>,
@@ -345,8 +345,11 @@ fn validate_fixture(fixture: &FixtureSet) -> Result<()> {
         if case.id.trim().is_empty() || !ids.insert(case.id.as_str()) {
             bail!("fixture ids must be nonempty and unique: `{}`", case.id);
         }
-        if case.question.trim().is_empty() || case.evidence.is_empty() {
-            bail!("{}: question and evidence must be nonempty", case.id);
+        if case.question.trim().is_empty() {
+            bail!("{}: question must be nonempty", case.id);
+        }
+        if case.evidence.is_empty() && case.expected_verdict != Verdict::Unanswerable {
+            bail!("{}: only unanswerable cases may have no evidence", case.id);
         }
         let paths = case
             .evidence
@@ -491,13 +494,15 @@ fn signals(case: &Case) -> Signals {
     scores.reverse();
     let top_score = scores.first().copied().unwrap_or(0.0);
     let top_score_margin = scores.get(1).map(|second| top_score - second);
-    let score_mean = scores.iter().sum::<f64>() / scores.len() as f64;
-    let score_stddev = (scores
-        .iter()
-        .map(|score| (score - score_mean).powi(2))
-        .sum::<f64>()
-        / scores.len() as f64)
-        .sqrt();
+    let score_mean = (!scores.is_empty()).then(|| scores.iter().sum::<f64>() / scores.len() as f64);
+    let score_stddev = score_mean.map(|mean| {
+        (scores
+            .iter()
+            .map(|score| (score - mean).powi(2))
+            .sum::<f64>()
+            / scores.len() as f64)
+            .sqrt()
+    });
     let beliefs = case
         .evidence
         .iter()
@@ -702,6 +707,23 @@ mod tests {
         let mut absent = supported;
         absent.evidence[0].belief_strength = None;
         assert_eq!(signals(&absent).belief_mean, None);
+    }
+
+    #[test]
+    fn empty_evidence_is_an_unanswerable_case_without_score_statistics() {
+        let mut empty = case("missing", Verdict::Unanswerable, "deployment docs");
+        empty.evidence.clear();
+        let mut fixture = FixtureSet {
+            version: 1,
+            cases: vec![empty],
+        };
+        validate_fixture(&fixture).unwrap();
+        let empty_signals = signals(&fixture.cases[0]);
+        assert_eq!(empty_signals.lexical_coverage, 0.0);
+        assert!(empty_signals.score_mean.is_none());
+        assert!(empty_signals.score_stddev.is_none());
+        fixture.cases[0].expected_verdict = Verdict::Partial;
+        assert!(validate_fixture(&fixture).is_err());
     }
 
     #[test]

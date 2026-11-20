@@ -20,7 +20,14 @@ use super::score::{QuestionScore, SliceMetrics, percentile_u128};
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub generated_at: String,
+    /// Git checkout containing the evaluator, independent of `--server-bin`.
     pub commit: String,
+    /// SHA-256 of the executable selected for the server runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_bin_sha256: Option<String>,
+    /// Shared bound applied to the ranked title and snippet context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_token_budget: Option<usize>,
     pub hardware: String,
     pub dataset: &'static str,
     pub dataset_sha256: &'static str,
@@ -190,7 +197,7 @@ pub fn hardware() -> String {
 
 /// Header block shared by single-config and A/B reports.
 fn provenance_md(r: &Report) -> String {
-    format!(
+    let mut md = format!(
         "- commit: `{}`\n- dataset: `{}` (sha256 `{}…`)\n- hardware: {}\n\
          - questions scored: {} ({} abstention questions excluded)\n",
         r.commit,
@@ -199,7 +206,14 @@ fn provenance_md(r: &Report) -> String {
         r.hardware,
         r.questions_scored,
         r.abstention_excluded,
-    )
+    );
+    if let Some(hash) = &r.server_bin_sha256 {
+        md.push_str(&format!("- server binary SHA-256: `{hash}`\n"));
+    }
+    if let Some(budget) = r.context_token_budget {
+        md.push_str(&format!("- context budget: {budget} estimated tokens\n"));
+    }
+    md
 }
 
 /// The per-slice triple table (accuracy + latency + context tokens).
@@ -271,14 +285,6 @@ fn qa_table_md(r: &Report) -> String {
     md
 }
 
-/// `overall`-slice QA accuracy, when the run graded any question.
-fn overall_qa_accuracy(r: &Report) -> Option<f64> {
-    r.slices
-        .get("overall")
-        .and_then(|m| m.qa.as_ref())
-        .map(|q| q.accuracy)
-}
-
 const METRIC_NOTES: &str = "\nNotes: hit@k = any evidence session in top k (the \"Recall@k\" most \
      systems publish); recall@k = fraction of evidence sessions found; \
      recall-all@k = all evidence sessions found in top k. \
@@ -331,10 +337,19 @@ pub struct AbDelta {
     /// the candidate hits and the baseline misses, and the reverse. A net
     /// delta built from many flips both ways is noisier than its size.
     pub hit_flips: BTreeMap<usize, (usize, usize)>,
-    /// candidate − baseline QA accuracy over the `overall` slice (R2b).
-    /// `None` unless both runs graded the overall slice.
+    /// Candidate minus baseline accuracy on questions graded by both runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qa_accuracy: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qa_paired: Option<PairedQa>,
+}
+
+/// Counts on the common graded question set.
+#[derive(Debug, Serialize)]
+pub struct PairedQa {
+    pub graded: usize,
+    pub baseline_correct: usize,
+    pub candidate_correct: usize,
 }
 
 impl AbReport {
@@ -386,6 +401,22 @@ fn compute_delta(baseline: &Report, candidate: &Report) -> AbDelta {
         }
         hit_flips.insert(*k, (gained, lost));
     }
+    let mut qa = PairedQa {
+        graded: 0,
+        baseline_correct: 0,
+        candidate_correct: 0,
+    };
+    for c in &candidate.per_question {
+        if let Some((b, c)) = base_by_id
+            .get(c.question_id.as_str())
+            .and_then(|b| b.qa.as_ref())
+            .zip(c.qa.as_ref())
+        {
+            qa.graded += 1;
+            qa.baseline_correct += usize::from(b.correct);
+            qa.candidate_correct += usize::from(c.correct);
+        }
+    }
     AbDelta {
         hit_flips,
         hit_at,
@@ -395,13 +426,9 @@ fn compute_delta(baseline: &Report, candidate: &Report) -> AbDelta {
         latency_p95_ms: c.latency_p95_ms as i128 - b.latency_p95_ms as i128,
         context_tokens_mean: c.context_tokens_mean - b.context_tokens_mean,
         context_tokens_median: c.context_tokens_median - b.context_tokens_median,
-        qa_accuracy: match (
-            overall_qa_accuracy(baseline),
-            overall_qa_accuracy(candidate),
-        ) {
-            (Some(b), Some(c)) => Some(c - b),
-            _ => None,
-        },
+        qa_accuracy: (qa.graded > 0)
+            .then(|| (qa.candidate_correct as f64 - qa.baseline_correct as f64) / qa.graded as f64),
+        qa_paired: (qa.graded > 0).then_some(qa),
     }
 }
 
@@ -467,10 +494,13 @@ pub fn ab_to_markdown(r: &AbReport) -> String {
         "| ctx tok median | {:.1} | {:.1} | {:+.1} |\n",
         b.context_tokens_median, c.context_tokens_median, r.delta.context_tokens_median
     ));
-    if let (Some(bq), Some(cq), Some(dq)) = (b.qa.as_ref(), c.qa.as_ref(), r.delta.qa_accuracy) {
+    if let (Some(paired), Some(dq)) = (&r.delta.qa_paired, r.delta.qa_accuracy) {
         md.push_str(&format!(
-            "| qa accuracy | {:.3} | {:.3} | {:+.3} |\n",
-            bq.accuracy, cq.accuracy, dq
+            "| QA accuracy ({} paired) | {:.3} | {:.3} | {:+.3} |\n",
+            paired.graded,
+            paired.baseline_correct as f64 / paired.graded as f64,
+            paired.candidate_correct as f64 / paired.graded as f64,
+            dq
         ));
     }
     md.push_str(METRIC_NOTES);
@@ -501,6 +531,8 @@ mod tests {
         Report {
             generated_at: "2026-09-01".into(),
             commit: "abc".into(),
+            server_bin_sha256: None,
+            context_token_budget: None,
             hardware: "cpu".into(),
             dataset: "longmemeval_s",
             dataset_sha256: crate::retrieval::dataset::LONGMEMEVAL_S_SHA256,
@@ -533,10 +565,14 @@ mod tests {
 
     #[test]
     fn markdown_carries_provenance_and_the_triple() {
-        let r = report("embeddings=none reranker=off", 0.5, 0.25, 0.0);
+        let mut r = report("embeddings=none reranker=off", 0.5, 0.25, 0.0);
+        r.server_bin_sha256 = Some("f".repeat(64));
+        r.context_token_budget = Some(100);
         let md = to_markdown(&r);
         assert!(md.starts_with("# longmemeval_s retrieval"));
         assert!(md.contains("commit: `abc`"));
+        assert!(md.contains(&format!("server binary SHA-256: `{}`", "f".repeat(64))));
+        assert!(md.contains("context budget: 100 estimated tokens"));
         assert!(md.contains("config: embeddings=none reranker=off"));
         assert!(md.contains(" hit@5 | recall@5 | recall-all@5 |"));
         // Accuracy, latency and context-token columns remain aligned.
@@ -663,6 +699,45 @@ mod tests {
         let ab = AbReport::new(baseline, candidate);
         assert_eq!(ab.delta.hit_flips[&5], (1, 1));
         assert!(ab_to_markdown(&ab).contains("(+1/-1)"));
+    }
+
+    #[test]
+    fn ab_qa_delta_uses_only_questions_graded_by_both_sides() {
+        use super::super::qa::{Answerability, QaOutcome};
+        let graded = |id, correct| {
+            let mut result = question(id, 1.0);
+            result.qa = Some(QaOutcome {
+                correct,
+                answerability: Answerability::Answerable,
+                answer_source: "synthesized",
+                answer: String::new(),
+                grade_reason: String::new(),
+                answer_latency_ms: 0,
+                answer_tokens: 0,
+            });
+            result
+        };
+        let mut baseline = report("b", 1.0, 1.0, 1.0);
+        let mut candidate = report("c", 1.0, 1.0, 1.0);
+        baseline.per_question = vec![graded("paired", true), graded("b-only", false)];
+        candidate.per_question = vec![graded("paired", false), graded("c-only", true)];
+        let ab = AbReport::new(baseline, candidate);
+        assert_eq!(ab.delta.qa_accuracy, Some(-1.0));
+        assert_eq!(
+            serde_json::to_value(&ab).unwrap()["delta"]["qa_paired"],
+            serde_json::json!({"graded": 1, "baseline_correct": 1, "candidate_correct": 0})
+        );
+        assert!(
+            ab_to_markdown(&ab).contains("| QA accuracy (1 paired) | 1.000 | 0.000 | -1.000 |")
+        );
+
+        let mut candidate = ab.candidate;
+        candidate
+            .per_question
+            .retain(|row| row.question_id != "paired");
+        let no_pairs = AbReport::new(ab.baseline, candidate);
+        assert!(no_pairs.delta.qa_accuracy.is_none());
+        assert!(no_pairs.delta.qa_paired.is_none());
     }
 
     #[test]

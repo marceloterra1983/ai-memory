@@ -46,6 +46,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
+use sha2::{Digest, Sha256};
 
 use dataset::{DatasetVariant, Question};
 use ingest::{DatePrefix, IngestMode, project_for, stored_session_uuid};
@@ -105,6 +106,11 @@ pub struct RetrievalArgs {
     /// Cutoffs for hit@k / recall@k / recall-all@k.
     #[arg(long, value_delimiter = ',', default_values_t = vec![1, 3, 5, 10])]
     ks: Vec<usize>,
+
+    /// Score only whole ranked hits within this estimated title/snippet token
+    /// budget. Both A/B sides and the optional harness QA read the same prefix.
+    #[arg(long)]
+    context_token_budget: Option<usize>,
 
     /// Questions ingested+queried concurrently.
     #[arg(long, default_value_t = 8)]
@@ -443,6 +449,9 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
         if args.ab_mode() || args.reachability || args.qa.enabled {
             bail!("--engine grep runs alone: no candidate, --reachability, or --qa");
         }
+        if args.context_token_budget.is_some() {
+            bail!("--context-token-budget requires --engine server");
+        }
         let report = run_grep(&args, variant, &questions, abstention_n, &commit);
         std::fs::create_dir_all(&run_dir)?;
         std::fs::write(
@@ -462,6 +471,14 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
             args.server_bin.display()
         );
     }
+    let server_bin = args
+        .server_bin
+        .canonicalize()
+        .context("resolving eval server binary")?;
+    let mut digest = Sha256::new();
+    std::io::copy(&mut std::fs::File::open(&server_bin)?, &mut digest)
+        .context("reading eval server binary for its SHA-256")?;
+    let server_bin_sha256 = format!("{:x}", digest.finalize());
 
     let mut baseline = Knobs::parse(
         "baseline",
@@ -495,6 +512,21 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
     } else {
         None
     };
+
+    if args.context_token_budget.is_some()
+        && std::iter::once(&baseline)
+            .chain(candidate.as_ref())
+            .any(|knobs| {
+                knobs
+                    .query_args
+                    .get("answer")
+                    .is_some_and(|value| value.as_bool() != Some(false))
+            })
+    {
+        bail!(
+            "--context-token-budget requires server-side answer=false; use --qa for budgeted synthesis"
+        );
+    }
 
     if !args.no_embedding_cache {
         let root = std::path::absolute(EMBEDDING_CACHE_DIR)
@@ -549,6 +581,8 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
 
     let run = RunContext {
         args: &args,
+        server_bin: &server_bin,
+        server_bin_sha256: &server_bin_sha256,
         variant,
         questions: &questions,
         abstention_n,
@@ -587,6 +621,8 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
 /// Everything a config run shares with its A/B twin.
 struct RunContext<'a> {
     args: &'a RetrievalArgs,
+    server_bin: &'a PathBuf,
+    server_bin_sha256: &'a str,
     variant: &'static DatasetVariant,
     questions: &'a [Question],
     abstention_n: usize,
@@ -608,7 +644,7 @@ struct QuestionRun {
 /// baseline and candidate.
 async fn run_config(run: &RunContext<'_>, knobs: &Knobs) -> Result<report::Report> {
     let args = run.args;
-    let server = EvalServer::launch(&args.server_bin, args.keep_data_dir, &knobs.launch_config())
+    let server = EvalServer::launch(run.server_bin, args.keep_data_dir, &knobs.launch_config())
         .await
         .with_context(|| format!("launching {} server", knobs.side))?;
     tracing::info!(
@@ -629,6 +665,7 @@ async fn run_config(run: &RunContext<'_>, knobs: &Knobs) -> Result<report::Repor
     let query_args = Arc::new(knobs.query_args.clone());
     let (ingest_mode, date_prefix) = (knobs.ingest, knobs.date_prefix);
     let reach_on = args.reachability;
+    let context_token_budget = args.context_token_budget;
 
     let started = std::time::Instant::now();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(args.concurrency.max(1)));
@@ -654,7 +691,7 @@ async fn run_config(run: &RunContext<'_>, knobs: &Knobs) -> Result<report::Repor
                 }
             }
             .with_context(|| format!("ingesting {}", q.question_id))?;
-            let outcome = query::memory_query(
+            let mut outcome = query::memory_query(
                 &client,
                 &base_url,
                 ingest::EVAL_WORKSPACE,
@@ -665,6 +702,9 @@ async fn run_config(run: &RunContext<'_>, knobs: &Knobs) -> Result<report::Repor
             )
             .await
             .with_context(|| format!("querying {}", q.question_id))?;
+            if let Some(budget) = context_token_budget {
+                outcome.limit_context(budget);
+            }
             let evidence: HashSet<uuid::Uuid> = q
                 .answer_session_ids
                 .iter()
@@ -769,6 +809,8 @@ async fn run_config(run: &RunContext<'_>, knobs: &Knobs) -> Result<report::Repor
     Ok(report::Report {
         generated_at: Timestamp::now().to_string(),
         commit: run.commit.to_string(),
+        server_bin_sha256: Some(run.server_bin_sha256.to_owned()),
+        context_token_budget: args.context_token_budget,
         hardware: report::hardware(),
         dataset: run.variant.name,
         dataset_sha256: run.variant.sha256,
@@ -835,6 +877,8 @@ fn run_grep(
     report::Report {
         generated_at: Timestamp::now().to_string(),
         commit: commit.to_string(),
+        server_bin_sha256: None,
+        context_token_budget: None,
         hardware: report::hardware(),
         dataset: variant.name,
         dataset_sha256: variant.sha256,

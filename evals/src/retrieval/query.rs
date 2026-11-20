@@ -64,6 +64,29 @@ pub struct QueryOutcome {
     pub raw_hits: usize,
 }
 
+impl QueryOutcome {
+    /// Keep whole hits in rank order within the title/snippet token estimate.
+    pub fn limit_context(&mut self, budget: usize) {
+        let mut chars = 0;
+        let kept = self
+            .contexts
+            .iter()
+            .take_while(|hit| {
+                let next = chars + hit.title.chars().count() + hit.snippet.chars().count();
+                if budget == 0 || estimate_tokens(next) > budget {
+                    return false;
+                }
+                chars = next;
+                true
+            })
+            .count();
+        self.contexts.truncate(kept);
+        self.retrieved.truncate(kept);
+        self.context_tokens = estimate_tokens(chars);
+        self.answer = None;
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct QueryResponse {
     #[serde(default)]
@@ -349,6 +372,46 @@ mod tests {
         assert_eq!(estimate_tokens(5), 2);
         assert_eq!(estimate_tokens(0), 0);
         assert_eq!(estimate_tokens(8), 2);
+    }
+
+    #[test]
+    fn context_budget_keeps_a_whole_ranked_prefix_for_scoring_and_qa() {
+        let ids = [
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7(),
+        ];
+        let mut outcome = QueryOutcome {
+            retrieved: ids
+                .map(|id| Retrieved {
+                    session_uuid: Some(id),
+                })
+                .into(),
+            contexts: ["ação", "áéíóú", "x"]
+                .map(|snippet| HitContext {
+                    title: String::new(),
+                    snippet: snippet.to_string(),
+                })
+                .into(),
+            answer: Some(ServerAnswer {
+                text: "Outside the evaluated context".into(),
+                citations: vec![],
+            }),
+            latency: Duration::ZERO,
+            context_tokens: 3,
+            raw_hits: 0,
+        };
+        outcome.limit_context(2);
+        assert_eq!(outcome.context_tokens, 1);
+        assert_eq!(outcome.retrieved.len(), 1);
+        assert_eq!(outcome.retrieved[0].session_uuid, Some(ids[0]));
+        assert_eq!(outcome.contexts[0].snippet, "ação");
+        assert!(outcome.answer.is_none());
+
+        outcome.limit_context(0);
+        assert!(outcome.retrieved.is_empty());
+        assert!(outcome.contexts.is_empty());
+        assert_eq!(outcome.context_tokens, 0);
     }
 
     #[test]

@@ -430,7 +430,7 @@ impl PageWriteMetadata {
             let from = parse_effective_date(&validity.from)
                 .ok_or_else(|| invalid("effective_validity.from (expected YYYY-MM-DD)"))?;
             if let Some(until) = &validity.until
-                && !parse_effective_date(until).is_some_and(|until| until > from)
+                && parse_effective_date(until).is_none_or(|until| until <= from)
             {
                 return Err(invalid(
                     "effective_validity.until (expected YYYY-MM-DD after from)",

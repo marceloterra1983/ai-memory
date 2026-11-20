@@ -10,7 +10,7 @@ refinery::embed_migrations!("migrations");
 /// `testdata/V62__page_ingestion_windows.pre776.sql`; a regression test
 /// derives this value through refinery's own checksum implementation.
 const ORIGINAL_V62_CHECKSUM: u64 = 16_518_128_245_137_964_566;
-const V62_VERSION: u32 = 62;
+const V62_VERSION: i32 = 62;
 const V62_NAME: &str = "page_ingestion_windows";
 
 /// Run all pending migrations against an open connection.
@@ -111,7 +111,7 @@ fn crlf_checksum(migration: &refinery::Migration) -> Option<u64> {
     ))
 }
 
-fn checksum_for_sql(version: u32, name: &str, sql: &str) -> u64 {
+fn checksum_for_sql(version: i32, name: &str, sql: &str) -> u64 {
     refinery::Migration::unapplied(&format!("V{version}__{name}"), sql)
         .expect("embedded migration identity must remain valid")
         .checksum()
@@ -122,7 +122,7 @@ fn max_supported_version() -> u32 {
     migrations::runner()
         .get_migrations()
         .iter()
-        .map(refinery::Migration::version)
+        .filter_map(|migration| u32::try_from(migration.version()).ok())
         .max()
         .unwrap_or(0)
 }
@@ -138,7 +138,7 @@ fn classify_run_error(err: refinery::Error) -> StoreError {
             return StoreError::MigrationHistoryGap { missing: identity };
         }
         let supported = max_supported_version();
-        if migration.version() > supported {
+        if u32::try_from(migration.version()).is_ok_and(|applied| applied > supported) {
             return StoreError::DataSchemaAhead {
                 applied: identity,
                 supported,
@@ -149,7 +149,7 @@ fn classify_run_error(err: refinery::Error) -> StoreError {
 }
 
 #[cfg(test)]
-pub(crate) fn run_to(conn: &mut rusqlite::Connection, target: u32) -> Result<(), refinery::Error> {
+pub(crate) fn run_to(conn: &mut rusqlite::Connection, target: i32) -> Result<(), refinery::Error> {
     migrations::runner()
         .set_target(refinery::Target::Version(target))
         .run(conn)?;

@@ -1,6 +1,6 @@
 //! `ai-memory-eval` — offline evaluation harnesses for ai-memory.
 //!
-//! Five subcommands:
+//! Evaluation subcommands:
 //!
 //! - `ab` — live A/B comparison of two LLM providers on the production
 //!   consolidation prompt, with literal-fidelity scoring (see [`ab`],
@@ -15,9 +15,11 @@
 //!   and lists the questions whose first hit moved.
 //! - `abstention` — offline evidence-sufficiency signals, threshold sweeps,
 //!   and optional structured LLM answerability evaluation.
+//! - `dream-replay` — paired offline replay of a literal Dream merge and restore.
 
 mod ab;
 mod abstention;
+mod dream_replay;
 mod fidelity;
 mod generate;
 mod projection;
@@ -27,10 +29,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "ai-memory-eval",
-    about = "Evaluation harnesses for ai-memory (LLM A/B + retrieval benchmark)"
-)]
+#[command(name = "ai-memory-eval", about = "Evaluation harnesses for ai-memory")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -51,6 +50,8 @@ enum Command {
     RetrievalCompare(retrieval::compare::CompareArgs),
     /// Offline evidence-sufficiency and abstention benchmark.
     Abstention(Box<abstention::AbstentionArgs>),
+    /// Replay literal Dream, retrieval, and checkpoint restore on a paired fixture.
+    DreamReplay(dream_replay::DreamReplayArgs),
 }
 
 #[tokio::main]
@@ -68,5 +69,6 @@ async fn main() -> Result<()> {
         Command::Retrieval(args) => retrieval::run(*args).await,
         Command::RetrievalCompare(args) => retrieval::compare::run(args),
         Command::Abstention(args) => abstention::run(*args).await,
+        Command::DreamReplay(args) => dream_replay::run(args).await,
     }
 }

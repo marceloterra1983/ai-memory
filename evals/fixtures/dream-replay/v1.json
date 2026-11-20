@@ -1,0 +1,58 @@
+{
+  "id": "dream-literal-v1",
+  "merge_sources": ["notes/pomar-ambar.md", "notes/pomar-cobre.md"],
+  "pages": [
+    {
+      "path": "notes/pomar-ambar.md",
+      "title": "Pomar Boreal, ensaio âmbar",
+      "author": "ana-fixture",
+      "body": "Relatório de calibração da válvula no Pomar Boreal.\n\nO ensaio usa a bancada de recirculação com reservatório de retorno, manômetro de referência e registro de abertura no painel. Antes da calibração da válvula, a equipe abre o retorno, purga a linha, confirma o zero do manômetro e registra a leitura com a bomba parada. A pressão sobe em passos iguais, com pausa entre os passos. A equipe registra a abertura no painel, confere o retorno ao reservatório e baixa a pressão antes de repetir o ciclo. Depois do ensaio, a equipe fecha a alimentação, abre o retorno e anota a pressão residual ao lado do instrumento de referência. O relatório da bancada distingue a pressão nominal da pressão observada e mantém as decisões de cada rodada no registro de calibração da válvula.\n\nEm 2025-03-14, o ensaio âmbar fez 7 ciclos a 2 bar. O ID é `PB-AMB-041`. Use `boreal-check --modo ambar` em `/bancada/pomar/ambar.toml`. Nunca abra o retorno durante a purga, exceto com a bomba desligada. A decisão de março era usar o cartucho violeta."
+    },
+    {
+      "path": "notes/pomar-cobre.md",
+      "title": "Pomar Boreal, ensaio cobre",
+      "author": "bia-fixture",
+      "body": "Relatório de calibração da válvula no Pomar Boreal.\n\nO ensaio usa a bancada de recirculação com reservatório de retorno, manômetro de referência e registro de abertura no painel. Antes da calibração da válvula, a equipe abre o retorno, purga a linha, confirma o zero do manômetro e registra a leitura com a bomba parada. A pressão sobe em passos iguais, com pausa entre os passos. A equipe registra a abertura no painel, confere o retorno ao reservatório e baixa a pressão antes de repetir o ciclo. Depois do ensaio, a equipe fecha a alimentação, abre o retorno e anota a pressão residual ao lado do instrumento de referência. O relatório da bancada distingue a pressão nominal da pressão observada e mantém as decisões de cada rodada no registro de calibração da válvula.\n\nEm 2025-04-09, o ensaio cobre fez 9 ciclos a 3 bar. O ID é `PB-COB-052`. Use `boreal-check --modo cobre` em `/bancada/pomar/cobre.toml`. A decisão de abril passou a usar o cartucho cerúleo."
+    },
+    {
+      "path": "notes/mapa-estelar.md",
+      "title": "Mapa estelar do observatório",
+      "author": "caio-fixture",
+      "body": "O observatório registrou a ocultação lunar no atlas do céu. A ocular do telescópio usa o filtro `ASTRO-17` para observar a Lua. A efeméride fica na gaveta leste da cúpula."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "comparar-ensaios",
+      "query": "\"calibração da válvula\"",
+      "requires": [
+        { "source": "notes/pomar-ambar.md", "literal": "Em 2025-03-14, o ensaio âmbar fez 7 ciclos a 2 bar." },
+        { "source": "notes/pomar-cobre.md", "literal": "Em 2025-04-09, o ensaio cobre fez 9 ciclos a 3 bar." },
+        { "source": "notes/pomar-ambar.md", "literal": "A decisão de março era usar o cartucho violeta." },
+        { "source": "notes/pomar-cobre.md", "literal": "A decisão de abril passou a usar o cartucho cerúleo." }
+      ]
+    },
+    {
+      "id": "repetir-ambar",
+      "query": "\"ensaio âmbar\"",
+      "requires": [
+        { "source": "notes/pomar-ambar.md", "literal": "O ID é `PB-AMB-041`. Use `boreal-check --modo ambar` em `/bancada/pomar/ambar.toml`." },
+        { "source": "notes/pomar-ambar.md", "literal": "Nunca abra o retorno durante a purga, exceto com a bomba desligada." }
+      ]
+    },
+    {
+      "id": "repetir-cobre",
+      "query": "\"ensaio cobre\"",
+      "requires": [
+        { "source": "notes/pomar-cobre.md", "literal": "O ID é `PB-COB-052`. Use `boreal-check --modo cobre` em `/bancada/pomar/cobre.toml`." }
+      ]
+    },
+    {
+      "id": "identificar-filtro",
+      "query": "\"ocultação lunar\"",
+      "requires": [
+        { "source": "notes/mapa-estelar.md", "literal": "A ocular do telescópio usa o filtro `ASTRO-17` para observar a Lua." }
+      ]
+    }
+  ]
+}

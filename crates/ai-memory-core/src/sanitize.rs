@@ -61,12 +61,14 @@
 //! Look-alike characters (full-width `ｓｋ－…`, other confusables) are not
 //! folded: matching does not apply NFKC normalization.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use regex::Regex;
 use tracing::debug;
 
-use crate::NewObservation;
+use crate::scaffolding::compact_leading_system_reminders;
+use crate::{NewObservation, ObservationKind};
 
 /// Universal durable-body ceiling for lifecycle observations. Event adapters
 /// may impose smaller limits, but no sanitized observation can cross the store
@@ -903,12 +905,19 @@ impl Sanitized<NewObservation> {
     /// stored prefix is often too short to match a pattern, so the fragment
     /// lands in the title unredacted. Scrubbing first also means a
     /// `[REDACTED:…]` marker is already in place before the length cap runs,
-    /// same as the body.
+    /// same as the body. On an oversized user prompt, compact leading
+    /// system reminders between scrubbing and truncation to keep the prompt
+    /// visible to readers that skip the notices.
     #[must_use]
     pub fn new(mut obs: NewObservation, sanitizer: &Sanitizer) -> Self {
         obs.title = truncate_for_title(&sanitizer.scrub(&obs.title));
-        obs.body =
-            truncate_utf8_bytes_head_tail(&sanitizer.scrub(&obs.body), OBSERVATION_BODY_MAX_BYTES);
+        let body = sanitizer.scrub(&obs.body);
+        let body = if obs.kind == ObservationKind::UserPrompt {
+            compact_leading_system_reminders(&body, OBSERVATION_BODY_MAX_BYTES)
+        } else {
+            Cow::Borrowed(body.as_str())
+        };
+        obs.body = truncate_utf8_bytes_head_tail(&body, OBSERVATION_BODY_MAX_BYTES);
         obs.file_path = obs
             .file_path
             .filter(|path| sanitizer.admits_file_path(path));
@@ -1613,6 +1622,100 @@ mod tests {
             scrubbed.title
         );
         assert!(scrubbed.title.chars().count() <= 80);
+    }
+
+    #[test]
+    fn reminder_cap_sanitized_prompt_keeps_redacted_operator_text() {
+        let notice_secret = format!("sk-{}", "N".repeat(40));
+        let operator_secret = format!("sk-{}", "P".repeat(40));
+        let notices = format!(
+            "<system-reminder>{}\n{notice_secret}\n</system-reminder>\n",
+            "n".repeat(20 * 1024)
+        );
+        let prompt = format!("{notices}Review {operator_secret} here.");
+        let stored = sanitized_reminder_cap_body(ObservationKind::UserPrompt, prompt);
+        let removed_bytes = notices.len() - notice_secret.len() + "[REDACTED:api_key]".len();
+        let expected = format!(
+            "<system-reminder>[{removed_bytes} bytes omitted]</system-reminder>\nReview [REDACTED:api_key] here."
+        );
+        assert!(
+            stored == expected,
+            "expected a compact notice counted after redaction and the redacted prompt"
+        );
+    }
+
+    #[test]
+    fn reminder_cap_sanitized_prompt_keeps_head_and_tail_of_long_operator_text() {
+        let notices = format!(
+            "<system-reminder>{}</system-reminder>\n",
+            "n".repeat(20 * 1024)
+        );
+        let operator = format!("start {} finish", "é".repeat(10 * 1024 - 6));
+        let stored = sanitized_reminder_cap_body(
+            ObservationKind::UserPrompt,
+            format!("{notices}{operator}"),
+        );
+        let marker = format!(
+            "<system-reminder>[{} bytes omitted]</system-reminder>\n",
+            notices.len()
+        );
+        assert!(stored.len() <= OBSERVATION_BODY_MAX_BYTES);
+        assert!(
+            stored.starts_with(&format!("{marker}start ")),
+            "the stored head lost the compact notice or the start of the prompt"
+        );
+        assert!(stored.ends_with(" finish"));
+        assert!(stored.contains("[truncated "));
+    }
+
+    #[test]
+    fn reminder_cap_sanitized_other_kind_is_unchanged() {
+        let input = format!(
+            "<system-reminder>{}</system-reminder>\nReview the change.",
+            "n".repeat(20 * 1024)
+        );
+        let expected = truncate_utf8_bytes_head_tail(&input, OBSERVATION_BODY_MAX_BYTES);
+        let stored = sanitized_reminder_cap_body(ObservationKind::PostCompaction, input);
+        assert!(stored == expected, "the non-prompt body changed");
+    }
+
+    #[test]
+    fn reminder_cap_sanitized_prompt_preserves_legacy_bodies() {
+        let notice = "<system-reminder>short notice</system-reminder>\n";
+        let cap = OBSERVATION_BODY_MAX_BYTES;
+        for (case, input) in [
+            ("short", format!("{notice}Review the change.")),
+            (
+                "at cap",
+                format!("{notice}{}", "p".repeat(cap - notice.len())),
+            ),
+            ("no notice", format!("Review {}", "p".repeat(cap))),
+            (
+                "unclosed",
+                format!("{notice}<system-reminder>{}", "n".repeat(cap)),
+            ),
+        ] {
+            let expected = truncate_utf8_bytes_head_tail(&input, cap);
+            let stored = sanitized_reminder_cap_body(ObservationKind::UserPrompt, input);
+            assert!(stored == expected, "body changed for {case}");
+        }
+    }
+
+    fn sanitized_reminder_cap_body(kind: ObservationKind, body: String) -> String {
+        let raw = NewObservation {
+            occurred_at: None,
+            session_id: SessionId::new(),
+            workspace_id: WorkspaceId::new(),
+            project_id: ProjectId::new(),
+            kind,
+            extension: None,
+            source_event: None,
+            title: "synthetic observation".into(),
+            body,
+            importance: 5,
+            file_path: None,
+        };
+        Sanitized::new(raw, &s()).into_inner().body
     }
 
     #[test]

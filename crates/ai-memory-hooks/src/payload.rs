@@ -1,5 +1,8 @@
 //! Wire envelope received on `POST /hook`.
 
+use std::borrow::Cow;
+
+use ai_memory_core::scaffolding::compact_leading_system_reminders;
 use ai_memory_core::{
     AgentKind, FilePathOutcome, OBSERVATION_BODY_MAX_BYTES, ObservationKind, Sanitizer,
     TOOL_BODY_SEPARATOR, TOOL_OUTCOME_LINE_PREFIX, truncate_utf8_bytes,
@@ -1488,16 +1491,17 @@ fn first_line(s: String) -> Option<String> {
 
 /// Cap core lifecycle body fields before the native hook writes its local
 /// spool entry. The server independently reapplies the same per-event limits
-/// while constructing [`HookEnvelope`], and the typed persistence boundary has
-/// a universal backstop.
+/// during ingest, with a universal backstop at the typed persistence boundary.
 pub fn cap_lifecycle_body_for_client(raw: &mut serde_json::Value, event: HookEvent) -> bool {
     let Some((keys, max_bytes)) = core_body_cap(event) else {
         return false;
     };
-    let mut changed = cap_candidate_group(raw, keys, max_bytes);
+    let cap_group =
+        |value: &mut serde_json::Value| cap_candidate_group(value, keys, max_bytes, event);
+    let mut changed = cap_group(raw);
     for container in ["payload", "event"] {
         if let Some(nested) = raw.get_mut(container) {
-            changed |= cap_candidate_group(nested, keys, max_bytes);
+            changed |= cap_group(nested);
         }
     }
     changed
@@ -1521,23 +1525,35 @@ fn core_body_cap(event: HookEvent) -> Option<(&'static [&'static str], usize)> {
     }
 }
 
-fn cap_candidate_group(value: &mut serde_json::Value, keys: &[&str], max_bytes: usize) -> bool {
-    let mut changed = cap_object_fields(value, keys, max_bytes);
+fn cap_candidate_group(
+    value: &mut serde_json::Value,
+    keys: &[&str],
+    max_bytes: usize,
+    event: HookEvent,
+) -> bool {
+    let cap_fields =
+        |value: &mut serde_json::Value| cap_object_fields(value, keys, max_bytes, event);
+    let mut changed = cap_fields(value);
     if let Some(properties) = value.get_mut("properties") {
-        changed |= cap_object_fields(properties, keys, max_bytes);
+        changed |= cap_fields(properties);
         if let Some(info) = properties.get_mut("info") {
-            changed |= cap_object_fields(info, keys, max_bytes);
+            changed |= cap_fields(info);
         }
     }
     for container in ["info", "path"] {
         if let Some(nested) = value.get_mut(container) {
-            changed |= cap_object_fields(nested, keys, max_bytes);
+            changed |= cap_fields(nested);
         }
     }
     changed
 }
 
-fn cap_object_fields(value: &mut serde_json::Value, keys: &[&str], max_bytes: usize) -> bool {
+fn cap_object_fields(
+    value: &mut serde_json::Value,
+    keys: &[&str],
+    max_bytes: usize,
+    event: HookEvent,
+) -> bool {
     let Some(object) = value.as_object_mut() else {
         return false;
     };
@@ -1558,6 +1574,11 @@ fn cap_object_fields(value: &mut serde_json::Value, keys: &[&str], max_bytes: us
             // unmatchable prefix (#1114), the class #980 / #1109 fixed.
             // Same order as `assistant_capture::transform_for_client`.
             let scrubbed = Sanitizer::builtin().scrub(&text);
+            let scrubbed = if event == HookEvent::UserPrompt {
+                compact_leading_system_reminders(&scrubbed, max_bytes)
+            } else {
+                Cow::Borrowed(scrubbed.as_str())
+            };
             *field = serde_json::Value::String(truncate_utf8_bytes(&scrubbed, max_bytes));
             changed = true;
         }

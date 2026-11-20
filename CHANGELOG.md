@@ -18,6 +18,7 @@ version in [`docs/changelog/`](docs/changelog/):
 ### Fixed
 - Markdown links that used a network-path URL (`//…`, `\\…`) or any backslash now rewrite to `#`, matching the image sanitiser. The previous `/` allowlist treated `//host` as a same-origin path.
 
+- Preserved the operator's prompt by compacting leading `<system-reminder>` notices that would overflow the 16 KiB capture limit.
 - Kept the operator's own text when Claude Code prepends app notices to a prompt as `<system-reminder>` blocks: the post-compaction anchor and `/recap` used to drop the whole prompt, and now keep the text after the notices, without them.
 - Preserved the operator's text after leading `<system-reminder>` blocks in session page titles and prompt lists, handoff prompts and open questions, the `ai-memory run` ledger for Claude Code and Grok, profile harvesting, interrupted-session recovery, and consolidation residue. Restored the `reload context` trigger for prompts with those notices.
 - Kept the executable's nearest checkout hook bundle primary with custom build directories such as `target-host/` and `build/`, including nested worktrees (`D1`, cross-review of `4b97ced0`).

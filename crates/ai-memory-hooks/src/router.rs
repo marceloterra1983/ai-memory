@@ -8,11 +8,13 @@
 //! basic-memory #763). The agent never blocks on us thanks to the
 //! fire-and-forget client side.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 
 use ai_memory_consolidate::Consolidator;
+use ai_memory_core::scaffolding::compact_leading_system_reminders;
 use ai_memory_core::{
     ActiveProject, ActorKey, AgentKind, DEFAULT_WORKSPACE_NAME, FilePathOutcome, Handoff,
     IdentityKey, MANAGED_WORKSTREAM_PACKET_MARKER, ManagedRunId, MidSessionRouting, NewHandoff,
@@ -4765,7 +4767,7 @@ async fn process(
 }
 
 /// Durable body for a hook observation: scrub the **full** excerpt first,
-/// then apply the per-event ceiling to the redacted text.
+/// then compact oversized user-prompt reminders and apply the per-event ceiling.
 ///
 /// The cap used to run inside excerpt extraction in `payload`, before the
 /// sanitizer ever saw the text — a secret straddling the cutoff was cut in
@@ -4776,7 +4778,14 @@ fn durable_body(event: HookEvent, excerpt: Option<&str>, sanitizer: &Sanitizer) 
     let Some(excerpt) = excerpt else {
         return String::new();
     };
-    truncate_utf8_bytes(&sanitizer.scrub(excerpt), durable_body_cap(event))
+    let cap = durable_body_cap(event);
+    let body = sanitizer.scrub(excerpt);
+    let body = if event == HookEvent::UserPrompt {
+        compact_leading_system_reminders(&body, cap)
+    } else {
+        Cow::Borrowed(body.as_str())
+    };
+    truncate_utf8_bytes(&body, cap)
 }
 
 async fn process_authorized(
@@ -25493,6 +25502,177 @@ pub(crate) mod tests {
                 "the key must be redacted and the prose kept: {stored:?}"
             );
         }
+    }
+
+    async fn store_reminder_cap_prompt(
+        state: &HookState,
+        prompt: &str,
+        cap_on_client: bool,
+    ) -> ObservationRecord {
+        let sid = SessionId::new();
+        let mut body = serde_json::json!({
+            "session_id": sid.to_string(),
+            "cwd": "/repo",
+            "prompt": prompt,
+        });
+        if cap_on_client {
+            crate::payload::cap_lifecycle_body_for_client(&mut body, HookEvent::UserPrompt);
+        }
+        let request = Request::post("/hook/batch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!([{
+                    "url": "http://h/hook?event=user-prompt&agent=claude-code&workspace=default&project=scratch",
+                    "body": body,
+                }])
+                .to_string(),
+            ))
+            .unwrap();
+        let response = hook_router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = state
+            .reader
+            .session_observations_scoped(
+                state.workspace_id,
+                state.project_id,
+                sid,
+                ObservationPage {
+                    limit: 2,
+                    offset: 0,
+                    order: ObservationOrder::Asc,
+                    kinds: Some(vec![ObservationKind::UserPrompt]),
+                    query: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1, "the user prompt should be stored");
+        page.records.into_iter().next().unwrap()
+    }
+
+    #[tokio::test]
+    async fn reminder_cap_hook_keeps_operator_text_for_recap() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let notices = format!(
+            "<system-reminder>{}</system-reminder>\n\n<system-reminder>{}</system-reminder>\n",
+            "é".repeat(5 * 1024),
+            "n".repeat(10 * 1024),
+        );
+        let operator = "Revise o corte do aviso.";
+        let row = store_reminder_cap_prompt(&state, &format!("{notices}{operator}"), false).await;
+        let recap = crate::recap::anchor_prompts(std::slice::from_ref(&row), &[], 1);
+        assert!(row.body.len() <= ai_memory_core::OBSERVATION_BODY_MAX_BYTES);
+        assert_eq!(
+            (
+                strip_leading_system_reminders(&row.body),
+                recap.items.first().map(|item| item.text.as_str()),
+            ),
+            (Some(operator), Some(operator)),
+            "parser and recap should both recover the stored operator text"
+        );
+        assert!(row.body.starts_with(&format!(
+            "<system-reminder>[{} bytes omitted]</system-reminder>\n",
+            notices.len()
+        )));
+        assert!(row.body.ends_with(operator));
+    }
+
+    #[tokio::test]
+    async fn reminder_cap_hook_keeps_only_the_head_of_long_operator_text() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let cap = ai_memory_core::OBSERVATION_BODY_MAX_BYTES;
+        let notices = format!(
+            "<system-reminder>{}</system-reminder>\n",
+            "n".repeat(20 * 1024)
+        );
+        let marker = format!(
+            "<system-reminder>[{} bytes omitted]</system-reminder>\n",
+            notices.len()
+        );
+        let operator = format!("{}!!", "é".repeat(10 * 1024 - 1));
+        let row = store_reminder_cap_prompt(&state, &format!("{notices}{operator}"), false).await;
+        let kept_chars = (cap - marker.len() - '…'.len_utf8()) / 'é'.len_utf8();
+        let expected = format!("{marker}{}…", "é".repeat(kept_chars));
+        assert!(row.body.len() <= cap);
+        assert!(
+            row.body == expected,
+            "expected compact notice and UTF-8 prompt head"
+        );
+    }
+
+    #[tokio::test]
+    async fn reminder_cap_hook_preserves_legacy_bodies() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let cap = ai_memory_core::OBSERVATION_BODY_MAX_BYTES;
+        let notice = "<system-reminder>short notice</system-reminder>\n";
+        for (case, input) in [
+            ("short", format!("{notice}Review the change.")),
+            (
+                "at cap",
+                format!("{notice}{}", "p".repeat(cap - notice.len())),
+            ),
+            ("no notice", format!("Review {}", "p".repeat(cap))),
+            (
+                "unclosed",
+                format!("{notice}<system-reminder>{}", "n".repeat(cap)),
+            ),
+        ] {
+            let expected = truncate_utf8_bytes(&input, cap);
+            let row = store_reminder_cap_prompt(&state, &input, false).await;
+            assert!(row.body == expected, "stored body changed for {case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reminder_cap_hook_scrubs_before_compaction_and_head_cut() {
+        assert_reminder_cap_hook_scrubs(false).await;
+    }
+
+    #[tokio::test]
+    async fn reminder_cap_native_spool_preserves_redacted_operator_text() {
+        assert_reminder_cap_hook_scrubs(true).await;
+    }
+
+    async fn assert_reminder_cap_hook_scrubs(cap_on_client: bool) {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let cap = ai_memory_core::OBSERVATION_BODY_MAX_BYTES;
+        let control = "Review this synthetic example.";
+        let row = store_reminder_cap_prompt(&state, control, cap_on_client).await;
+        assert_eq!(row.body, control);
+
+        let notice_secret = format!("sk-{}", "N".repeat(40));
+        let operator_secret = format!("sk-{}", "P".repeat(40));
+        let notices = format!(
+            "<system-reminder>\n{}\n{notice_secret}\n</system-reminder>\n",
+            "n".repeat(20 * 1024)
+        );
+        let redaction = "[REDACTED:api_key]";
+        let removed_bytes = notices.len() - notice_secret.len() + redaction.len();
+        let marker =
+            format!("<system-reminder>[{removed_bytes} bytes omitted]</system-reminder>\n");
+        // Without scrubbing before the cap, too few token bytes survive the
+        // head cut for a second scrub to match the credential.
+        let padding = "p".repeat(cap - marker.len() - redaction.len() - 1);
+        let operator = format!("{padding} {operator_secret}");
+        let row =
+            store_reminder_cap_prompt(&state, &format!("{notices}{operator}"), cap_on_client).await;
+        assert!(row.body.len() <= cap);
+        assert!(
+            !row.body.contains("sk-N") && !row.body.contains("sk-P"),
+            "a synthetic credential fragment reached the store"
+        );
+        assert!(
+            row.body.starts_with(&marker),
+            "the compact notice must count bytes after the reminder credential is redacted"
+        );
+        assert!(
+            row.body.ends_with(&format!("{padding} {redaction}")),
+            "the operator credential should be redacted before the head cut"
+        );
     }
 
     /// Shared shape for the #1114 body-side regressions: a secret straddling

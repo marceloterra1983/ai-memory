@@ -751,6 +751,7 @@ fn literal_merged_page(
     Some(page)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn merge_one_cluster(
     wiki: &Wiki,
     llm: Option<&(dyn LlmProvider + 'static)>,

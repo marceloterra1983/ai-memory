@@ -65,7 +65,10 @@ impl Fixture {
         for dir in [&repo, &home, &bin] {
             fs::create_dir_all(dir).unwrap();
         }
-        let status = std::process::Command::new("git")
+        let git = host_tool("git");
+        let status = std::process::Command::new(&git)
+            .env_clear()
+            .env("HOME", &home)
             .arg("-C")
             .arg(&repo)
             .args(["init", "-q"])
@@ -73,7 +76,7 @@ impl Fixture {
             .status()
             .unwrap();
         assert!(status.success(), "git init");
-        std::os::unix::fs::symlink(host_tool("git"), bin.join("git")).unwrap();
+        std::os::unix::fs::symlink(git, bin.join("git")).unwrap();
 
         let claude_ran = root.join("claude-ran.txt");
         let claude_env = root.join("claude-env.txt");
@@ -111,17 +114,18 @@ impl Fixture {
     }
 }
 
-fn command(fixture: &Fixture, server: &str, args: &[&str]) -> tokio::process::Command {
-    let mut command: tokio::process::Command = crate::e2e_support::hermetic(BIN).into();
-    for name in ["SSH_AUTH_SOCK", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "PS1"] {
-        command.env_remove(name);
-    }
+fn command(fixture: &Fixture, server: &str, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new(BIN);
     command
+        .env_clear()
         .args(args)
         .current_dir(&fixture.repo)
         .env("PATH", &fixture.bin)
         .env("HOME", &fixture.home)
         .env("AI_MEMORY_HOME", &fixture.home)
+        .env("XDG_CONFIG_HOME", fixture.home.join(".config"))
+        .env("XDG_DATA_HOME", fixture.home.join(".local/share"))
+        .env("XDG_STATE_HOME", fixture.home.join(".local/state"))
         .env("CLAUDE_CONFIG_DIR", fixture.home.join(".claude"))
         .env("AI_MEMORY_DATA_DIR", fixture.home.join("data"))
         .env("AI_MEMORY_SERVER_URL", server)
@@ -133,13 +137,11 @@ fn command(fixture: &Fixture, server: &str, args: &[&str]) -> tokio::process::Co
 }
 
 async fn run(fixture: &Fixture, server: &str, args: &[&str]) -> Output {
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        command(fixture, server, args).output(),
-    )
-    .await
-    .expect("ai-memory run finished")
-    .expect("spawn ai-memory")
+    let mut command = tokio::process::Command::from(command(fixture, server, args));
+    tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
+        .await
+        .expect("ai-memory run finished")
+        .expect("spawn ai-memory")
 }
 
 async fn recover(fixture: &Fixture, server: &str) -> Output {
@@ -193,8 +195,11 @@ fn backdate_latest_spool_entry(fixture: &Fixture, ms: u64) {
 }
 
 fn enqueue_hook(fixture: &Fixture, server: &str, session_id: &str, marker: &str) {
-    let mut child = crate::e2e_support::hermetic(BIN)
-        .args([
+    // The hook and the journal must resolve the same scope for quarantine.
+    let mut child = command(
+        fixture,
+        server,
+        &[
             "--data-dir",
             fixture.home.join("data").to_str().unwrap(),
             "hook",
@@ -204,13 +209,11 @@ fn enqueue_hook(fixture: &Fixture, server: &str, session_id: &str, marker: &str)
             "claude-code",
             "--server-url",
             server,
-        ])
-        .current_dir(&fixture.repo)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        ],
+    )
+    .stdin(Stdio::piped())
+    .spawn()
+    .unwrap();
     child
         .stdin
         .take()

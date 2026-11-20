@@ -64,6 +64,7 @@ describe("pages", () => {
           createOnly: true,
           tags: ["import"],
           sourceFiles: [{ path: "src/a.rs", commit: "3f2a9c1" }],
+          effectiveValidity: payloads.read.frontmatter.effective_validity,
         },
         { path: "notes/b.md", body: "# B", expectedPageId: payloads.PAGE_ID },
       ],
@@ -78,6 +79,7 @@ describe("pages", () => {
           create_only: true,
           tags: ["import"],
           source_files: [{ path: "src/a.rs", commit: "3f2a9c1" }],
+          effective_validity: payloads.read.frontmatter.effective_validity,
         },
         { path: "notes/b.md", body: "# B", expected_page_id: payloads.PAGE_ID },
       ],
@@ -715,6 +717,27 @@ describe("capability gating", () => {
     const { server, memory } = setup();
     delete server.schemas["memory_message_send"];
     await assert.rejects(memory.messages.send({ to: OTHER, body: "x" }), UnsupportedServerError);
+    assert.equal(server.toolCalls().length, 0);
+  });
+
+  it("a server without effective validity refuses to write a dated batch", async () => {
+    const { server, memory } = setup();
+    const write = server.schemas["memory_write_page"];
+    assert.ok(write !== undefined);
+    delete write.properties["effective_validity"];
+    server.tools.set("memory_write_pages_batch", () => payloads.batchWrite);
+    await assert.rejects(
+      memory.pages.writeBatch({
+        target: SCOPE,
+        pages: [{
+          path: "notes/a.md",
+          body: "# A",
+          createOnly: true,
+          effectiveValidity: payloads.read.frontmatter.effective_validity,
+        }],
+      }),
+      UnsupportedServerError,
+    );
     assert.equal(server.toolCalls().length, 0);
   });
 

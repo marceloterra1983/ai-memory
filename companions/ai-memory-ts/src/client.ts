@@ -9,6 +9,7 @@ import {
   decodeIdentity,
   probeApi,
   probeIdentity,
+  requireFeature,
   type Identity,
   type ServerCapabilities,
 } from "./capabilities.js";
@@ -291,6 +292,10 @@ export class PagesNamespace {
         create_only: item.createOnly === true ? true : undefined,
       });
     });
+    if (pages.some((page) => page["effective_validity"] !== undefined)) {
+      // Tool probes keep top-level properties. Both write tools share PageWriteMetadata.
+      requireFeature(await this.#core.toolIndex(options), "memory_write_page", ["effective_validity"]);
+    }
     const decoded = await this.#core.invoke(
       "memory_write_pages_batch",
       { ...target, pages },

@@ -7001,7 +7001,40 @@ mod tests {
     /// `metadata-only` report means the spooled body is metadata only.
     #[tokio::test]
     async fn check_capture_report_matches_the_native_spool_decision() {
-        let tmp = tempfile::tempdir().unwrap();
+        const CHILD: &str = "AI_MEMORY_TEST_CHECK_CAPTURE_SPOOL_CHILD";
+        const COMPLETED: &str = "isolated check-capture spool cases completed";
+        let Some(home) = std::env::var_os(CHILD) else {
+            // Routing falls back to the process home's marker, even when the
+            // payload cwd is a temporary directory outside that home.
+            let home = tempfile::tempdir().unwrap();
+            for dir in ["config", "data", "state"] {
+                std::fs::create_dir(home.path().join(dir)).unwrap();
+            }
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::hook::tests::check_capture_report_matches_the_native_spool_decision",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .current_dir(home.path())
+                .env("HOME", home.path())
+                .env("AI_MEMORY_HOME", home.path())
+                .env("XDG_CONFIG_HOME", home.path().join("config"))
+                .env("XDG_DATA_HOME", home.path().join("data"))
+                .env("XDG_STATE_HOME", home.path().join("state"))
+                .env(CHILD, home.path())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains(COMPLETED),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let tmp = tempfile::tempdir_in(home).unwrap();
         let allowlist = Some(crate::cli::CaptureModeArg::Allowlist);
         // (name, marker, tool path, admits_capture, policy_admits_capture,
         //  scope_resolution, disposition)
@@ -7150,6 +7183,7 @@ mod tests {
                 );
             }
         }
+        println!("{COMPLETED}");
     }
 
     #[tokio::test]

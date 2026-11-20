@@ -65,6 +65,7 @@ import type {
   Page,
   PageChange,
   PageMetadata,
+  PageSourceFile,
   PagePatchEdit,
   PatchPageArgs,
   PatchPageResult,
@@ -137,6 +138,13 @@ function existingTargetWire(
   return { workspace, project_id: requireText(projectId, "target.projectId", where) };
 }
 
+function isPageSourceFile(value: unknown): value is PageSourceFile {
+  return (
+    value !== null && typeof value === "object" &&
+    typeof (value as Raw)["path"] === "string" && typeof (value as Raw)["commit"] === "string"
+  );
+}
+
 /** The metadata a page's frontmatter carries, in write-argument form. */
 function metadataFromFrontmatter(frontmatter: Raw): PageMetadata {
   const meta: PageMetadata = {};
@@ -177,20 +185,24 @@ function metadataFromFrontmatter(frontmatter: Raw): PageMetadata {
     if (Object.keys(kept).length > 0) meta.relations = kept;
   }
   const sourceFiles = frontmatter["source_files"];
-  if (
-    Array.isArray(sourceFiles) &&
-    sourceFiles.every(
-      (item) =>
-        item !== null &&
-        typeof item === "object" &&
-        typeof (item as Raw)["path"] === "string" &&
-        typeof (item as Raw)["commit"] === "string",
-    )
-  ) {
-    meta.sourceFiles = (sourceFiles as Raw[]).map((item) => ({
-      path: item["path"] as string,
-      commit: item["commit"] as string,
-    }));
+  if (Array.isArray(sourceFiles) && sourceFiles.every(isPageSourceFile)) {
+    meta.sourceFiles = sourceFiles.map(({ path, commit }) => ({ path, commit }));
+  }
+  const validity = frontmatter["effective_validity"];
+  if (validity !== null && typeof validity === "object" && !Array.isArray(validity)) {
+    const { from, until, source } = validity as Raw;
+    if (
+      typeof from === "string" &&
+      (until === undefined || until === null || typeof until === "string") &&
+      isPageSourceFile(source) &&
+      Object.keys(validity).every((key) => key === "from" || key === "until" || key === "source")
+    ) {
+      meta.effectiveValidity = {
+        from,
+        ...(typeof until === "string" ? { until } : {}),
+        source: { path: source.path, commit: source.commit },
+      };
+    }
   }
   return meta;
 }
@@ -274,6 +286,7 @@ export class PagesNamespace {
         relations: item.relations,
         expires_at: item.expiresAt,
         source_files: item.sourceFiles,
+        effective_validity: item.effectiveValidity,
         expected_page_id: item.expectedPageId,
         create_only: item.createOnly === true ? true : undefined,
       });
@@ -338,6 +351,7 @@ export class PagesNamespace {
         relations: a.relations,
         expires_at: a.expiresAt,
         source_files: a.sourceFiles,
+        effective_validity: a.effectiveValidity,
         expected_page_id: a.expectedPageId,
         create_only: a.createOnly === true ? true : undefined,
       }),
@@ -930,6 +944,9 @@ export class AiMemoryClient {
     };
     let wireArgs: Record<string, unknown>;
     const isGlobal = a.global === true;
+    if (a.effectiveOn !== undefined && (isGlobal || a.scopes !== undefined)) {
+      throw new ScopeError(`${where}: effectiveOn requires one project`);
+    }
     if (isGlobal) {
       if (a.scope !== undefined || a.scopes !== undefined) {
         throw new ScopeError(`${where}: global: true takes no scope or scopes`);
@@ -954,6 +971,7 @@ export class AiMemoryClient {
           ...extra,
           pin_first: project.pinFirst === true ? true : undefined,
           as_of: project.asOf,
+          effective_on: project.effectiveOn,
         });
       }
     }

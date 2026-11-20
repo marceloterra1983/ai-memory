@@ -1276,6 +1276,8 @@ pub struct PageFilter<'a> {
     /// Exact frontmatter tag to keep, compared ASCII case-insensitively.
     /// Only string members of a `tags` array match.
     pub tag: Option<&'a str>,
+    /// Civil day that must be covered by the version's declared operational interval.
+    pub effective_on: Option<jiff::civil::Date>,
 }
 
 impl PageFilter<'_> {
@@ -1286,6 +1288,7 @@ impl PageFilter<'_> {
             || self.tier.is_some()
             || self.path_prefix.is_some()
             || self.tag.is_some()
+            || self.effective_on.is_some()
     }
 
     /// An ` AND …` predicate over the pages row `alias`, taking each bound
@@ -1331,8 +1334,59 @@ impl PageFilter<'_> {
             ));
             values.push(Value::Text(tag.to_owned()));
         }
+        if let Some(day) = self.effective_on {
+            clause.push_str(&effective_validity_sql(
+                alias,
+                &placeholder(),
+                &placeholder(),
+            ));
+            let day = day.to_string();
+            values.push(Value::Text(day.clone()));
+            values.push(Value::Text(day));
+        }
         (clause, values)
     }
+}
+
+// Hand-edited and older indexed frontmatter can bypass PageWriteMetadata.
+// Validate their shape and dates in the candidate query, before any stream's
+// LIMIT. The digit pattern and normalized round trip reject SQLite's more
+// permissive date inputs. These are civil-day strings, never UTC instants.
+// Source paths in stored metadata must already be trimmed. The ranges in
+// the GLOB below reject Unicode control characters apart from NUL, tested
+// separately because GLOB treats it as a terminator.
+fn effective_validity_sql(alias: &str, from_param: &str, until_param: &str) -> String {
+    const DATE: &str = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]";
+    let fm = format!("{alias}.frontmatter_json");
+    let source_max = ai_memory_core::page::MAX_PAGE_SOURCE_PATH_LEN;
+    format!(
+        " AND EXISTS (SELECT 1 FROM (SELECT \
+            json_extract({fm}, '$.effective_validity.from') AS from_day, \
+            json_extract({fm}, '$.effective_validity.until') AS until_day, \
+            json_extract({fm}, '$.effective_validity.source.path') AS source_path, \
+            json_extract({fm}, '$.effective_validity.source.commit') AS source_commit) \
+         WHERE json_type({fm}, '$.effective_validity') = 'object' \
+           AND from_day GLOB '{DATE}' AND from_day = date(from_day, '+0 days') \
+           AND from_day <= {from_param} COLLATE BINARY \
+           AND (until_day IS NULL OR (until_day GLOB '{DATE}' \
+                AND until_day = date(until_day, '+0 days') AND until_day > {until_param} COLLATE BINARY)) \
+           AND NOT EXISTS (SELECT 1 FROM json_each({fm}, '$.effective_validity') \
+                           WHERE key NOT IN ('from', 'until', 'source')) \
+           AND json_type({fm}, '$.effective_validity.source.path') = 'text' \
+           AND json_type({fm}, '$.effective_validity.source.commit') = 'text' \
+           AND length(source_path) BETWEEN 1 AND {source_max} \
+           AND source_path = trim(source_path, char(32,160,5760,8192,8193,8194,8195,8196,8197, \
+                                                   8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)) \
+           AND instr(source_path, char(0)) = 0 \
+           AND source_path NOT GLOB ('*[' || char(1) || '-' || char(31) || \
+                                     char(127) || '-' || char(159) || ':\\]*') \
+           AND ('/' || source_path || '/') NOT LIKE '%//%' \
+           AND ('/' || source_path || '/') NOT LIKE '%/./%' \
+           AND ('/' || source_path || '/') NOT LIKE '%/../%' \
+           AND length(source_commit) BETWEEN 7 AND 64 \
+           AND instr(source_commit, char(0)) = 0 \
+           AND source_commit NOT GLOB '*[^0-9a-fA-F]*')"
+    )
 }
 
 /// Placeholders `?first`, `?first+1`, … for [`PageFilter::sql`] in a

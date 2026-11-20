@@ -141,6 +141,11 @@ describe("pages against a real server", () => {
       abstract: "short",
       expiresAt: "2099-01-01",
       sourceFiles: [{ path: "bin/deploy.sh", commit: "3F2A9C1" }],
+      effectiveValidity: {
+        from: "2026-04-01",
+        until: "2026-05-01",
+        source: { path: "docs/policy.md", commit: "ABCDEF1" },
+      },
     });
     const updated = await memory.pages.update("notes/meta.md", (current) => ({
       body: `${current.body}\nsecond`,
@@ -157,6 +162,15 @@ describe("pages against a real server", () => {
     assert.deepEqual(page.frontmatter["source_files"], [
       { path: "bin/deploy.sh", commit: "3f2a9c1" },
     ]);
+    assert.deepEqual(page.frontmatter["effective_validity"], {
+      from: "2026-04-01",
+      until: "2026-05-01",
+      source: { path: "docs/policy.md", commit: "abcdef1" },
+    });
+    const inRange = await memory.query({ query: "meta", effectiveOn: "2026-04-01" });
+    assert.deepEqual(inRange.hits.map((hit) => hit.id), [updated.pageId]);
+    const afterRange = await memory.query({ query: "meta", effectiveOn: "2026-05-01" });
+    assert.deepEqual(afterRange.hits, []);
 
     await assert.rejects(
       memory.pages.update("notes/meta.md", async () => {

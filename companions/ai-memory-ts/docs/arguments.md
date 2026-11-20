@@ -47,6 +47,7 @@ Methods: `pages.write`, `pages.update`
 | `relations` | `relations` |
 | `expires_at` | `expiresAt` |
 | `source_files` | `sourceFiles` |
+| `effective_validity` | `effectiveValidity` |
 | `expected_page_id` | `expectedPageId` |
 | `create_only` | `createOnly` |
 
@@ -105,6 +106,7 @@ Methods: `query`
 | `pin_first` | `pinFirst` |
 | `explain` | `explain` |
 | `as_of` | `asOf` |
+| `effective_on` | `effectiveOn` |
 | `answer` | `answer` |
 | `reasoning` | `reasoning` |
 | `kind` | `kind` |

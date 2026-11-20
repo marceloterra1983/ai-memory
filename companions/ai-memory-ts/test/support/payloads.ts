@@ -41,6 +41,11 @@ export const read = {
     relations: { fixes: ["notes/a.md"], bogus: ["x"] },
     expires_at: "2099-01-01",
     source_files: [{ path: "bin/deploy.sh", commit: "3f2a9c1" }],
+    effective_validity: {
+      from: "2026-04-01",
+      until: "2026-05-01",
+      source: { path: "docs/policy.md", commit: "abcdef1" },
+    },
     sources: [{ resource: "ai-memory://session/x", author: "process:claude-code" }],
     type: "Note",
     generated: { by: "process:ai-memory/3.0.0", at: "2026-10-13T15:10:47Z" },

@@ -52,6 +52,12 @@ This rule applies only to project-scoped calls. For cross-project retrieval,
 `global=true` must omit `workspace`, `project`, and `scopes`. For a standing
 preference written with `scope: "global"`, omit `workspace` and `project`.
 
+When the user supplies operational dates and a source, `memory_write_page`
+accepts `effective_validity: {from, until?, source: {path, commit}}`. Use
+explicit `YYYY-MM-DD` dates, with `from` inclusive and `until` exclusive.
+`memory_query(effective_on)` filters one project by a civil day. Add `as_of`
+when the user also wants the versions known at a particular instant.
+
 ### Continue across harnesses
 
 When the user asks to "continue", "resume", or "pick up where we left off"

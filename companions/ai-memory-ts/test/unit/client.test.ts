@@ -291,6 +291,7 @@ describe("pages", () => {
       relations: { fixes: ["notes/a.md"] },
       expires_at: "2099-01-01",
       source_files: [{ path: "bin/deploy.sh", commit: "3f2a9c1" }],
+      effective_validity: payloads.read.frontmatter.effective_validity,
       expected_page_id: payloads.PAGE_ID,
     });
   });
@@ -338,6 +339,19 @@ describe("query", () => {
     assert.deepEqual(server.lastArgs(), { query: "retry", global: true });
     assert.equal(result.hits[0]?.workspace, "demo");
     assert.equal(result.hits[0]?.project, "app");
+  });
+
+  it("passes the operational day and ingestion instant on one project query", async () => {
+    const { server, memory } = setup();
+    server.tools.set("memory_query", () => payloads.query);
+    await memory.query({ query: "retry", effectiveOn: "2026-04-01", asOf: "2026-03-31T12:00:00Z" });
+    assert.deepEqual(server.lastArgs(), {
+      workspace: "demo",
+      project: "app",
+      query: "retry",
+      effective_on: "2026-04-01",
+      as_of: "2026-03-31T12:00:00Z",
+    });
   });
 
   it("multi-scope query sends scopes and no workspace/project", async () => {
@@ -778,6 +792,7 @@ describe("wire names", () => {
         relations: { fixes: ["x"] },
         expiresAt: "2099-01-01",
         sourceFiles: [{ path: "p", commit: "3f2a9c1" }],
+        effectiveValidity: payloads.read.frontmatter.effective_validity,
         expectedPageId: "v",
       }),
       memory.pages.write({ path: "p", body: "b", createOnly: true }),
@@ -810,6 +825,7 @@ describe("wire names", () => {
         pathPrefix: "decisions/",
         tag: "t",
       }),
+      memory.query({ query: "q", effectiveOn: "2026-01-01" }),
       memory.query({ query: "q", scopes: [SCOPE] }),
       memory.query({ query: "q", global: true }),
       memory.status(),

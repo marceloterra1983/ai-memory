@@ -634,6 +634,12 @@
           "string"
         ]
       },
+      "effective_on": {
+        "type": [
+          "null",
+          "string"
+        ]
+      },
       "explain": {
         "type": [
           "boolean",
@@ -979,6 +985,12 @@
       "create_only": {
         "type": "boolean"
       },
+      "effective_validity": {
+        "type": [
+          "null",
+          "object"
+        ]
+      },
       "enforced_by": {
         "type": [
           "null",
@@ -1118,6 +1130,12 @@
             },
             "create_only": {
               "type": "boolean"
+            },
+            "effective_validity": {
+              "type": [
+                "null",
+                "object"
+              ]
             },
             "enforced_by": {
               "type": [

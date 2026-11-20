@@ -13,6 +13,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Added
 
+- Added explicit operational validity to page versions through `effective_validity` and single-project `effective_on` queries, including lookup with `as_of`. (#656)
+
 - Merged one cold episodic pair by concatenating both bodies when dream has no `llm_endpoint`, `llm_model` or `jev_model`. The title is copied from a source body. A cold body over 6000 bytes is skipped instead of refusing the scope. The two-model path is unchanged, and scheduling stays off by default. (2026-11-12)
 
 ### Fixed

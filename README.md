@@ -184,7 +184,7 @@ carries over from each tool and what you gain:
 | Coming from… | What's similar | What you gain |
 |---|---|---|
 | **Mem0 / fact extractors** (LangMem) | Automatic per-turn capture | Memory compiles into readable **pages** you own and edit, not opaque fact rows; retrieval fuses FTS + entity + graph (+ local vectors) with no cloud API key |
-| **Zep / Graphiti** (temporal KG) | Temporal reasoning, typed relations | Bi-temporal-lite (`as_of`, version-filtered search) and typed edges without standing up a graph database, in one binary |
+| **Zep / Graphiti** (temporal KG) | Temporal reasoning, typed relations | Version-filtered search (`as_of`), explicit operational dates (`effective_on`) and typed edges in one binary. [Temporal validity](docs/temporal.md) |
 | **mcp-memory-service** (fact rows, SQLite) | SQLite + local embeddings, hook capture, typed edges, honest numbers, and, on 2.4, per-tier decay curves, extractive compression, DBSCAN cold-cluster dedup, access reinforcement, and contradiction flagging | Human-editable markdown **pages** instead of fact-rows, cross-agent claim-once handoffs, and the same aging machinery done **zero-LLM by default, reversibly** (supersede-not-delete + `restore-page`), and **off by default** |
 | **basic-memory** (file-first markdown) | Markdown-on-disk as the source of truth | Automatic lifecycle capture and a derived FTS/entity/graph index on top, cross-agent handoffs, and multi-user sharing built in |
 | **Claude Code built-in memory** | "Remember my project" convenience, zero setup | Synced across machines and agents, searchable, team-capable, and captures tool lifecycle, unlike a per-laptop `MEMORY.md` |

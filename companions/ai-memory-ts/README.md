@@ -132,6 +132,11 @@ Every project call needs a scope: the call's `scope` or the client default.
 scope. Arguments are the server's wire names in camelCase
 (`expected_page_id` is `expectedPageId`).
 
+Set `effectiveValidity` on a page write with `from`, optional exclusive
+`until`, and `source: { path, commit }`. Query one project with
+`effectiveOn: "2026-06-01"`. You can also pass `asOf` to limit the search
+to versions the store knew at that instant. [Operational dates](../../docs/temporal.md#explicit-operational-dates)
+
 <!-- generated:methods:start -->
 | SDK method | Server call |
 |---|---|

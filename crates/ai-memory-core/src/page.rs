@@ -8,7 +8,7 @@
 
 use std::str::FromStr;
 
-use jiff::Timestamp;
+use jiff::{Timestamp, civil::Date};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{PageId, PagePath, ProjectId, WorkspaceId};
@@ -180,14 +180,56 @@ pub const MAX_PAGE_SOURCES: usize = 16;
 /// Maximum raw characters in one `source_files` path, before trimming.
 pub const MAX_PAGE_SOURCE_PATH_LEN: usize = 1024;
 
-/// A repository file a page describes, and the commit the page was last
-/// checked against (`git rev-parse HEAD` when it was written).
+/// A repository file and the commit recorded as its source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PageSource {
     /// Repository-relative path with `/` separators, at most 1024 raw characters.
     pub path: String,
     /// Commit id, 7-64 hex characters (SHA-1 or SHA-256 repositories); lowercased.
     pub commit: String,
+}
+
+impl PageSource {
+    fn normalized(self) -> Option<Self> {
+        let path = self.path.trim();
+        let commit = self.commit.trim();
+        if self.path.chars().take(MAX_PAGE_SOURCE_PATH_LEN + 1).count() > MAX_PAGE_SOURCE_PATH_LEN
+            || path.chars().any(char::is_control)
+            || path.contains('\\')
+            || path.split('/').any(|seg| matches!(seg, "" | "." | ".."))
+            || !(7..=64).contains(&commit.len())
+            || !commit.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        Some(Self {
+            path: path.to_owned(),
+            commit: commit.to_ascii_lowercase(),
+        })
+    }
+}
+
+/// Operational dates explicitly declared for a page version.
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveValidity {
+    /// First effective civil day, inclusive, in canonical YYYY-MM-DD.
+    pub from: String,
+    /// First day outside the interval, in canonical YYYY-MM-DD and after `from`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// Explicit repository source. The server never resolves the path or commit.
+    pub source: PageSource,
+}
+
+/// Parse exactly one canonical Gregorian civil date (YYYY-MM-DD).
+#[must_use]
+pub fn parse_effective_date(raw: &str) -> Option<Date> {
+    if raw.len() != 10 {
+        return None;
+    }
+    let date = raw.parse::<Date>().ok()?;
+    (date.to_string() == raw).then_some(date)
 }
 
 /// Editable metadata shared by public page-write surfaces.
@@ -237,6 +279,9 @@ pub struct PageWriteMetadata {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 16))]
     pub source_files: Vec<PageSource>,
+    /// Optional operational validity interval with explicit source. See `effective_on`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_validity: Option<EffectiveValidity>,
 }
 
 impl PageWriteMetadata {
@@ -376,21 +421,27 @@ impl PageWriteMetadata {
         }
         let mut sources = Vec::with_capacity(self.source_files.len());
         for source in self.source_files {
-            let path = source.path.trim();
-            let commit = source.commit.trim().to_ascii_lowercase();
-            if !valid_text(&source.path, MAX_PAGE_SOURCE_PATH_LEN)
-                || path.chars().any(char::is_control)
-                || path.contains('\\')
-                || path.split('/').any(|seg| matches!(seg, "" | "." | ".."))
-                || !(7..=64).contains(&commit.len())
-                || !commit.bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                return Err(invalid("source_files"));
-            }
-            sources.push(serde_json::json!({ "path": path, "commit": commit }));
+            sources.push(source.normalized().ok_or_else(|| invalid("source_files"))?);
         }
         if !sources.is_empty() {
-            fm.insert("source_files".into(), serde_json::Value::Array(sources));
+            fm.insert("source_files".into(), serde_json::json!(sources));
+        }
+        if let Some(mut validity) = self.effective_validity {
+            let from = parse_effective_date(&validity.from)
+                .ok_or_else(|| invalid("effective_validity.from (expected YYYY-MM-DD)"))?;
+            if let Some(until) = &validity.until
+                && !parse_effective_date(until).is_some_and(|until| until > from)
+            {
+                return Err(invalid(
+                    "effective_validity.until (expected YYYY-MM-DD after from)",
+                ));
+            }
+            validity.source = validity
+                .source
+                .normalized()
+                .filter(|source| !source.path.contains(':'))
+                .ok_or_else(|| invalid("effective_validity.source"))?;
+            fm.insert("effective_validity".into(), serde_json::json!(validity));
         }
         Ok(fm)
     }

@@ -8,18 +8,17 @@ the one worth having at our scale.
 *2.2, issue #656.* Page versions carry the same window at page grain
 (`pages.valid_from` / `valid_to`, V62), and `as_of` fuses the entity
 timeline with version-filtered full-text search. Vocabulary is pinned
-in `docs/design-page-ingestion-windows.md`: this is **ingestion time**
-("the version the store treated as current"), never world-time
-validity; "valid-time" stays reserved for the deferred Phase B.
+in `docs/design-page-ingestion-windows.md`. The ingestion window records
+when the store treated a version as current. A page can also declare an
+operational interval in `effective_validity`.
 
 ## Honest scope
 
-- **Ingestion time only.** `valid_from` / `superseded_at` (link grain)
+- **Ingestion time.** `valid_from` / `superseded_at` (link grain)
   and `valid_from` / `valid_to` (page grain) record when ai-memory
-  *learned* and *replaced* a fact, not when it was true in the world. A
-  world-time split (Graphiti's `valid_at`/`invalid_at` extracted by an
-  LLM) is deliberately out of scope: it requires trusting an LLM to
-  date facts, and our zero-LLM default path could never populate it.
+  learned and replaced a fact. Query them with `as_of`.
+- **Operational dates.** `effective_validity` records the interval
+  the author declares for a page version. Query it with `effective_on`.
 - **Two grains, one semantic.** Entity links inherit their page
   version's timeline (V56, repaired by V58); page versions now
   materialize it directly (V62). Typed relation edges (item 3) die with
@@ -97,6 +96,60 @@ a tracked entity the version carried. The FTS leg covers the rest: a
 version with no `entities:`/`tags:` frontmatter, or a question phrased
 without the exact retired term ("which database were we on during the
 outage?"), still resolves through the text that was live at T.
+
+## Explicit operational dates
+
+Use `effective_validity` in Markdown frontmatter or pass the same object
+to `memory_write_page` (also available in batch and admin writes).
+
+```yaml
+effective_validity:
+  from: "2026-06-01"
+  until: "2026-09-01"
+  source:
+    path: docs/rollout-policy.md
+    commit: "abcdef1"
+```
+
+`from` is inclusive. `until` is exclusive and must follow `from`. Omit it
+or use `null` for an open end. Both use canonical Gregorian `YYYY-MM-DD`
+dates. Supply a repository-relative `source.path` and a `source.commit`
+of 7–64 hexadecimal characters. The server records the source as written
+evidence and never opens the file or resolves the commit. Public writes
+trim the path and normalize the commit to lowercase. When editing
+frontmatter directly, enter the trimmed path and quote the commit so an
+all-numeric id remains a string.
+
+```jsonc
+memory_query {
+  "workspace": "default", "project": "payments", "query": "rollout policy",
+  "effective_on": "2026-06-01", "as_of": "2026-05-20T12:00:00Z"
+}
+```
+
+A policy recorded on May 15 for a June 1 rollout can qualify for this
+query. A policy recorded on June 10 with the same June 1 start can
+qualify for `effective_on` alone. It enters `as_of` results from its
+ingestion instant. With `as_of`, the selected version must satisfy both
+its ingestion window and its own operational interval. Without `as_of`,
+the search uses the current view and accepts `include_superseded` as
+usual. The operational end has no effect on TTL or retention.
+
+`effective_on` searches one authorized project and filters each candidate
+stream before its limit. Pages with missing or invalid declarations are
+excluded. The query skips raw observation fallback, supplemental profile
+hits, embeddings and model reranking. `global=true`, `scopes`, and
+`answer=true` are refused. An implicit `[recall] default_global` setting
+yields to the explicitly requested day. With `as_of`, the existing
+historical stream and TTL rules below apply.
+
+Civil days have no hour, time zone or UTC conversion. Authors should use
+the operational calendar governing the decision. An intraday transition,
+different local calendars or an incorrect source declaration can make a
+day-level answer insufficient. This first version keeps the search
+project-scoped so each query uses one project's declarations and access
+rules. It stores the declaration in existing versioned frontmatter JSON.
+Upgrades require no migration or inferred dates for older pages.
 
 ## Query
 

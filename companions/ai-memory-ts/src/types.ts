@@ -75,6 +75,16 @@ export interface PageSourceFile {
   commit: string;
 }
 
+/** Operational dates declared for one page version. */
+export interface EffectiveValidity {
+  /** First effective civil day, inclusive, in YYYY-MM-DD. */
+  from: string;
+  /** First day outside the interval, in YYYY-MM-DD and after `from`. */
+  until?: string;
+  /** Repository source recorded as metadata. */
+  source: PageSourceFile;
+}
+
 /**
  * Page metadata a write sets. A write replaces the whole page: metadata the
  * call omits is cleared, not inherited. Use {@link PagesNamespace.update} to
@@ -105,6 +115,8 @@ export interface PageMetadata {
    * feedback when one changed.
    */
   sourceFiles?: PageSourceFile[];
+  /** Explicit operational interval for {@link ProjectQueryArgs.effectiveOn}. */
+  effectiveValidity?: EffectiveValidity;
 }
 
 /** Arguments of {@link PagesNamespace.write}. */
@@ -414,6 +426,8 @@ export interface ProjectQueryArgs extends QueryBase, ScopedArgs {
   pinFirst?: boolean;
   /** Time travel: what the store knew at this ISO-8601 instant. */
   asOf?: string;
+  /** Civil day in YYYY-MM-DD, combinable with asOf. Refuses answer: true. */
+  effectiveOn?: string;
   /** Ask the server's LLM (if configured) for a cited answer over the hits. */
   answer?: boolean;
   /** Token budget tier for `answer`. */
@@ -424,6 +438,8 @@ export interface ProjectQueryArgs extends QueryBase, ScopedArgs {
 export interface MultiProjectQueryArgs extends QueryBase {
   /** Projects to search; each needs both names. */
   scopes: readonly Scope[];
+  /** Effective-date queries require one project. */
+  effectiveOn?: never;
   /** Not allowed together with `scopes`. */
   scope?: never;
   /** Not global. */
@@ -440,6 +456,8 @@ export interface MultiProjectQueryArgs extends QueryBase {
 export interface GlobalQueryArgs extends QueryBase {
   /** Cross-project search. */
   global: true;
+  /** Effective-date queries require one project. */
+  effectiveOn?: never;
   /** Not allowed: a global query takes no scope. */
   scope?: never;
   /** Not allowed: a global query takes no scope. */

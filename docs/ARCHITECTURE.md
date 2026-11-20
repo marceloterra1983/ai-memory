@@ -1009,6 +1009,11 @@ literal `path_prefix` and exact `tag` filters. Every stream applies its
 `PageFilter` in its own query, so a filtered search narrows each stream before
 fusion and the reranker only sees pages the filter keeps. `/api/v1/search`
 currently passes no filter.
+MCP `memory_query(effective_on)` also supports a civil-day filter on pages
+with an explicit `effective_validity` declaration. It applies the JSON
+predicate through the same `PageFilter`, including on versions selected by
+`as_of`. The query uses one authorized project and skips provider-backed
+retrieval stages and supplemental profile scopes. See [operational dates](temporal.md#explicit-operational-dates).
 `ai-memory-mcp/tests/suite/web_search_parity.rs` holds the orders together.
 `explain=1` on a project search renders, per hit, each stream's rank, raw score
 and RRF contribution, the fused score, the authority multiplier, the intent

@@ -411,7 +411,10 @@ should be proposed from a completed session, or at explicit wrap-up \
   TTL hides the page after expiry and outranks `pinned`. Optional `kind`, \
   `entities`, `abstract`, `relations`, and `source_files` (the repository \
   files a page describes, as `{path, commit}`) carry bounded metadata; writes \
-  replace the whole page, and omitted metadata is cleared. To change a \
+  replace the whole page, and omitted metadata is cleared. Supply \
+  `effective_validity: {from, until?, source: {path, commit}}` for explicitly \
+  documented operational dates. Use YYYY-MM-DD, with inclusive `from` and \
+  exclusive `until`. To change a \
   page only if nobody else has, pass the `page_id` `memory_read_page` \
   returned as `expected_page_id` (or `create_only: true` for a new page); \
   a stale one fails with `precondition_failed` and writes nothing.\n\
@@ -515,7 +518,10 @@ it' after one project misses. For \"what did we know about X back \
 then\" questions, pass `as_of` (ISO-8601 instant) — the query becomes \
 a time-travel lookup fusing the entity timeline with version-filtered \
  full-text search, returning the page versions valid at that \
-moment, including ones superseded since. Note also that `memory_query` returns \
+ moment, including ones superseded since. Use `effective_on` (YYYY-MM-DD) \
+to find pages with an explicit operational interval covering that day. \
+It stays within one project and can be combined with `as_of` to select \
+versions known at a separate instant. Note also that `memory_query` returns \
 SNIPPETS, not full page bodies — an empty or short snippet does NOT \
 mean the page is empty (a large page can match outside the snippet \
 window); to read the whole page use `memory_read_page` (by `path`, \
@@ -810,6 +816,12 @@ struct QueryArgs {
     /// combined with `global` or `scopes`. Omit for a normal search.
     #[serde(default)]
     as_of: Option<String>,
+    /// Effective civil day (YYYY-MM-DD). Keep pages whose explicit operational
+    /// interval covers the day. One project only; combines with `as_of` to
+    /// select qualifying versions known at that instant. Refuses `global=true`,
+    /// `scopes`, and `answer=true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effective_on: Option<String>,
     /// Opt-in, off by default. When `true` AND the server has an LLM provider
     /// configured, synthesize a natural-language, cited answer over the top
     /// retrieved hits and attach it as `answer: { text, citations }` (the
@@ -996,11 +1008,21 @@ fn query_page_filter(args: &QueryArgs) -> Result<ai_memory_store::PageFilter<'_>
         ),
         None => None,
     };
+    let effective_on = args
+        .effective_on
+        .as_deref()
+        .map(|raw| {
+            ai_memory_core::page::parse_effective_date(raw).ok_or_else(|| {
+                McpError::invalid_params("effective_on must be a canonical YYYY-MM-DD date", None)
+            })
+        })
+        .transpose()?;
     Ok(ai_memory_store::PageFilter {
         kind,
         tier,
         path_prefix,
         tag,
+        effective_on,
     })
 }
 
@@ -1093,9 +1115,8 @@ struct MemoryQueryResponse {
     global_hits: Vec<ai_memory_store::PageHitWithMeta>,
     /// Standing user/team context from the reserved `_global` preferences
     /// scope, unioned into default-scoped queries alongside the current
-    /// project's `hits` (issue #154). Empty when the scope doesn't exist or
-    /// the query was explicitly scoped (`workspace`/`project`/`scopes`/
-    /// `global=true`).
+    /// project's `hits` (issue #154). The union is available to ordinary
+    /// single-project queries (implicit or named).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     global_scope_hits: Vec<QueryHit>,
     /// Present only when `explain=true`: which retrieval streams ran for
@@ -2004,14 +2025,14 @@ struct RestorePageArgs {
 
 /// The page metadata a checkpoint's frontmatter carries, in the shape
 /// `memory_write_page` takes, so a restore keeps `kind`, `entities`,
-/// `abstract`, `relations`, `source_files` and the profile fields instead of
+/// `abstract`, `relations`, `source_files`, `effective_validity` and the profile fields instead of
 /// clearing them. OKF `sources` is session provenance the write path
 /// derives again, never page metadata.
 /// The write path validates them again with the same bounds as any write.
 fn checkpoint_write_metadata(
     frontmatter: &serde_json::Value,
 ) -> Result<ai_memory_core::page::PageWriteMetadata, McpError> {
-    const KEYS: [&str; 7] = [
+    const KEYS: [&str; 8] = [
         "kind",
         "entities",
         "abstract",
@@ -2019,6 +2040,7 @@ fn checkpoint_write_metadata(
         "applies_to",
         "enforced_by",
         "source_files",
+        "effective_validity",
     ];
     let picked: serde_json::Map<String, serde_json::Value> = KEYS
         .iter()
@@ -3194,6 +3216,11 @@ impl AiMemoryServer {
         `streams_active` without per-hit RRF details. \
         Optional `kind`, `tier`, literal `path_prefix`, and exact `tag` \
         filters narrow page candidates before ranking in every search mode. \
+        `effective_on` (YYYY-MM-DD) keeps versions with a declared operational \
+        interval covering the day, before ranking. It searches one project \
+        without supplemental preferences or model calls. Combine it with \
+        `as_of` to select what the store knew at a separate instant. \
+        `global=true`, `scopes`, and `answer=true` cannot be combined with it. \
         If compiled wiki search misses in default/project/`scopes` mode, \
         `raw_hits` contains bounded raw observation fallback matches; \
         filtered searches omit this fallback because observations do not carry \
@@ -3202,8 +3229,7 @@ impl AiMemoryServer {
         fallback. Single-project calls (project implicit or named with \
         `workspace`+`project`) also return \
         `global_scope_hits`: standing user/team preferences from the \
-        reserved `_global` scope that apply across projects; only an explicit \
-        multi-`scopes` set opts out. Set \
+        reserved `_global` scope that apply across projects. Set \
         `global=true` to search EVERY \
         project at once (cross-project) when you don't know which project \
         holds the knowledge — each hit then carries its workspace + \
@@ -3223,6 +3249,19 @@ impl AiMemoryServer {
         let explain = args.explain.unwrap_or(false);
         let filter = query_page_filter(&args)?;
         let filtered = filter.is_active();
+        let effective = filter.effective_on.is_some();
+        if effective && (args.global == Some(true) || !args.scopes.is_empty()) {
+            return Err(McpError::invalid_params(
+                "effective_on cannot be combined with global or scopes",
+                None,
+            ));
+        }
+        if effective && args.answer == Some(true) {
+            return Err(McpError::invalid_params(
+                "effective_on cannot be combined with answer synthesis",
+                None,
+            ));
+        }
         // A repo that opted into `[recall] default_global` (published on the
         // ActiveProject by the hook) makes a query with NO explicit scoping
         // behave as `global=true`. Precedence is strict: an explicit
@@ -3245,6 +3284,7 @@ impl AiMemoryServer {
         let recall_global = !explicit_scoping
             && args.global.is_none()
             && !as_of_present
+            && !effective
             && self.active_project.default_global_for(&aps_actor);
         if args.global.unwrap_or(false) || recall_global {
             if !args.scopes.is_empty()
@@ -3366,8 +3406,14 @@ impl AiMemoryServer {
         }
 
         let query = args.query.clone();
-        let query_vec = self.embed_query(&args.query).await;
-        let candidate_limit = self.rerank_fetch_limit(limit);
+        let (query_vec, candidate_limit) = if effective {
+            (None, limit)
+        } else {
+            (
+                self.embed_query(&args.query).await,
+                self.rerank_fetch_limit(limit),
+            )
+        };
         let resolved_scopes = if args.scopes.is_empty() {
             None
         } else {
@@ -3419,8 +3465,13 @@ impl AiMemoryServer {
             outcome.hits
         });
         let hits = hits.map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let rerank_started = (explain && self.rerank.is_some()).then(std::time::Instant::now);
-        let hits = self.rerank_hits(&args.query, hits, limit).await;
+        let rerank_started =
+            (explain && !effective && self.rerank.is_some()).then(std::time::Instant::now);
+        let hits = if effective {
+            hits
+        } else {
+            self.rerank_hits(&args.query, hits, limit).await
+        };
         if let (Some(timings), Some(started)) = (timings.as_mut(), rerank_started) {
             timings.rerank_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -3490,8 +3541,8 @@ impl AiMemoryServer {
         // deliberately-narrowed multi-scope set (`scopes`) opts out — the
         // caller asked for exactly those scopes. One extra scoped search when
         // the reserved scope exists; zero cost when it doesn't.
-        let single_project_scoped = args.scopes.is_empty();
-        let global_scope_hits = if single_project_scoped {
+        let include_preferences = args.scopes.is_empty() && !effective;
+        let global_scope_hits = if include_preferences {
             match ai_memory_store::lookup_global_scope(&self.reader).await {
                 Ok(Some(scope)) => {
                     // If the project this query resolves to IS the reserved
@@ -3557,7 +3608,7 @@ impl AiMemoryServer {
         // profile out entirely. The profile is context, so a failure to
         // resolve it degrades to no profile hits rather than failing the query.
         let mut global_scope_hits = global_scope_hits;
-        if single_project_scoped {
+        if include_preferences {
             let viewer = Self::viewer_from_parts(Some(&parts));
             let current = self
                 .effective_ids_for_read_args_with_actor(
@@ -4968,6 +5019,9 @@ impl AiMemoryServer {
         metadata. This replaces the whole page; omitted metadata is cleared. \
         Bounds apply to raw values before trimming or normalization. \
         Relations use only `causes`, `fixes`, and `contradicts`. \
+        Declare operational dates with `effective_validity: {from, until?, source: {path, commit}}`. \
+        Supply explicit YYYY-MM-DD dates and a repository source; `from` is \
+        inclusive and `until` is exclusive. The server records the source as metadata. \
         An exact existing destination may be selected with `workspace` + \
         stable `project_id`; it is mutually exclusive with `project`/`scope` \
         and never creates a scope. \
@@ -11083,6 +11137,7 @@ mod tests {
                         pin_first: None,
                         explain: Some(true),
                         as_of: None,
+                        effective_on: None,
                         answer: None,
                         reasoning: None,
                     }),
@@ -11122,6 +11177,7 @@ mod tests {
                         pin_first: None,
                         explain: None,
                         as_of: None,
+                        effective_on: None,
                         answer: None,
                         reasoning: None,
                     }),
@@ -12904,6 +12960,9 @@ mod tests {
                 "{label} must distinguish global search from project RRF explanation"
             );
         });
+        for prompt in [MEMORY_INSTRUCTIONS, ai_memory_core::SNIPPET_BODY] {
+            assert!(prompt.contains("effective_on") && prompt.contains("effective_validity"));
+        }
 
         let (_tmp, _store, server, _ws, _pj) = setup_server().await;
         let tools = server.tool_router.list_all();
@@ -12923,7 +12982,7 @@ mod tests {
             .and_then(serde_json::Value::as_object)
             .expect("memory_query schema must expose properties");
         assert!(properties.contains_key("explain"));
-        for field in ["kind", "tier", "path_prefix", "tag"] {
+        for field in ["kind", "tier", "path_prefix", "tag", "effective_on"] {
             assert!(
                 properties.contains_key(field),
                 "memory_query schema must expose {field}: {properties:?}"
@@ -12933,6 +12992,11 @@ mod tests {
             description.contains("path_prefix") && description.contains("before ranking"),
             "tool description must explain structured pre-rank filters: {description}"
         );
+        let write = tools
+            .iter()
+            .find(|tool| tool.name == "memory_write_page")
+            .unwrap();
+        assert!(write.input_schema["properties"]["effective_validity"].is_object());
     }
 
     #[test]
@@ -14116,6 +14180,390 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn effective_validity_versions_track_ingestion_and_operation_independently() {
+        let (tmp, store, server, ws, proj) = setup_server().await;
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let server = server
+            .with_wiki(wiki.clone())
+            .with_embedder(Arc::new(TaskAwareEmbedder));
+        let source = serde_json::json!({"path": "operations/policy.md", "commit": "abcdef1"});
+        let path = PagePath::new("decisions/approval.md").unwrap();
+        let write = |validity: serde_json::Value| {
+            server.memory_write_page(
+                Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "path": path.as_str(), "body": "# Approval policy\n\nWritten decision.",
+                        "entities": ["approval"], "effective_validity": validity
+                    }))
+                    .unwrap(),
+                ),
+                OptionalParts(test_parts_default()),
+            )
+        };
+        let query = |day: &str, as_of: Option<jiff::Timestamp>| {
+            server.memory_query(
+                Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "query": "approval", "effective_on": day, "explain": true,
+                        "as_of": as_of.map(|instant| instant.to_string())
+                    }))
+                    .unwrap(),
+                ),
+                OptionalParts(test_parts_default()),
+            )
+        };
+        let announced = serde_json::json!({
+            "from": "2140-04-10", "until": "2140-04-20", "source": source
+        });
+        let first = tool_json(&write(announced.clone()).await.unwrap())["page_id"].clone();
+        let between = jiff::Timestamp::now();
+        assert_eq!(
+            wiki.read_page(ws, proj, &path).unwrap().frontmatter["effective_validity"],
+            announced
+        );
+
+        let retroactive = serde_json::json!({"from": "1940-01-01", "source": source});
+        let second = tool_json(&write(retroactive.clone()).await.unwrap())["page_id"].clone();
+        assert_ne!(first, second, "a metadata-only edit must be versioned");
+        assert_eq!(
+            wiki.read_page(ws, proj, &path).unwrap().frontmatter["effective_validity"],
+            retroactive
+        );
+
+        for (day, instant, expected) in [
+            ("2140-04-09", Some(between), None),
+            ("2140-04-10", Some(between), Some(&first)),
+            ("2140-04-19", Some(between), Some(&first)),
+            ("2140-04-20", Some(between), None),
+            ("1940-01-01", Some(between), None),
+            ("1939-12-31", None, None),
+            ("1940-01-01", None, Some(&second)),
+        ] {
+            let result = tool_json(&query(day, instant).await.unwrap());
+            assert!(
+                !result["streams_active"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|stream| stream == "vector")
+            );
+            let hits = result["hits"].as_array().unwrap();
+            assert_eq!(
+                hits.len(),
+                usize::from(expected.is_some()),
+                "{day}: {result}"
+            );
+            if let Some(id) = expected {
+                assert_eq!(&hits[0]["id"], id, "{day}: {result}");
+                assert!(hits[0]["score_details"]["fts_rank"].is_number());
+                assert!(hits[0]["score_details"]["entity_rank"].is_number());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_on_never_widens_the_authorized_project() {
+        let (tmp, store, server, ws, proj) = setup_server().await;
+        let server = server.with_wiki(Wiki::new(tmp.path(), store.writer.clone()).unwrap());
+        let foreign_ws = store
+            .writer
+            .get_or_create_workspace("foreign")
+            .await
+            .unwrap();
+        let foreign_proj = store
+            .writer
+            .get_or_create_project(foreign_ws, "scratch", None)
+            .await
+            .unwrap();
+        let new_user = |name: &str| {
+            store.writer.create_human_user(
+                NewUser {
+                    username: name.into(),
+                    name: None,
+                    email: None,
+                },
+                ai_memory_core::UserRole::User,
+                None,
+                false,
+            )
+        };
+        let alice = new_user("alice").await.unwrap();
+        let bob = new_user("bob").await.unwrap();
+        for (project, user) in [(proj, bob), (foreign_proj, alice)] {
+            store
+                .writer
+                .set_access_mode(project, ai_memory_store::AccessMode::Restricted)
+                .await
+                .unwrap();
+            grant_writer(store.db_path(), user, project);
+        }
+        let parts_for = |user| {
+            let mut parts = test_parts_default();
+            parts.extensions.insert(AuthLevel::User);
+            parts.extensions.insert(user);
+            parts
+                .extensions
+                .insert(ai_memory_core::AuthorizedViewer(user));
+            parts
+        };
+        let validity = serde_json::json!({
+            "from": "2026-01-01", "source": {"path": "docs/policy.md", "commit": "abcdef1"}
+        });
+        let write =
+            |workspace: &str, body: &str, user| {
+                server.memory_write_page(
+                Parameters(serde_json::from_value(serde_json::json!({
+                    "workspace": workspace, "project": "scratch", "path": "decisions/recall.md",
+                    "body": body, "effective_validity": validity
+                })).unwrap()), OptionalParts(parts_for(user)),
+            )
+            };
+        let local_id = tool_json(
+            &write("default", "# Mandate\nLocal control.", bob)
+                .await
+                .unwrap(),
+        )["page_id"]
+            .clone();
+        let foreign_id = tool_json(
+            &write("foreign", "# Mandate\nPrivate control.", alice)
+                .await
+                .unwrap(),
+        )["page_id"]
+            .clone();
+        assert!(
+            write("foreign", "# Mandate\nOverwrite attempt.", bob)
+                .await
+                .is_err()
+        );
+        let global = ai_memory_store::create_explicit_scope(&store.writer, "default", "_global")
+            .await
+            .unwrap()
+            .scope;
+        store
+            .writer
+            .upsert_page(NewPage {
+                workspace_id: global.workspace_id,
+                project_id: global.project_id,
+                path: PagePath::new("notes/global-mandate.md").unwrap(),
+                title: "Mandate".into(),
+                body: "Reserved context".into(),
+                tier: Tier::Semantic,
+                frontmatter_json: serde_json::json!({"effective_validity": validity}),
+                pinned: false,
+                links: Vec::new(),
+                author_id: None,
+                expires_at: None,
+                entities: Vec::new(),
+                evidence: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        let bob_actor = AiMemoryServer::actor_key_from_parts(Some(&parts_for(bob)));
+        server.active_project.set_for(&bob_actor, ws, proj, true);
+        let query = |extra: serde_json::Value, user| {
+            let mut args = serde_json::json!({"query": "mandate", "effective_on": "2026-01-01"});
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            server.memory_query(
+                Parameters(serde_json::from_value(args).unwrap()),
+                OptionalParts(parts_for(user)),
+            )
+        };
+        for as_of in [None, Some(jiff::Timestamp::now().to_string())] {
+            let own = tool_json(
+                &query(serde_json::json!({"as_of": as_of}), bob)
+                    .await
+                    .unwrap(),
+            );
+            let hits = own["hits"].as_array().unwrap();
+            assert_eq!(hits.len(), 1, "{own}");
+            assert_eq!(hits[0]["id"], local_id);
+            assert!(own.get("global_hits").is_none() && own.get("global_scope_hits").is_none());
+
+            let foreign =
+                serde_json::json!({"workspace": "foreign", "project": "scratch", "as_of": as_of});
+            assert!(query(foreign.clone(), bob).await.is_err());
+            let allowed = tool_json(&query(foreign, alice).await.unwrap());
+            assert_eq!(allowed["hits"][0]["id"], foreign_id);
+        }
+        for args in [
+            serde_json::json!({"global": true}),
+            serde_json::json!({"scopes": [{"workspace": "default", "project": "scratch"}]}),
+            serde_json::json!({"workspace": "foreign"}),
+            serde_json::json!({"workspace": "missing", "project": "scratch"}),
+            serde_json::json!({"answer": true}),
+        ] {
+            assert_eq!(
+                query(args, bob).await.unwrap_err().code,
+                rmcp::model::ErrorCode::INVALID_PARAMS
+            );
+        }
+        assert!(
+            store
+                .reader
+                .find_workspace("missing".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_on_filters_manual_and_legacy_frontmatter_before_candidate_caps() {
+        let (tmp, store, _, ws, proj) = setup_server().await;
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let manual = PagePath::new("notes/manual.md").unwrap();
+        let file = wiki.abs_path(ws, proj, &manual);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "---\neffective_validity:\n  from: 2024-02-29\n  until: 2024-03-01\n  source:\n    path: docs/policy.md\n    commit: ABCDEF1\n---\nA clause refers to an otter.\n").unwrap();
+        let manual_id = wiki.reindex_page(ws, proj, manual.clone()).await.unwrap();
+        assert_eq!(
+            wiki.reindex_page(ws, proj, manual).await.unwrap(),
+            manual_id
+        );
+        let source = serde_json::json!({"path": "a.md", "commit": "abcdef1"});
+        let invalid = [
+            serde_json::json!({}), // A legacy page without any validity metadata.
+            serde_json::json!({"effective_validity": null}),
+            serde_json::json!({"effective_validity": "always"}),
+            serde_json::json!({"effective_validity": {"from": "2023-02-29", "source": source}}),
+            serde_json::json!({"effective_validity": {"from": "2024-02-30", "source": source}}),
+            serde_json::json!({"effective_validity": {"from": "2024-2-09", "source": source}}),
+            serde_json::json!({"effective_validity": {"from": "2024-01-01", "until": true, "source": source}}),
+            serde_json::json!({"effective_validity": {"from": "2024-01-01", "until": "2024-02-31", "source": source}}),
+            serde_json::json!({"effective_validity": {"from": "2024-01-01", "to": "2024-02-01", "source": source}}),
+            serde_json::json!({"effective_validity": {"from": "2024-01-01"}}),
+            serde_json::json!({"effective_validity": {"from": "2024-01-01", "source": {"path": "C:/outside", "commit": "abcdef1"}}}),
+            serde_json::json!({"effective_validity": {"from": "2024-01-01", "source": {"path": "../outside", "commit": "abcdef1"}}}),
+            serde_json::json!({"effective_validity": {"from": "2024-01-01", "source": {"path": "a.md", "commit": "abcdef1\u{0}z"}}}),
+            serde_json::json!({"effective_validity": {"from": "2024-01-01", "source": {"path": "a.md", "commit": 1234567}}}),
+        ];
+        for (i, frontmatter_json) in invalid.into_iter().cycle().take(42).enumerate() {
+            store
+                .writer
+                .upsert_page(NewPage {
+                    workspace_id: ws,
+                    project_id: proj,
+                    path: PagePath::new(format!("notes/legacy-{i}.md")).unwrap(),
+                    title: "Otter".into(),
+                    body: "otter".into(),
+                    tier: Tier::Semantic,
+                    frontmatter_json,
+                    pinned: true,
+                    links: Vec::new(),
+                    author_id: None,
+                    expires_at: None,
+                    entities: vec!["otter".into()],
+                    evidence: Vec::new(),
+                })
+                .await
+                .unwrap();
+        }
+        let before_restart = jiff::Timestamp::now().to_string();
+        drop(wiki);
+        store.close().await;
+        let reopened = Store::open(tmp.path()).unwrap();
+        let server =
+            AiMemoryServer::new(reopened.reader.clone(), reopened.writer.clone(), ws, proj);
+        let query = |args| {
+            server.memory_query(
+                Parameters(serde_json::from_value(args).unwrap()),
+                OptionalParts(test_parts_default()),
+            )
+        };
+        let normal = tool_json(
+            &query(serde_json::json!({"query": "otter", "limit": 1}))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            normal["hits"][0]["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("notes/legacy-")
+        );
+        for as_of in [None, Some(before_restart)] {
+            let result = tool_json(
+                &query(serde_json::json!({
+                    "query": "otter", "limit": 1, "pin_first": as_of.is_none(),
+                    "effective_on": "2024-02-29", "as_of": as_of
+                }))
+                .await
+                .unwrap(),
+            );
+            assert_eq!(result["hits"][0]["id"], manual_id.to_string(), "{result}");
+            let all = tool_json(
+                &query(serde_json::json!({
+                    "query": "otter", "limit": 100, "effective_on": "2024-02-29", "as_of": as_of
+                }))
+                .await
+                .unwrap(),
+            );
+            assert_eq!(all["hits"].as_array().unwrap().len(), 1, "{all}");
+            assert_eq!(all["hits"][0]["id"], manual_id.to_string(), "{all}");
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_validity_rejects_ambiguous_input_before_scope_creation() {
+        let (tmp, store, server, _, _) = setup_server().await;
+        let server = server.with_wiki(Wiki::new(tmp.path(), store.writer.clone()).unwrap());
+        let source = serde_json::json!({"path": "ops/rollout.md", "commit": "abcdef1"});
+        for day in [
+            "",
+            " 2026-02-01",
+            "20260201",
+            "2026-2-01",
+            "2026-02-29",
+            "2026-02-01T00:00:00Z",
+        ] {
+            let err = server
+                .memory_query(
+                    Parameters(
+                        serde_json::from_value(
+                            serde_json::json!({"query": "foo", "effective_on": day}),
+                        )
+                        .unwrap(),
+                    ),
+                    OptionalParts(test_parts_default()),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{day:?}");
+        }
+        for validity in [
+            serde_json::json!({"from": "2026-02-29", "source": source}),
+            serde_json::json!({"from": "2026-02-01", "until": "2026-02-01", "source": source}),
+            serde_json::json!({"from": "2026-02-01", "until": "2026-01-31", "source": source}),
+            serde_json::json!({"from": "2026-02-01", "source": {"path": "../other/policy.md", "commit": "abcdef1"}}),
+            serde_json::json!({"from": "2026-02-01", "source": {"path": "policy.md", "commit": "HEAD"}}),
+        ] {
+            let err = server.memory_write_page(
+                Parameters(serde_json::from_value(serde_json::json!({
+                    "workspace": "new-workspace", "project": "new-project", "path": "decisions/new.md",
+                    "body": "New page.", "effective_validity": validity
+                })).unwrap()),
+                OptionalParts(test_parts_default()),
+            ).await.unwrap_err();
+            assert_eq!(
+                err.code,
+                rmcp::model::ErrorCode::INVALID_PARAMS,
+                "{validity}"
+            );
+        }
+        assert!(
+            store
+                .reader
+                .find_workspace("new-workspace".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     /// `as_of` turns memory_query into a time-travel lookup
     /// (docs/temporal.md, issue #656): entity timeline fused with
     /// version-filtered FTS. A superseded version answers for the
@@ -14163,6 +14611,7 @@ mod tests {
             pin_first: None,
             explain: Some(true),
             as_of,
+            effective_on: None,
             answer: None,
             reasoning: None,
         };
@@ -14209,6 +14658,7 @@ mod tests {
                     pin_first: None,
                     explain: Some(true),
                     as_of: Some(jiff::Timestamp::now().to_string()),
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -14288,6 +14738,7 @@ mod tests {
             pin_first: None,
             explain: None,
             as_of: None,
+            effective_on: None,
             answer: None,
             reasoning: None,
         };
@@ -14375,6 +14826,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -14409,6 +14861,7 @@ mod tests {
                     pin_first: None,
                     explain: Some(true),
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -14585,6 +15038,7 @@ mod tests {
                             pin_first: None,
                             explain: Some(explain),
                             as_of: None,
+                            effective_on: None,
                             answer: None,
                             reasoning: None,
                         }),
@@ -14689,6 +15143,7 @@ mod tests {
                         pin_first: None,
                         explain: Some(true),
                         as_of: None,
+                        effective_on: None,
                         answer: None,
                         reasoning: None,
                     }),
@@ -14784,6 +15239,7 @@ mod tests {
             pin_first: None,
             explain: None,
             as_of: None,
+            effective_on: None,
             answer: None,
             reasoning: None,
         };
@@ -14948,6 +15404,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -14992,6 +15449,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -15136,6 +15594,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -15172,6 +15631,21 @@ mod tests {
             filtered.get("raw_hits").is_none(),
             "observations do not carry page tags and must not bypass a filter: {filtered}"
         );
+        let effective = server
+            .memory_query(
+                Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "query": "quokka", "effective_on": "2026-02-01"
+                    }))
+                    .unwrap(),
+                ),
+                OptionalParts(test_parts_default()),
+            )
+            .await
+            .unwrap();
+        let effective = tool_json(&effective);
+        assert!(effective["hits"].as_array().unwrap().is_empty());
+        assert!(effective.get("raw_hits").is_none(), "{effective}");
     }
 
     /// The vector stream has no similarity floor, so once any page in the
@@ -15747,6 +16221,7 @@ mod tests {
                             pin_first: None,
                             explain: Some(true),
                             as_of: None,
+                            effective_on: None,
                             answer: None,
                             reasoning: None,
                         }),
@@ -15862,6 +16337,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -15965,6 +16441,7 @@ mod tests {
                         pin_first: None,
                         explain: None,
                         as_of: None,
+                        effective_on: None,
                         answer: None,
                         reasoning: None,
                     }),
@@ -16039,6 +16516,7 @@ mod tests {
                         pin_first: None,
                         explain: None,
                         as_of: None,
+                        effective_on: None,
                         answer: None,
                         reasoning: None,
                     }),
@@ -16089,6 +16567,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -16172,6 +16651,7 @@ mod tests {
                         pin_first: None,
                         explain: None,
                         as_of: None,
+                        effective_on: None,
                         answer: None,
                         reasoning: None,
                     }),
@@ -16246,6 +16726,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -18838,6 +19319,7 @@ mod tests {
                     pin_first: None,
                     explain: Some(true),
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -18955,6 +19437,7 @@ mod tests {
                     pin_first: None,
                     explain: Some(true),
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -19010,6 +19493,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -19179,6 +19663,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: Some(jiff::Timestamp::now().to_string()),
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -19227,6 +19712,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -19612,6 +20098,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: Some(true),
                     reasoning: None,
                 }),
@@ -22476,6 +22963,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -22542,6 +23030,7 @@ mod tests {
             pin_first: None,
             explain: None,
             as_of: None,
+            effective_on: None,
             answer: None,
             reasoning: None,
         }
@@ -23482,6 +23971,7 @@ mod tests {
                             include_expired: None,
                             explain: None,
                             as_of: None,
+                            effective_on: None,
                         }),
                         OptionalParts(as_user(user, authorized)),
                     )
@@ -23708,6 +24198,7 @@ mod tests {
                                 include_expired: None,
                                 explain: Some(true),
                                 as_of: None,
+                                effective_on: None,
                             }),
                             OptionalParts(as_user(user)),
                         )
@@ -24351,7 +24842,8 @@ mod tests {
             "abstract": "One-line summary.",
             "relations": {"fixes": ["gotchas/build"], "contradicts": ["decisions/old.md"]},
             "tags": ["storage"], "pinned": true, "tier": "procedural",
-            "source_files": [{"path": "bin/deploy.sh", "commit": "3F2A9C1"}]
+            "source_files": [{"path": "bin/deploy.sh", "commit": "3F2A9C1"}],
+            "effective_validity": {"from": "2026-02-01", "source": {"path": "ops/rules.md", "commit": "123ABCD"}}
         });
         server
             .memory_write_page(
@@ -24408,6 +24900,7 @@ mod tests {
             "pinned",
             "tier",
             "source_files",
+            "effective_validity",
         ] {
             assert_eq!(
                 after.frontmatter.get(key),
@@ -24418,6 +24911,10 @@ mod tests {
         }
         assert_eq!(after.frontmatter["kind"], "rule");
         assert_eq!(after.frontmatter["relations"], payload["relations"]);
+        assert_eq!(
+            after.frontmatter["effective_validity"]["source"]["commit"],
+            "123abcd"
+        );
         assert_eq!(after.body, before.body);
     }
 
@@ -27762,6 +28259,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),
@@ -27804,6 +28302,7 @@ mod tests {
                     pin_first: None,
                     explain: None,
                     as_of: None,
+                    effective_on: None,
                     answer: None,
                     reasoning: None,
                 }),

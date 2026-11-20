@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use ai_memory_core::compaction_recap::{ANCHOR_HEADER_PREFIX, NO_ANCHOR_SESSION_NOTICE};
-use ai_memory_core::scaffolding::{looks_like_codex_instructions, looks_like_scaffolding};
+use ai_memory_core::scaffolding::{
+    looks_like_codex_instructions, looks_like_scaffolding, strip_leading_system_reminders,
+};
 use ai_memory_core::{HandoffState, IdentityKey, ObservationKind, OwnerFilter, SessionId, UserId};
 use ai_memory_store::{ObservationOrder, ObservationPage, ObservationRecord, ProjectAccess};
 use axum::extract::{Query, State};
@@ -561,14 +563,7 @@ pub(crate) fn select_window(
 /// operator's. Harness markup, task notifications and Codex's injected
 /// instructions are captured as prompts but were never typed by the operator.
 fn operator_prompt(row: &ObservationRecord) -> Option<RecapItem> {
-    const OPEN: &str = "<system-reminder>";
-    const CLOSE: &str = "</system-reminder>";
-    let mut text = row.body.trim();
-    while let Some(notice) = text.strip_prefix(OPEN) {
-        // An unclosed notice leaves no safe place to cut, so the prompt is dropped.
-        let end = notice.find(CLOSE)?;
-        text = notice[end + CLOSE.len()..].trim_start();
-    }
+    let text = strip_leading_system_reminders(row.body.trim())?;
     (!looks_like_scaffolding(text) && !looks_like_codex_instructions(text)).then(|| RecapItem {
         at: row.created_at.clone(),
         text: escape_untrusted_history(text),

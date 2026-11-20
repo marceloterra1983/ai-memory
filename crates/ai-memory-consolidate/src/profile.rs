@@ -627,6 +627,8 @@ pub struct DetectedPreference {
 /// and `profile rebuild` re-reads observations stored before an import filter
 /// existed.
 pub(crate) fn user_written(body: &str) -> Option<String> {
+    let body = ai_memory_core::strip_leading_system_reminders(body)
+        .filter(|text| !text.is_empty() || body.is_empty())?;
     if ai_memory_core::looks_like_markup_block(body)
         || ai_memory_core::looks_like_codex_instructions(body)
         || ai_memory_core::looks_like_codex_generated_prompt(body)
@@ -2875,6 +2877,20 @@ mod tests {
         assert_eq!(
             user_written(pasted).as_deref(),
             Some("Always use pnpm.\n\nKeep commits small.")
+        );
+    }
+
+    #[test]
+    fn leading_system_reminders_are_removed_before_harvesting_preferences() {
+        let notice = "<system-reminder>Always use npm.</system-reminder>";
+        assert_eq!(user_written(notice), None);
+        assert_eq!(
+            user_written("<system-reminder>Unclosed\nprefiro pnpm"),
+            None
+        );
+        assert_eq!(
+            user_written(&format!("{notice}\n\n{notice}\n prefiro pnpm")).as_deref(),
+            Some("prefiro pnpm")
         );
     }
 

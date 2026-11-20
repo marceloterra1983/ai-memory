@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ai_memory_core::{
     AgentKind, MANAGED_WORKSTREAM_PACKET_MARKER, NativeSessionIdentity, NewWorkstreamEvent,
-    Sanitizer, WorkstreamEventKind,
+    Sanitizer, WorkstreamEventKind, strip_leading_system_reminders,
 };
 use anyhow::{Context as _, Result, anyhow};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
@@ -1750,22 +1750,24 @@ fn claude_task_notification(record: &Value, message: &Value) -> bool {
         }),
         _ => None,
     };
-    first_text.is_some_and(|text| {
-        const TAG: &str = "<task-notification";
-        let text = text.trim_start_matches(|c: char| {
-            c.is_whitespace()
-                || matches!(
-                    c,
-                    '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}'
-                )
-        });
-        text.get(..TAG.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(TAG))
-            && text[TAG.len()..]
-                .chars()
-                .next()
-                .is_some_and(|c| c == '>' || c == '/' || c.is_whitespace())
-    })
+    first_text
+        .and_then(strip_leading_system_reminders)
+        .is_some_and(|text| {
+            const TAG: &str = "<task-notification";
+            let text = text.trim_start_matches(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}'
+                    )
+            });
+            text.get(..TAG.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(TAG))
+                && text[TAG.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c == '>' || c == '/' || c.is_whitespace())
+        })
 }
 
 /// A record flag Claude Code writes as `true`, and that a rewritten
@@ -3116,9 +3118,9 @@ fn parse_content_blocks(
         .map_or_else(|| vec![content], |items| items.iter().collect());
     for (index, block) in blocks.into_iter().enumerate() {
         if let Some(text) = block.as_str() {
-            if codex_synthetic_context(agent, role, text) {
+            let Some(text) = visible_message_text(agent, role, text) else {
                 continue;
-            }
+            };
             push_event(
                 events,
                 agent,
@@ -3139,10 +3141,9 @@ fn parse_content_blocks(
             .unwrap_or_default();
         match block_type {
             "text" | "input_text" | "output_text" => {
-                if let Some(text) = first_string(block, &["text", "content"]) {
-                    if codex_synthetic_context(agent, role, text) {
-                        continue;
-                    }
+                if let Some(text) = first_string(block, &["text", "content"])
+                    .and_then(|text| visible_message_text(agent, role, text))
+                {
                     push_event(
                         events,
                         agent,
@@ -3228,20 +3229,21 @@ fn claude_managed_packet_echo(agent: AgentKind, body: &str) -> bool {
         || body.starts_with(LEGACY_MANAGED_WORKSTREAM_PACKET_PREFIX)
 }
 
-fn codex_synthetic_context(agent: AgentKind, role: &str, text: &str) -> bool {
+fn visible_message_text<'a>(agent: AgentKind, role: &str, text: &'a str) -> Option<&'a str> {
     if role != "user" {
-        return false;
+        return Some(text);
     }
-    let trimmed = text.trim_start();
     match agent {
         AgentKind::Codex => {
-            ai_memory_core::looks_like_codex_instructions(trimmed)
+            let trimmed = text.trim_start();
+            let synthetic = ai_memory_core::looks_like_codex_instructions(trimmed)
                 || ai_memory_core::looks_like_codex_generated_prompt(trimmed)
                 || trimmed.starts_with("<environment_context>")
                 || trimmed.starts_with("<permissions instructions>")
-                || trimmed.starts_with("<INSTRUCTIONS>")
+                || trimmed.starts_with("<INSTRUCTIONS>");
+            (!synthetic).then_some(text)
         }
-        AgentKind::ClaudeCode => trimmed.starts_with("<system-reminder>"),
+        AgentKind::ClaudeCode => strip_leading_system_reminders(text),
         // Grok stores harness scaffolding inside `user` records rather than a
         // separate record type: an environment block, then Claude-style
         // reminders carrying project instructions, the skills catalogue, and
@@ -3251,9 +3253,10 @@ fn codex_synthetic_context(agent: AgentKind, role: &str, text: &str) -> bool {
         // conversation from the startup packet budget. Genuine input arrives
         // wrapped in `<user_query>`.
         AgentKind::Grok => {
-            trimmed.starts_with("<user_info>") || trimmed.starts_with("<system-reminder>")
+            let text = strip_leading_system_reminders(text)?;
+            (!text.trim_start().starts_with("<user_info>")).then_some(text)
         }
-        _ => false,
+        _ => Some(text),
     }
 }
 
@@ -8785,6 +8788,34 @@ mod tests {
     }
 
     #[test]
+    fn claude_adapter_keeps_user_text_after_leading_system_reminders() {
+        let notice = "<system-reminder>Called Read</system-reminder>";
+        let prompt = format!("{notice}\n\n{notice}\nfaça X");
+        let task_notification = format!("{notice}\n<task-notification>done</task-notification>");
+        let records = [
+            json!({"type":"user","message":{"content":notice}}),
+            json!({"type":"user","message":{"content":prompt}}),
+            json!({"type":"user","message":{"content":[{"type":"text","text":notice}]}}),
+            json!({"type":"user","message":{"content":[{"type":"text","text":prompt}]}}),
+            json!({"type":"user","message":{"content":task_notification}}),
+        ];
+        let mut events = Vec::new();
+        let mut losses = Vec::new();
+        for (index, record) in records.iter().enumerate() {
+            parse_claude(
+                record,
+                "session",
+                &format!("record-{index}"),
+                &mut events,
+                &mut losses,
+            );
+        }
+
+        let contents: Vec<_> = events.iter().map(|event| event.content.as_str()).collect();
+        assert_eq!(contents, ["faça X", "faça X"]);
+    }
+
+    #[test]
     fn claude_adapter_excludes_read_back_managed_packets_only_at_the_origin() {
         let value = json!({
             "type":"user",
@@ -10410,6 +10441,32 @@ mod tests {
             ["<user_query>\nfix the bug\n</user_query>"],
             "only genuine user input may reach the ledger"
         );
+    }
+
+    #[test]
+    fn grok_adapter_keeps_user_query_after_leading_system_reminders() {
+        let notice = "<system-reminder>Connected tools</system-reminder>";
+        let query = "<user_query>\nfaça X\n</user_query>";
+        let records = [
+            json!({"type":"user","content":[{"type":"text","text":notice}]}),
+            json!({"type":"user","content":[{"type":"text","text":format!("  {notice}\n\n{notice}\n{query}")}]}),
+            json!({"type":"user","content":format!("{notice}\n<system-reminder>Unclosed notice\n{query}")}),
+            json!({"type":"user","content":format!("{notice}\n<user_info>cwd=/fixture</user_info>")}),
+        ];
+        let mut events = Vec::new();
+        let mut losses = Vec::new();
+        for (index, record) in records.iter().enumerate() {
+            parse_grok(
+                record,
+                "019f-session",
+                &format!("record-{index}"),
+                &mut events,
+                &mut losses,
+            );
+        }
+
+        let contents: Vec<_> = events.iter().map(|event| event.content.as_str()).collect();
+        assert_eq!(contents, [query]);
     }
 
     #[test]

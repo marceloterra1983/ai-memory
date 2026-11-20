@@ -636,7 +636,10 @@ impl PromptTitleScan {
         let preamble = title.trim() == SUBAGENT_PROMPT_PREAMBLE;
         if preamble || title.trim_start().starts_with(SYSTEM_REMINDER_OPEN) {
             self.rejected_subagent_preamble |= preamble;
-            self.found = strip_leading_system_reminders(body).and_then(title_from_prompt_body);
+            // What follows the reminders is judged as a bare prompt would be.
+            self.found = strip_leading_system_reminders(body)
+                .filter(|rest| !looks_like_markup_block(rest))
+                .and_then(title_from_prompt_body);
             return self.found.is_none();
         }
         if !title.is_empty() && !looks_like_scaffolding(title) {
@@ -1441,7 +1444,10 @@ mod tests {
     }
 
     #[test]
-    fn leading_system_reminders_title_uses_the_first_usable_body_line() {
+    fn leading_system_reminders_title_uses_the_operator_text_after_them() {
+        // What follows the reminders is judged as a prompt without them would
+        // be: another harness block there skips the prompt rather than lend
+        // the page a line from inside or after it.
         let observations = [
             obs_with_body(
                 ObservationKind::UserPrompt,
@@ -1451,9 +1457,15 @@ mod tests {
             obs_with_body(
                 ObservationKind::UserPrompt,
                 "<system-reminder>",
+                "<system-reminder>Task finished</system-reminder>\n\
+                 <task-notification>\n<task-id>t1</task-id>\n</task-notification>\n\
+                 Read the output file to retrieve the result.",
+            ),
+            obs_with_body(
+                ObservationKind::UserPrompt,
+                "<system-reminder>",
                 "<system-reminder>Called Read</system-reminder>\n\n\
-                 <system-reminder>Second notice</system-reminder>\n\n\
-                 <environment_context>\n\nfaça X\nMais detalhes",
+                 <system-reminder>Second notice</system-reminder>\n\nfaça X\nMais detalhes",
             ),
         ];
         let page = synthesize_session_page(

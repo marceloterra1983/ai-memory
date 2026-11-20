@@ -513,17 +513,9 @@ cargo test -p ai-memory-cli --test suite harness_switch
 cargo test -p ai-memory-eval --test smoke ptbr_corpus_replays_offline_with_identical_ab_results -- --ignored
 ```
 
-Observed offline A/B receipt (`2026-11-20 08:29 BRT`, `ptbr-v1` on isolated `target/debug/ai-memory`, zero-LLM, `AI_MEMORY_CAPTURE_ASSISTANT=true`, `pin_first=false`, `concurrency=1`):
-
-| Metric | Baseline | Identical candidate | Delta |
-|---|---:|---:|---:|
-| hit@1 / hit@3 / hit@5 / hit@10 | 1.000 | 1.000 | +0.000 |
-| recall@1 | 0.875 | 0.875 | +0.000 |
-| recall-all@1 | 0.750 | 0.750 | +0.000 |
-| recall@3 / recall@5 / recall@10 | 1.000 | 1.000 | +0.000 |
-| recall-all@3 / recall-all@5 / recall-all@10 | 1.000 | 1.000 | +0.000 |
-| Estimated context tokens, mean / median | 734.2 / 737.5 | 734.2 / 737.5 | +0.0 |
-| Latency p50 / p95 (ms) | 5 / 5 | 7 / 9 | +2 / +4 |
+The offline smoke test compares accuracy and context across identical runs.
+For a measured receipt, keep the generated `report.json` with the server
+executable SHA-256. Latency is specific to the measured run.
 
 ### The triple: accuracy + latency + context-tokens
 

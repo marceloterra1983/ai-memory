@@ -621,7 +621,9 @@ def run_smoke(harness: Harness) -> None:
     require(initial_pending == 0, f"new queue has {initial_pending} pending events")
 
     canonical_file = materialize(
-        harness, "canonical-offline", lifecycle(main_session, "canonical")
+        harness,
+        "canonical-offline",
+        lifecycle(main_session, "canonical", prompt=f"Which step remains for {MARKER}?"),
     )
     harness.enqueue(main_queue, canonical_file, "enqueue-offline")
     _, offline_pending = harness.status(main_queue, "status-offline-enqueued")

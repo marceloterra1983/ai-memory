@@ -12306,40 +12306,52 @@ mod tests {
         let wiki = Wiki::new(tmp.path(), store.writer.clone())
             .unwrap()
             .with_store_reader(store.reader.clone());
-        let runtime = Arc::new(crate::dream::DreamRuntime::new(
-            store.reader.clone(),
-            wiki.clone(),
-            None,
-            DecayParams::default(),
-            0.0,
-            ai_memory_consolidate::DreamConfig::default(),
-            vec![crate::dream::DreamScope {
-                workspace: "fixture".into(),
-                project: "app".into(),
-            }],
-            ai_memory_consolidate::ActivityClock::default(),
-        ));
+        let runtime = |llm| {
+            Arc::new(crate::dream::DreamRuntime::new(
+                store.reader.clone(),
+                wiki.clone(),
+                llm,
+                DecayParams::default(),
+                0.0,
+                ai_memory_consolidate::DreamConfig::default(),
+                vec![crate::dream::DreamScope {
+                    workspace: "fixture".into(),
+                    project: "app".into(),
+                }],
+                ai_memory_consolidate::ActivityClock::default(),
+            ))
+        };
         let auth = Arc::new(crate::auth::AuthState::new(None));
-        let router = admin_router(admin_state_for_store(&tmp, &store, wiki))
-            .layer(axum::Extension(runtime))
-            .layer(axum::middleware::from_fn_with_state(
-                auth,
-                crate::human_auth::require_dual_auth,
-            ));
-        for (payload, expected) in [
+        let router = admin_router(admin_state_for_store(&tmp, &store, wiki.clone())).layer(
+            axum::middleware::from_fn_with_state(auth, crate::human_auth::require_dual_auth),
+        );
+        let literal = router.clone().layer(axum::Extension(runtime(None)));
+        let draft =
+            ai_memory_llm::DreamLocalProvider::new("http://127.0.0.1:1/v1", "fixture").unwrap();
+        let incomplete = router.layer(axum::Extension(runtime(Some(Arc::new(draft)))));
+        for (router, payload, expected) in [
             (
+                &literal,
                 serde_json::json!({"workspace":"fixture","project":"app"}),
                 StatusCode::OK,
             ),
             (
+                &literal,
                 serde_json::json!({"workspace":"fixture","project":"outside"}),
                 StatusCode::FORBIDDEN,
             ),
             (
+                &literal,
                 serde_json::json!({"workspace":"fixture","project":"app","body":"override"}),
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
             (
+                &literal,
+                serde_json::json!({"workspace":"fixture","project":"app","apply":true}),
+                StatusCode::OK,
+            ),
+            (
+                &incomplete,
                 serde_json::json!({"workspace":"fixture","project":"app","apply":true}),
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
@@ -12356,7 +12368,19 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), expected);
+            assert_eq!(response.status(), expected, "{payload}");
+            if expected == StatusCode::OK {
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    report["dry_run"],
+                    !payload["apply"].as_bool().unwrap_or_default()
+                );
+                assert_eq!(report["terminal"], "noop");
+                assert_eq!(report["scopes"][0]["report"]["inference_requests"], 0);
+            }
         }
     }
 

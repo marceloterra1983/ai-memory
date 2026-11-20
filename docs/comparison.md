@@ -86,7 +86,7 @@ setup.
 | Temporal knowledge graph | Zep/Graphiti, Cognee | Bi-temporal "what was true vs believed when"; Cognee adds data connectors (Drive, Gmail, Slack), a repo code-graph indexer, and a Claude Code plugin listed in Anthropic's plugin directory | Graphiti needs a graph database (Neo4j, FalkorDB, or the embedded FalkorDBLite); Cognee 1.6 runs on embedded SQLite + LanceDB + Kuzu files and can start without an LLM key. In both, memory lives in database files, not git-versioned markdown. ai-memory ships **bi-temporal-lite** on SQLite ([`temporal.md`](temporal.md)) + typed edges ([`typed-edges.md`](typed-edges.md)) for the useful part |
 | Memory OS / self-editing | Letta (now Letta Code), MemOS, MIRIX | Agent curates its own tiered memory; Letta's memory is a git repo of markdown files with a `MEMORY.md` index, written by "dreaming" subagents through git worktrees | Token-expensive self-editing; Letta's V1 server is retired and its memory lives inside its own harness (Letta Code, Letta Cloud by default), not under the harness you already use |
 | Context database | **OpenViking** (ByteDance) | Progressive L0/L1/L2 loading; global recall + rerank with subtree filters; editable markdown memories; plugins for seven coding agents; a v0.5 gateway proxy that injects recall and keeps prompt caches valid | Needs a VLM (Ollama works); embeddings are local by default; AGPLv3 self-hostable server; its `ov-kanban` task handoff has no claim-once guard |
-| Paper-backed pages | **Hindsight** (Vectorize) | "Mental models" = living markdown pages an agent boots from; belief-strength consolidation; a preprint; a coding-agent package that hooks 16+ agents, ingests git history, and shares one bank per repo; reranker on by default | Postgres/pgvector-primary; needs an LLM (local via Ollama/llama.cpp, or a Claude/ChatGPT/Copilot subscription); markdown is a one-way mirror of the database. ai-memory ships belief-strength `confidence` + an opt-in LLM "dream" rewrite, both zero-LLM-default-preserving, off by default, and gated on a recall eval before default-on |
+| Paper-backed pages | **Hindsight** (Vectorize) | Living mental models; hybrid retrieval with temporal filters; an ACL system paper; a coding-agent package that hooks 16+ agents, ingests git history, and shares one bank per repo; reranker on by default | Postgres/pgvector-primary; needs an LLM (local via Ollama/llama.cpp, or a Claude/ChatGPT/Copilot subscription); markdown is a one-way mirror of the database. ai-memory ships belief-strength `confidence` and opt-in Dream. [ACL system paper](https://aclanthology.org/2026.acl-demo.27/) |
 | Fact-row store with hook capture | doobidoo/mcp-memory-service | SQLite(+vec), local ONNX, hook capture, typed edges, published numbers | Stores fact rows where ai-memory stores wiki **pages** |
 | Platform-native | Claude Code auto-memory | Zero setup, on by default | Machine-local, **no sync**, single-agent, repo-scoped, no tool-lifecycle capture, no team |
 | **File-first wiki (ai-memory)** | ai-memory, basic-memory, OKF | Human-editable markdown truth + derived index; cross-agent; zero-LLM default; multi-user | No local reranker yet; LLM-optional means no VLM fact-extraction sophistication |
@@ -287,7 +287,9 @@ ships something ai-memory does not, it is named.
   search) and typed edges in one binary, without standing up a graph
   database. You give up true world-time validity, graph queries, custom
   entity/edge types, and hosted Zep's Context MCP server with per-user OIDC
-  sign-in and a write kill switch.
+  sign-in and a write kill switch. For a policy learned today that takes
+  effect next month, `as_of` tracks when the wiki learned it. Graphiti can
+  also query when the policy takes effect. [Zep's timestamp reference](https://help.getzep.com/v4/searching-the-graph)
 - **From Cognee:** you gain git-versioned markdown as the source of truth
   (Cognee keeps memory in SQLite + LanceDB + Kuzu files), the same memory
   under 20+ harnesses, claim-once handoffs, cross-project messaging, and
@@ -299,7 +301,10 @@ ships something ai-memory does not, it is named.
   inside the harness and ships its own (Letta Code, with Letta Cloud as the
   default backend), while ai-memory sits under the harness you already use,
   zero-LLM by default and self-hosted. You give up Letta's "dreaming"
-  subagents and an agent that edits its own memory.
+  subagents and an agent that edits its own memory. Letta evaluates cleanup
+  by replaying scenarios on original and curated profiles. This is a model
+  for a future paired curation test using ai-memory's offline coding corpus.
+  [Letta's production evaluation](https://www.letta.com/blog/evaluating-memory-in-production-agents/)
 - **From Claude Code's built-in memory:** the same "remember my project"
   convenience, but synced across machines and agents, searchable, usable by a
   team, and capturing tool lifecycle, where the built-in memory is a per-laptop `MEMORY.md`.

@@ -159,6 +159,7 @@ struct ThresholdMetrics {
     supported: usize,
     unsupported: usize,
     ambiguous_excluded: usize,
+    ambiguous_predicted_answerable: usize,
     predicted_answerable: usize,
     false_supported_rate: Option<f64>,
     false_abstention_rate: Option<f64>,
@@ -546,41 +547,39 @@ fn percentile(values: &[u128], quantile: f64) -> Option<u128> {
 }
 
 fn threshold_sweep(cases: &[CaseResult]) -> Vec<ThresholdMetrics> {
+    let supported = cases
+        .iter()
+        .filter(|case| case.expected_verdict == Verdict::Answerable)
+        .count();
+    let unsupported = cases
+        .iter()
+        .filter(|case| case.expected_verdict == Verdict::Unanswerable)
+        .count();
+    let ambiguous_excluded = cases.len() - supported - unsupported;
     DEFAULT_THRESHOLDS
         .into_iter()
         .map(|threshold| {
-            let supported = cases
-                .iter()
-                .filter(|case| case.expected_verdict == Verdict::Answerable)
-                .count();
-            let unsupported = cases
-                .iter()
-                .filter(|case| case.expected_verdict == Verdict::Unanswerable)
-                .count();
-            let ambiguous_excluded = cases.len() - supported - unsupported;
-            let predicted_answerable = cases
-                .iter()
-                .filter(|case| case.signals.lexical_coverage >= threshold)
-                .count();
-            let false_supported = cases
-                .iter()
-                .filter(|case| {
-                    case.expected_verdict == Verdict::Unanswerable
-                        && case.signals.lexical_coverage >= threshold
-                })
-                .count();
-            let false_abstained = cases
-                .iter()
-                .filter(|case| {
-                    case.expected_verdict == Verdict::Answerable
-                        && case.signals.lexical_coverage < threshold
-                })
-                .count();
+            let mut false_supported = 0;
+            let mut false_abstained = 0;
+            let mut ambiguous_predicted_answerable = 0;
+            for case in cases {
+                let answerable = case.signals.lexical_coverage >= threshold;
+                match case.expected_verdict {
+                    Verdict::Answerable => false_abstained += usize::from(!answerable),
+                    Verdict::Unanswerable => false_supported += usize::from(answerable),
+                    Verdict::Conflicting | Verdict::Partial => {
+                        ambiguous_predicted_answerable += usize::from(answerable);
+                    }
+                }
+            }
+            let predicted_answerable =
+                supported - false_abstained + false_supported + ambiguous_predicted_answerable;
             ThresholdMetrics {
                 threshold,
                 supported,
                 unsupported,
                 ambiguous_excluded,
+                ambiguous_predicted_answerable,
                 predicted_answerable,
                 false_supported_rate: ratio(false_supported, unsupported),
                 false_abstention_rate: ratio(false_abstained, supported),
@@ -613,15 +612,18 @@ fn report_markdown(report: &Report) -> String {
             report.qa_latency_p95_ms.unwrap_or_default(),
         ));
     }
-    markdown.push_str("| lexical threshold | coverage | FSR | FAR | ambiguous excluded |\n");
+    markdown.push_str(
+        "| lexical threshold | coverage | FSR | FAR | ambiguous predicted answerable |\n",
+    );
     markdown.push_str("|---:|---:|---:|---:|---:|\n");
     for row in &report.thresholds {
         markdown.push_str(&format!(
-            "| {:.1} | {:.3} | {} | {} | {} |\n",
+            "| {:.1} | {:.3} | {} | {} | {}/{} |\n",
             row.threshold,
             row.coverage,
             metric(row.false_supported_rate),
             metric(row.false_abstention_rate),
+            row.ambiguous_predicted_answerable,
             row.ambiguous_excluded,
         ));
     }
@@ -723,6 +725,11 @@ mod tests {
         assert!(sweep.iter().all(|row| row.ambiguous_excluded == 1));
         assert!(sweep.iter().all(|row| row.false_supported_rate.is_some()));
         assert!(sweep.iter().all(|row| row.false_abstention_rate.is_some()));
+        assert_eq!(sweep[0].ambiguous_predicted_answerable, 1);
+        assert_eq!(sweep[0].predicted_answerable, 3);
+        let strict = sweep.last().unwrap();
+        assert_eq!(strict.ambiguous_predicted_answerable, 0);
+        assert_eq!(strict.predicted_answerable, 1);
 
         let only_partial = vec![cases[2].clone()];
         assert!(

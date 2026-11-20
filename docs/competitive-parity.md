@@ -129,6 +129,21 @@ next evidence gap is reproducible end-to-end QA.
 | Belief-strength consolidation | Hindsight / mcp-memory-service | **SHIPPED, off by default (parity of mechanism, unproven)** | 2.4 (#815) computes a read-time, zero-LLM `confidence` over `page_evidence` (distinct-session breadth, recency, live `contradicts`, capped `[0,0.95]`), exposed inertly in `explain`/`status`; foldable into ranking authority behind a **default-0.0, R2-gated** weight. Our improvement over Hindsight's documented **entrenchment** failure: breadth-not-raw-count weighting, recency shading, a confidence cap, and **supersession always wins** regardless of evidence. Not yet default-on; the R2 run on the zero-LLM corpus measured 0.000, because only consolidation writes the evidence it reads |
 | LLM merge/rewrite "dream" pass | Hindsight (Dreamer) / Supermemory ("dreaming") | **SHIPPED, opt-in/off (parity of mechanism, unproven)** | 2.4 (#816) rewrites cold clusters into one page via the gated `apply_batch` path, `dry_run` first, JSON-schema output; **never deletes a source** (superseded with a merge-note stub, `restore-page` recovers), off by default, provider-less stores keep the zero-LLM A3 path. Off until an R2 quality delta is shown |
 | bi-temporal-lite | Zep/Graphiti | **BEHIND by design** | Ingestion-time only; world-time validity deferred (because dating facts needs an LLM and breaks the zero-LLM path) |
+| Paired evaluation of memory cleanup | Letta / Anthropic | **GAP** | Letta compares task outcomes on original and cleaned profiles. Anthropic counts source facts that survive wiki edits. ai-memory's offline retrieval A/B and literal-fidelity checks cover components. A paired pre/post-Dream task replay still needs matching store snapshots, evidence labels, and rollback checks. [Letta](https://www.letta.com/blog/evaluating-memory-in-production-agents/), [Anthropic](https://www.anthropic.com/research/components-of-agent-memory) |
+
+### Evaluation choices for the local fork
+
+Keep `as_of` anchored to ingestion time for audit reads. Test source-supplied
+effective dates separately before extending the schema. Graphiti's split
+between ingestion and world-time validity is a reference for that test.
+[Zep timestamp reference](https://help.getzep.com/v4/searching-the-graph)
+
+Keep the same evidence budget and answerer when comparing retrieval stacks.
+Published Hindsight numbers include answer generation. For ai-memory,
+retrieval coverage, unsupported answers, and task outcomes need independent
+measurements. Use the bundled coding corpus as a regression gate and a
+held-out corpus for ranking decisions. [Hindsight ACL paper](https://aclanthology.org/2026.acl-demo.27/),
+[LongMemEval-V2 protocol](https://github.com/xiaowu0162/LongMemEval-V2/)
 
 ## Prior gaps and current status
 

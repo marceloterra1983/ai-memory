@@ -142,6 +142,10 @@ fn coding_corpus_replays_offline_with_identical_ab_results() {
             "--dataset-variant",
             "coding-v1",
             "--candidate",
+            "--server-env",
+            "AI_MEMORY_CAPTURE_ASSISTANT=true",
+            "--query-arg",
+            "pin_first=false",
             "--concurrency",
             "1",
         ])
@@ -160,6 +164,7 @@ fn coding_corpus_replays_offline_with_identical_ab_results() {
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(run_dir.join("report.json")).unwrap()).unwrap();
     assert_eq!(report["baseline"]["dataset"], "coding_v1");
+    assert_eq!(report["baseline"]["config"], report["candidate"]["config"]);
     for question in report["baseline"]["per_question"].as_array().unwrap() {
         assert_eq!(
             question["recall_at"]["10"], 1.0,
@@ -176,4 +181,28 @@ fn coding_corpus_replays_offline_with_identical_ab_results() {
     }
     assert_eq!(report["delta"]["context_tokens_mean"], 0.0);
     assert_eq!(report["delta"]["context_tokens_median"], 0.0);
+}
+
+#[test]
+fn empty_retrieval_selection_does_not_write_a_report() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let out = tempfile::tempdir().unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ai-memory-eval"))
+        .current_dir(repo_root)
+        .args([
+            "retrieval",
+            "--dataset-variant",
+            "coding-v1",
+            "--engine",
+            "grep",
+            "--sample",
+            "0",
+        ])
+        .arg("--out")
+        .arg(out.path())
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("no scorable questions"));
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
 }

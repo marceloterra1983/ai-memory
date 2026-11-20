@@ -40,7 +40,9 @@ and belief aggregation only where the fixture actually supplies belief.
 
 The report sweeps lexical-coverage thresholds from 0.0 through 1.0 and records
 coverage, false-supported rate (FSR), and false-abstention rate (FAR), including
-undefined denominators. It does not designate a calibrated threshold: the
+undefined denominators. The ambiguous column counts how many partial or
+conflicting cases the threshold admitted as answerable, out of the total
+excluded from FSR and FAR. It does not designate a calibrated threshold: the
 clean-room corpus is a regression probe, not a representative sample.
 `answerable` maps to supported and `unanswerable` to unsupported;
 `conflicting` and `partial` remain separate slices and are excluded from both
@@ -486,7 +488,11 @@ knobs like `pin_first` / `include_superseded` can be A/B'd;
 `query`/`workspace`/`project`/`limit` are reserved). Each has a
 `--candidate-*` twin (`--candidate-embeddings`, `--candidate-reranker`,
 `--candidate-server-env`, `--candidate-query-arg`); a candidate knob left
-unset mirrors the baseline.
+unset mirrors the baseline. Use `--candidate-reranker=false` to turn it
+off when the baseline uses `--reranker`. Supplying candidate environment
+variables or query arguments replaces the corresponding baseline list.
+A selection with no scorable questions exits with an error before writing
+a report. Use `abstention` to evaluate questions with no supporting evidence.
 
 ```bash
 # Determinism check — baseline == candidate ⇒ accuracy/context delta = 0:
@@ -520,6 +526,10 @@ run directory or the file), pairs questions by id, and prints:
   at the largest k and its latency on each side, widest moves and losses
   first;
 - per question type, how many moved earlier and how many later.
+
+Use matching `--ks` values for the baseline, candidate, and optional FTS
+run. The comparison requires at least one shared question and checks the
+measured cutoffs in each row before reporting any gain or loss.
 
 ```bash
 cargo run --release -p ai-memory-eval -- retrieval-compare \

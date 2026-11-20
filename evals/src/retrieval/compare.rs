@@ -38,10 +38,8 @@ pub fn run(args: CompareArgs) -> Result<()> {
     let baseline = load(&args.baseline)?;
     let candidate = load(&args.candidate)?;
     let fts = args.fts.as_deref().map(load).transpose()?;
-    print!(
-        "{}",
-        to_markdown(&compare(&baseline, &candidate, fts.as_ref()))
-    );
+    let comparison = compare(&baseline, &candidate, fts.as_ref())?;
+    print!("{}", to_markdown(&comparison));
     Ok(())
 }
 
@@ -159,7 +157,28 @@ fn compare(
     baseline: &SavedReport,
     candidate: &SavedReport,
     fts: Option<&SavedReport>,
-) -> Comparison {
+) -> Result<Comparison> {
+    let ks: Vec<usize> = baseline
+        .per_question
+        .first()
+        .map(|question| question.hit_at.keys().copied().collect())
+        .unwrap_or_default();
+    let Some(&max_k) = ks.last() else {
+        bail!("the baseline report has no measured cutoffs");
+    };
+    for (side, report) in [("baseline", baseline), ("candidate", candidate)]
+        .into_iter()
+        .chain(fts.map(|report| ("FTS", report)))
+    {
+        for question in &report.per_question {
+            if question.hit_at.keys().ne(&ks) || question.recall_at.keys().ne(&ks) {
+                bail!(
+                    "{side} question {} has different measured cutoffs; expected {ks:?}. Rerun with matching --ks values",
+                    question.question_id
+                );
+            }
+        }
+    }
     let by_id = |report: &SavedReport| -> BTreeMap<String, usize> {
         report
             .per_question
@@ -170,16 +189,7 @@ fn compare(
     };
     let (base_ids, cand_ids) = (by_id(baseline), by_id(candidate));
     let fts_ids = fts.map(by_id);
-    let mut ks: Vec<usize> = baseline
-        .per_question
-        .iter()
-        .chain(&candidate.per_question)
-        .flat_map(|question| question.hit_at.keys().copied())
-        .collect();
-    ks.sort_unstable();
-    ks.dedup();
     let position = |hit: Option<usize>| hit.map_or(ks.len(), |k| ks.partition_point(|c| *c < k));
-    let max_k = ks.last().copied().unwrap_or_default();
 
     let pairs: Vec<(&SavedQuestion, &SavedQuestion)> = baseline
         .per_question
@@ -187,17 +197,13 @@ fn compare(
         .filter_map(|b| Some((b, &candidate.per_question[*cand_ids.get(&b.question_id)?])))
         .collect();
     let paired = pairs.len();
-    let mean = |values: &mut dyn Iterator<Item = f64>| {
-        if paired == 0 {
-            0.0
-        } else {
-            values.sum::<f64>() / paired as f64
-        }
-    };
-    let hit = |question: &SavedQuestion, k: usize| question.hit_at.get(&k).copied().unwrap_or(0.0);
+    if paired == 0 {
+        bail!("the reports have no paired questions");
+    }
+    let mean = |values: &mut dyn Iterator<Item = f64>| values.sum::<f64>() / paired as f64;
+    let hit = |question: &SavedQuestion, k: usize| question.hit_at[&k];
     let hits = |question: &SavedQuestion, k: usize| hit(question, k) > 0.0;
-    let recall =
-        |question: &SavedQuestion, k: usize| question.recall_at.get(&k).copied().unwrap_or(0.0);
+    let recall = |question: &SavedQuestion, k: usize| question.recall_at[&k];
     let cutoffs = ks
         .iter()
         .map(|&k| CutoffRow {
@@ -272,7 +278,7 @@ fn compare(
             .map(|question| question.question_id.clone())
             .collect()
     };
-    Comparison {
+    Ok(Comparison {
         baseline: label(baseline),
         candidate: label(candidate),
         only_baseline: unpaired(baseline, &cand_ids),
@@ -283,7 +289,7 @@ fn compare(
         moved,
         by_type,
         fts_checked: fts.is_some(),
-    }
+    })
 }
 
 fn cutoff(hit: Option<usize>) -> String {
@@ -436,7 +442,7 @@ mod tests {
                 question("q4", "temporal", None),
             ],
         );
-        let c = compare(&baseline, &candidate, None);
+        let c = compare(&baseline, &candidate, None).unwrap();
 
         assert_eq!(c.ks, vec![1, 3, 5, 10]);
         assert_eq!(c.paired, 4);
@@ -510,7 +516,7 @@ mod tests {
         differing["retrieved_sessions"] = serde_json::json!(8);
         let fts = report("b", vec![matching, differing]);
 
-        let c = compare(&baseline, &candidate, Some(&fts));
+        let c = compare(&baseline, &candidate, Some(&fts)).unwrap();
         let marks: Vec<(&str, Option<bool>)> = c
             .moved
             .iter()
@@ -521,9 +527,37 @@ mod tests {
         assert!(md.contains("candidate row = FTS row |"));
         assert!(md.contains("| q1 | user | @5 → @10 | 1 | 1.00 → 1.00 | 120 → 120 | yes |"));
         assert!(
-            compare(&baseline, &candidate, None).moved[0]
+            compare(&baseline, &candidate, None).unwrap().moved[0]
                 .same_as_fts
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn saved_reports_require_matching_cutoffs_and_at_least_one_pair() {
+        let full = report("a", vec![question("q1", "user", Some(5))]);
+        let mut partial = report("b", vec![question("q1", "user", Some(5))]);
+        partial.per_question[0].hit_at.remove(&5);
+        partial.per_question[0].recall_at.remove(&5);
+        assert!(
+            compare(&full, &partial, None)
+                .unwrap_err()
+                .to_string()
+                .contains("candidate question q1 has different measured cutoffs")
+        );
+        assert!(
+            compare(&full, &full, Some(&partial))
+                .unwrap_err()
+                .to_string()
+                .contains("FTS question q1 has different measured cutoffs")
+        );
+
+        let unrelated = report("b", vec![question("q2", "user", Some(5))]);
+        assert!(
+            compare(&full, &unrelated, None)
+                .unwrap_err()
+                .to_string()
+                .contains("no paired questions")
         );
     }
 

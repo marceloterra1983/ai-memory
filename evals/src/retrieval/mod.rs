@@ -180,16 +180,18 @@ pub struct RetrievalArgs {
     #[arg(long)]
     candidate_embeddings: Option<String>,
 
-    /// Turn the reranker on for the candidate.
-    #[arg(long)]
-    candidate_reranker: bool,
+    /// Candidate reranker setting. Defaults to `--reranker`; use
+    /// `--candidate-reranker=false` to turn it off.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    candidate_reranker: Option<bool>,
 
     /// Extra server env for the candidate, `KEY=VALUE`, repeatable.
+    /// Replaces `--server-env` when supplied.
     #[arg(long = "candidate-server-env", value_name = "KEY=VALUE")]
     candidate_server_env: Vec<String>,
 
     /// Extra `memory_query` argument for the candidate, `KEY=JSON`,
-    /// repeatable.
+    /// repeatable. Replaces `--query-arg` when supplied.
     #[arg(long = "candidate-query-arg", value_name = "KEY=JSON")]
     candidate_query_arg: Vec<String>,
 
@@ -211,7 +213,7 @@ impl RetrievalArgs {
     fn ab_mode(&self) -> bool {
         self.candidate
             || self.candidate_embeddings.is_some()
-            || self.candidate_reranker
+            || self.candidate_reranker.is_some()
             || !self.candidate_server_env.is_empty()
             || !self.candidate_query_arg.is_empty()
             || self.candidate_ingest.is_some()
@@ -412,19 +414,21 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
     if let Some(n) = args.sample {
         questions.truncate(n);
     }
-    let abstention: Vec<Question> = questions
-        .iter()
-        .filter(|q| q.is_abstention())
-        .cloned()
-        .collect();
+    let selected = questions.len();
     questions.retain(|q| !q.is_abstention());
+    let abstention_n = selected - questions.len();
     if let Some(per_type) = args.stratify {
         questions = dataset::stratify(questions, per_type);
+    }
+    if questions.is_empty() {
+        bail!(
+            "no scorable questions after applying question filters ({abstention_n} abstention questions excluded)"
+        );
     }
     tracing::info!(
         loaded = total_loaded,
         scored = questions.len(),
-        abstention_excluded = abstention.len(),
+        abstention_excluded = abstention_n,
         "dataset ready"
     );
 
@@ -439,7 +443,7 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
         if args.ab_mode() || args.reachability || args.qa.enabled {
             bail!("--engine grep runs alone: no candidate, --reachability, or --qa");
         }
-        let report = run_grep(&args, variant, &questions, abstention.len(), &commit);
+        let report = run_grep(&args, variant, &questions, abstention_n, &commit);
         std::fs::create_dir_all(&run_dir)?;
         std::fs::write(
             run_dir.join("report.json"),
@@ -469,16 +473,22 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
         args.date_prefix,
     )?;
     let mut candidate = if args.ab_mode() {
-        let embeddings = args
-            .candidate_embeddings
-            .clone()
-            .unwrap_or_else(|| args.embeddings.clone());
         Some(Knobs::parse(
             "candidate",
-            &embeddings,
-            args.candidate_reranker,
-            &args.candidate_server_env,
-            &args.candidate_query_arg,
+            args.candidate_embeddings
+                .as_deref()
+                .unwrap_or(&args.embeddings),
+            args.candidate_reranker.unwrap_or(args.reranker),
+            if args.candidate_server_env.is_empty() {
+                &args.server_env
+            } else {
+                &args.candidate_server_env
+            },
+            if args.candidate_query_arg.is_empty() {
+                &args.query_arg
+            } else {
+                &args.candidate_query_arg
+            },
             args.candidate_ingest.unwrap_or(args.ingest),
             args.candidate_date_prefix.unwrap_or(args.date_prefix),
         )?)
@@ -537,7 +547,6 @@ pub async fn run(args: RetrievalArgs) -> Result<()> {
         None
     };
 
-    let abstention_n = abstention.len();
     let run = RunContext {
         args: &args,
         variant,
@@ -846,6 +855,23 @@ fn run_grep(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
+
+    #[test]
+    fn candidate_reranker_supports_inheritance_and_explicit_overrides() {
+        for (flag, expected) in [
+            ("--candidate", None),
+            ("--candidate-reranker", Some(true)),
+            ("--candidate-reranker=false", Some(false)),
+        ] {
+            let cli = crate::Cli::try_parse_from(["ai-memory-eval", "retrieval", flag]).unwrap();
+            let crate::Command::Retrieval(args) = cli.command else {
+                panic!("expected retrieval arguments");
+            };
+            assert_eq!(args.candidate_reranker, expected);
+            assert!(args.ab_mode());
+        }
+    }
 
     #[test]
     fn query_args_parse_json_and_string_and_reject_reserved() {

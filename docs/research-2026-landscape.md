@@ -754,6 +754,29 @@ LangMem and Honcho publish no GitHub *releases* (PyPI/tag-only versioning);
 and LiquidLM is **closed-source**, so it has no repo signal at all; its only
 public, open artifact is the MIT npm client `@liquidlm/cli` (stable v0.1.6).
 
+### Evaluation refresh, 2026-11-20
+
+- **Hindsight.** Its ACL system paper describes parallel keyword, vector,
+  graph, and temporal retrieval on PostgreSQL/pgvector. It reports 83.6%
+  LongMemEval accuracy with a 20B model and 91.4% with Gemini 3 Pro. Those
+  outcomes include answer generation. Compare retrievers with the same
+  answerer, grader, evidence budget, and test subset.
+  [ACL paper](https://aclanthology.org/2026.acl-demo.27/)
+- **Letta and Anthropic.** Letta replays tasks against original and curated
+  production memory profiles in a private benchmark. Anthropic measures
+  whether source facts survive wiki editing and compares wiki navigation
+  with direct source search. For a local replay, seed an identical snapshot
+  on both sides, curate one, then check source retention, task accuracy,
+  and the size of the injected context. Include a direct-search control.
+  [Letta](https://www.letta.com/blog/evaluating-memory-in-production-agents/),
+  [Anthropic](https://www.anthropic.com/research/components-of-agent-memory)
+- **Zep/Graphiti.** The API exposes observed/invalidated-at timestamps and
+  separate world-time validity. Add a replay fixture where a decision is
+  recorded before it takes effect and a correction is recorded late.
+  Run the existing ingestion-time `as_of` check and assess the need for
+  a distinct effective-date field populated from explicit evidence.
+  [Zep timestamp reference](https://help.getzep.com/v4/searching-the-graph)
+
 ## 4. Research developments worth knowing
 
 - **"Rethinking How to Remember: Beyond Atomic Facts in Lifelong LLM
@@ -915,6 +938,12 @@ benchmarks as a ranking; chasing agentmemory's tool-count
 
 ## 6. Sources
 
+- November evaluation refresh: [Hindsight ACL system paper](https://aclanthology.org/2026.acl-demo.27/),
+  [Letta production replay](https://www.letta.com/blog/evaluating-memory-in-production-agents/),
+  [Anthropic memory experiments](https://www.anthropic.com/research/components-of-agent-memory),
+  [Zep timestamp reference](https://help.getzep.com/v4/searching-the-graph),
+  [LongMemEval-V2 code and protocol](https://github.com/xiaowu0162/LongMemEval-V2/),
+  and [MemoryAgentBench code and protocol](https://github.com/HUST-AI-HYZ/MemoryAgentBench).
 - OKF: Google Cloud blog "How the Open Knowledge Format can improve data
   sharing"; document360.com and mindstudio.ai explainers (spec v0.1,
   2026-06-12).

@@ -458,8 +458,8 @@ fn build_digest(
     let mut prompt_titles = prompts.first;
     prompt_titles.extend(prompts.last);
 
-    // A title behind a preamble or reminder has to come from the body. The
-    // scan stops once the title is settled.
+    // A title behind a preamble or reminder has to come from the body, even
+    // when capture had to fall back to the kind name. Stop once it is settled.
     let mut title_scan = PromptTitleScan::default();
     let mut prompt_bodies_read = 0;
     snapshot.scan_prompts(
@@ -633,14 +633,25 @@ impl PromptTitleScan {
     /// Feed the next prompt in capture order. Returns `false` once the title
     /// is found: later prompts cannot change it.
     fn push(&mut self, title: &str, body: &str) -> bool {
-        let preamble = title.trim() == SUBAGENT_PROMPT_PREAMBLE;
-        if preamble || title.trim_start().starts_with(SYSTEM_REMINDER_OPEN) {
+        let trimmed_title = title.trim();
+        let preamble = trimmed_title == SUBAGENT_PROMPT_PREAMBLE;
+        if preamble
+            || trimmed_title.starts_with(SYSTEM_REMINDER_OPEN)
+            || trimmed_title.is_empty()
+            || trimmed_title == ObservationKind::UserPrompt.as_str()
+        {
             self.rejected_subagent_preamble |= preamble;
-            // What follows the reminders is judged as a bare prompt would be.
-            self.found = strip_leading_system_reminders(body)
-                .filter(|rest| !looks_like_markup_block(rest))
-                .and_then(title_from_prompt_body);
-            return self.found.is_none();
+            let Some(text) = strip_leading_system_reminders(body) else {
+                return true;
+            };
+            let removed_reminders = text.len() < body.len();
+            if preamble || removed_reminders {
+                // A bare subagent body can include IDE lines before the task.
+                if !removed_reminders || !looks_like_markup_block(text) {
+                    self.found = title_from_prompt_body(text);
+                }
+                return self.found.is_none();
+            }
         }
         if !title.is_empty() && !looks_like_scaffolding(title) {
             self.found = Some(title.to_string());
@@ -1477,6 +1488,42 @@ mod tests {
         );
 
         assert_eq!(page.title, "faça X");
+    }
+
+    #[test]
+    fn reminder_review_subagent_title_skips_an_ide_line() {
+        let observations = [obs_with_body(
+            ObservationKind::UserPrompt,
+            SUBAGENT_PROMPT_PREAMBLE,
+            "<ide_opened_file>fixture</ide_opened_file>\nReview the diff",
+        )];
+
+        assert_eq!(
+            derive_title(&observations, test_session_id()),
+            "Review the diff"
+        );
+    }
+
+    #[test]
+    fn reminder_review_capture_fallback_title_uses_prompt_after_reminders() {
+        let cases = [
+            (
+                "user-prompt",
+                "\n<system-reminder>fixture</system-reminder>\nfaça X",
+                "faça X",
+            ),
+            (
+                "",
+                "\u{2003}\n<system-reminder>fixture</system-reminder>\nfaça X",
+                "faça X",
+            ),
+            ("user-prompt", "\nplain control", "user-prompt"),
+        ];
+        let titles = cases.map(|(title, body, _)| {
+            let observations = [obs_with_body(ObservationKind::UserPrompt, title, body)];
+            derive_title(&observations, test_session_id())
+        });
+        assert_eq!(titles, cases.map(|(_, _, expected)| expected));
     }
 
     #[test]

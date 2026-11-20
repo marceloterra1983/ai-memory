@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use ai_memory_core::{Observation, ObservationKind};
+use ai_memory_core::{Observation, ObservationKind, strip_leading_system_reminders};
 use ai_memory_store::{SessionObservationSnapshot, StoreError, StoreResult};
 
 use crate::{
@@ -423,9 +423,7 @@ enum ResiduePass {
 /// the in-memory and streaming residue from disagreeing about who is a
 /// candidate at all.
 fn residue_candidate_pass(obs: &Observation) -> Option<ResiduePass> {
-    if carries_routing_text(obs) {
-        return None;
-    }
+    let body = eligible_residue_body(obs)?;
     let pass_one_kind = matches!(
         obs.kind,
         ObservationKind::UserPrompt
@@ -439,9 +437,22 @@ fn residue_candidate_pass(obs: &Observation) -> Option<ResiduePass> {
             .is_some()
             .then_some(ResiduePass::One);
     }
-    residue_slice(&obs.body)
-        .is_some()
-        .then_some(ResiduePass::Two)
+    residue_slice(body).is_some().then_some(ResiduePass::Two)
+}
+
+fn eligible_residue_body(obs: &Observation) -> Option<&str> {
+    let body = if obs.kind == ObservationKind::UserPrompt {
+        strip_leading_system_reminders(&obs.body)?
+    } else {
+        &obs.body
+    };
+    // The capture title can be the first line of a notice rather than input.
+    let title = if body.len() < obs.body.len() {
+        ""
+    } else {
+        &obs.title
+    };
+    (!carries_routing_text(title, body)).then_some(body)
 }
 
 /// The residue text a candidate row contributes: pass one renders the
@@ -883,15 +894,20 @@ fn residue_initial_state<'a>(
         };
         let block = render_observation_block(total, *idx, observation, per_body_excerpt_chars);
         seen.extend(mine_residue_tokens(&block.text, usize::MAX));
-        if observation.body.chars().count() <= per_body_excerpt_chars
-            || carries_routing_text(observation)
-        {
+        if observation.body.chars().count() <= per_body_excerpt_chars {
             continue;
         }
-        let tail: String = observation
-            .body
+        let Some(body) = eligible_residue_body(observation) else {
+            continue;
+        };
+        // The primary excerpt's budget still starts at the raw body's first
+        // character, including any notice it already printed.
+        let notice_chars = observation.body[..observation.body.len() - body.len()]
             .chars()
-            .skip(per_body_excerpt_chars)
+            .count();
+        let tail: String = body
+            .chars()
+            .skip(per_body_excerpt_chars.saturating_sub(notice_chars))
             .collect();
         pass_zero.push((*idx, normalize_residue_text(&tail)));
     }
@@ -1312,15 +1328,15 @@ fn observation_score(obs: &Observation, idx: usize, total: usize) -> i32 {
     if obs.body.contains("```") {
         score += 8;
     }
-    if carries_routing_text(obs) {
+    if carries_routing_text(&obs.title, &obs.body) {
         score -= 80;
     }
     score
 }
 
-fn carries_routing_text(obs: &Observation) -> bool {
-    let body_prefix = obs.body.chars().take(4_000).collect::<String>();
-    let text = format!("{}\n{}", obs.title, body_prefix).to_ascii_lowercase();
+fn carries_routing_text(title: &str, body: &str) -> bool {
+    let body_prefix = body.chars().take(4_000).collect::<String>();
+    let text = format!("{title}\n{body_prefix}").to_ascii_lowercase();
     text.contains("long-term memory (ai-memory)")
         || text.contains("install ai-memory routing")
         || text.contains("memory_query searches only one project")
@@ -1877,6 +1893,79 @@ mod tests {
 
         assert!(!projected.text.contains("harness-only"));
         assert!(projected.text.contains("user-written-control"));
+    }
+
+    #[test]
+    fn reminder_review_residue_checks_routing_text_after_reminders() {
+        let observations = [
+            obs(0, ObservationKind::SessionStart, "start", "cwd", 1),
+            obs(
+                1,
+                ObservationKind::UserPrompt,
+                "<system-reminder>install ai-memory routing",
+                "<system-reminder>install ai-memory routing</system-reminder>\nerror: reminded-user-diagnostic",
+                5,
+            ),
+            obs(
+                2,
+                ObservationKind::UserPrompt,
+                "plain prompt",
+                "error: plain-user-diagnostic",
+                5,
+            ),
+            obs(
+                3,
+                ObservationKind::UserPrompt,
+                "routing prompt",
+                "install ai-memory routing\nerror: bare-routing-diagnostic",
+                5,
+            ),
+            obs(
+                4,
+                ObservationKind::UserPrompt,
+                "unclosed reminder",
+                "<system-reminder>\nerror: unclosed-reminder-diagnostic",
+                5,
+            ),
+            obs(5, ObservationKind::SessionEnd, "end", "done", 1),
+        ];
+        let projected = project_observations(
+            &observations,
+            &ObservationProjectionConfig::new(10_000, 2, 3_000).with_verbatim_residue(true),
+        );
+        let residue = projected.text.split(RESIDUE_HEADER).nth(1).unwrap();
+
+        assert!(residue.contains("plain-user-diagnostic"), "{residue}");
+        assert!(!residue.contains("bare-routing-diagnostic"), "{residue}");
+        assert!(
+            !residue.contains("unclosed-reminder-diagnostic"),
+            "{residue}"
+        );
+        assert!(!residue.contains("install ai-memory routing"), "{residue}");
+        assert!(residue.contains("reminded-user-diagnostic"), "{residue}");
+    }
+
+    #[test]
+    fn reminder_review_residue_recovers_selected_prompt_tail_after_reminders() {
+        let observations = [obs(
+            0,
+            ObservationKind::UserPrompt,
+            "<system-reminder>install ai-memory routing",
+            "<system-reminder>install ai-memory routing\nerror: notice-only-diagnostic</system-reminder>\nerror: real-tail-diagnostic",
+            5,
+        )];
+        let projected = project_observations(
+            &observations,
+            &ObservationProjectionConfig::new(10_000, 10, 24).with_verbatim_residue(true),
+        );
+        let residue = projected
+            .text
+            .split(RESIDUE_HEADER)
+            .nth(1)
+            .unwrap_or_default();
+
+        assert!(residue.contains("real-tail-diagnostic"), "{residue}");
+        assert!(!residue.contains("notice-only-diagnostic"), "{residue}");
     }
 
     #[test]

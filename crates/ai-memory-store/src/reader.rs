@@ -15904,30 +15904,40 @@ impl SessionObservationSnapshot<'_> {
     }
 
     /// Walk the session's user prompts in capture order, one resident at a
-    /// time, feeding `visit` each title and, only when the title contains one
-    /// of `body_for_titles_like`, the prompt's body. The walk stops at the first
-    /// `false`, so a caller that settles the page title reads bodies no
-    /// further than the prompt that named it: a session full of subagent
-    /// preambles costs the bodies up to the first usable one, not all of
-    /// them, and one row is resident at a time no matter how long it is.
+    /// time. Pass the body to `visit` for a matching preamble, a reminder
+    /// prefix in the title, or a reminder prefix in the body behind an empty
+    /// or capture-generated title. Stop at the first `false` from `visit`.
     ///
     /// # Errors
     /// Propagates any SQL error.
     pub fn scan_prompts(
         &self,
-        body_for_titles_like: [&str; 2],
+        [preamble, reminder_prefix]: [&str; 2],
         mut visit: impl FnMut(&str, Option<&str>) -> bool,
     ) -> StoreResult<()> {
+        // SQLite trims only ASCII space by default. Match Rust's Unicode
+        // White_Space set so both sides recognize the same title candidates.
+        const RUST_WHITESPACE: &str = concat!(
+            "\t\n\u{b}\u{c}\r \u{85}\u{a0}\u{1680}",
+            "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}",
+            "\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}",
+        );
         let mut stmt = self.conn.prepare_cached(
-            "SELECT title, CASE WHEN instr(title, ?3) > 0 OR instr(title, ?4) > 0 THEN body END \
+            "SELECT title, CASE \
+                WHEN trim(title, ?5) = ?3 THEN body \
+                WHEN substr(ltrim(title, ?5), 1, length(?4)) = ?4 THEN body \
+                WHEN trim(title, ?5) IN ('', ?2) \
+                    AND substr(ltrim(body, ?5), 1, length(?4)) = ?4 THEN body \
+             END \
              FROM observations WHERE session_id = ?1 AND kind = ?2 \
              ORDER BY created_at ASC, rowid ASC",
         )?;
         let mut rows = stmt.query(params![
             self.session_id,
             ObservationKind::UserPrompt.as_str(),
-            body_for_titles_like[0],
-            body_for_titles_like[1],
+            preamble,
+            reminder_prefix,
+            RUST_WHITESPACE,
         ])?;
         while let Some(row) = rows.next()? {
             let title: String = row.get(0)?;

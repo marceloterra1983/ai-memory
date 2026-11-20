@@ -18,7 +18,7 @@ version in [`docs/changelog/`](docs/changelog/):
 ### Fixed
 
 - Kept the operator's own text when Claude Code prepends app notices to a prompt as `<system-reminder>` blocks: the post-compaction anchor and `/recap` used to drop the whole prompt, and now keep the text after the notices, without them.
-- Preserved the operator's text after leading `<system-reminder>` blocks in session titles, handoff prompts and open questions, the `ai-memory run` ledger for Claude Code and Grok, and the profile harvester.
+- Preserved the operator's text after leading `<system-reminder>` blocks in session titles, handoff prompts and open questions, the `ai-memory run` ledger for Claude Code and Grok, profile harvesting, interrupted-session recovery, and consolidation residue. Restored the `reload context` trigger for prompts with those notices.
 - Kept the executable's nearest checkout hook bundle primary with custom build directories such as `target-host/` and `build/`, including nested worktrees (`D1`, cross-review of `4b97ced0`).
 
 - Serialized startup `stale_after` file repairs with independent wiki writers through the shared page lock pool (`D2`, phase D review).

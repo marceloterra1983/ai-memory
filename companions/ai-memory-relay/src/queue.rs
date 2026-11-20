@@ -757,7 +757,8 @@ fn configure(
             }
             conn.execute_batch(
                 "PRAGMA journal_mode=WAL;\nPRAGMA synchronous=FULL;\nPRAGMA foreign_keys=ON;",
-            )?;
+            )
+            .map_err(sqlite_cause)?;
             Ok(())
         })();
         match attempt {
@@ -792,6 +793,15 @@ pub(crate) fn is_lock_contention(error: &anyhow::Error) -> bool {
         if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
 }
 
+fn sqlite_cause(error: rusqlite::Error) -> anyhow::Error {
+    // The SQLite message already includes the underlying cause. Keep the
+    // typed error for retry classification without repeating that cause.
+    match error {
+        rusqlite::Error::SqliteFailure(..) => anyhow::Error::msg(error),
+        _ => anyhow::Error::new(error),
+    }
+}
+
 /// Classify an existing file before touching it. Never mutates.
 fn classify(conn: &Connection, path: &Path) -> Result<DbState> {
     let refuse = |detail: String| -> anyhow::Error {
@@ -811,7 +821,7 @@ fn classify(conn: &Connection, path: &Path) -> Result<DbState> {
     );
     // A file that is not a SQLite database fails right here, before any write.
     let objects = objects.map_err(|e| {
-        let error = anyhow::Error::new(e);
+        let error = sqlite_cause(e);
         if is_lock_contention(&error) {
             error
         } else {
@@ -829,7 +839,7 @@ fn classify(conn: &Connection, path: &Path) -> Result<DbState> {
     })();
     let meta: HashMap<String, String> = rows
         .map_err(|e| {
-            let error = anyhow::Error::new(e);
+            let error = sqlite_cause(e);
             if is_lock_contention(&error) {
                 error
             } else {

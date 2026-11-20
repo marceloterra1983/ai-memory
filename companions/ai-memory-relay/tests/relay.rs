@@ -1792,7 +1792,14 @@ fn classification_read_failures_display_the_sqlite_cause_once_and_preserve_forei
         assert!(!queue_under_test::is_lock_contention(&error));
         let display = format!("{error:#}");
         assert!(display.contains("not a usable relay queue"), "{display}");
-        let cause = error.downcast_ref::<rusqlite::Error>().unwrap().to_string();
+        let sqlite = error.downcast_ref::<rusqlite::Error>().unwrap();
+        if malformed_file {
+            assert_eq!(
+                sqlite.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::NotADatabase)
+            );
+        }
+        let cause = sqlite.to_string();
         assert_eq!(display.matches(&cause).count(), 1, "{display}");
         assert!(std::fs::read(&path).unwrap() == before);
         for name in fsguard::SIDECARS {

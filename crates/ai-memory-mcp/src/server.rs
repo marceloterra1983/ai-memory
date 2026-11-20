@@ -12960,8 +12960,15 @@ mod tests {
                 "{label} must distinguish global search from project RRF explanation"
             );
         });
-        for prompt in [MEMORY_INSTRUCTIONS, ai_memory_core::SNIPPET_BODY] {
-            assert!(prompt.contains("effective_on") && prompt.contains("effective_validity"));
+        let installed = installed_ai_memory_prompt_surface();
+        for (label, prompt) in [
+            ("MCP handshake instructions", MEMORY_INSTRUCTIONS),
+            ("installed routing and managed skills", installed.as_str()),
+        ] {
+            assert!(
+                prompt.contains("effective_on") && prompt.contains("effective_validity"),
+                "{label} must document operational validity dates"
+            );
         }
 
         let (_tmp, _store, server, _ws, _pj) = setup_server().await;

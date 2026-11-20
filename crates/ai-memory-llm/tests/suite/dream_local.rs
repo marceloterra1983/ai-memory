@@ -140,6 +140,7 @@ async fn dream_wire_budget_rejects_cap_plus_one_before_admission() {
 fn dream_ignores_primary_provider_credentials_and_proxy_environment() {
     // Run the wire-level success control in a clean child: environment mutation
     // in the parallel parent test harness would race unrelated provider tests.
+    let tmp = tempfile::tempdir().unwrap();
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -147,7 +148,7 @@ fn dream_ignores_primary_provider_credentials_and_proxy_environment() {
             "--nocapture",
         ])
         .env_clear()
-        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap())
+        .env("TMPDIR", tmp.path())
         .env("OPENAI_API_KEY", "synthetic-primary-secret")
         .env("AI_MEMORY_LLM_API_KEY", "synthetic-primary-secret")
         .env("HTTP_PROXY", "http://127.0.0.1:1")

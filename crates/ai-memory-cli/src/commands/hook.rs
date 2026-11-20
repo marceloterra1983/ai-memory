@@ -1667,8 +1667,10 @@ where
     }
     // Read before any capture rewrite can drop the prompt text.
     let reload_requested = hook_event == HookEvent::UserPrompt
-        && ai_memory_hooks::user_prompt_text_for_agent(agent_kind, &json)
-            .is_some_and(|prompt| ai_memory_core::compaction_recap::is_reload_request(&prompt));
+        && ai_memory_hooks::user_prompt_text_for_agent(agent_kind, &json).is_some_and(|prompt| {
+            ai_memory_core::strip_leading_system_reminders(&prompt)
+                .is_some_and(ai_memory_core::compaction_recap::is_reload_request)
+        });
     // Antigravity's PreInvocation fires before every model call; only
     // invocation zero, the start of a user turn, is a boundary.
     let antigravity = antigravity_boundary(agent_kind, &args.event, &json);
@@ -11110,6 +11112,50 @@ mod tests {
         );
         assert!(recap[0].contains("agent=claude-code"), "{}", recap[0]);
         assert!(!recap[0].contains("budget="), "{}", recap[0]);
+    }
+
+    #[tokio::test]
+    async fn reminder_review_claude_reload_trigger_uses_the_operator_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cases = [
+            ("reload context", true),
+            (
+                "\n<system-reminder>synthetic notice</system-reminder>\nreload context",
+                true,
+            ),
+            (
+                "<system-reminder>reload context</system-reminder>\nreview the diff",
+                false,
+            ),
+            ("<system-reminder>synthetic notice\nreload context", false),
+        ];
+        let mut actual = Vec::new();
+        for (idx, (prompt, _)) in cases.iter().enumerate() {
+            let (base, mut requests) = serve_requests("200 OK", "RECAP-BODY").await;
+            let mut stdout = Vec::new();
+            run_with_payload_in_home(
+                Some(tmp.path().join(format!("data-{idx}"))),
+                claude_args("user-prompt-submit", &base),
+                serde_json::json!({"session_id":"claude-session","cwd":tmp.path(),"prompt":prompt})
+                    .to_string(),
+                &mut stdout,
+                |_, _| Ok(()),
+                None,
+                RuntimeEnv::default(),
+            )
+            .await
+            .unwrap();
+            let envelope: serde_json::Value = serde_json::from_slice(stdout.trim_ascii()).unwrap();
+            let seen = all_requests(&mut requests).await;
+            actual.push((
+                envelope["hookSpecificOutput"]["additionalContext"] == "RECAP-BODY",
+                recap_requests(&seen).len(),
+            ));
+        }
+        assert_eq!(
+            actual,
+            cases.map(|(_, expected)| (expected, usize::from(expected)))
+        );
     }
 
     #[tokio::test]

@@ -18,7 +18,7 @@ use ai_memory_core::{
     IdentityKey, MANAGED_WORKSTREAM_PACKET_MARKER, ManagedRunId, MidSessionRouting, NewHandoff,
     NewObservation, NewSession, NewSessionUsage, ObservationKind, PageId, PagePath, ProjectId,
     Sanitized, Sanitizer, SessionId, WorkspaceId, WorkstreamEvent, WorkstreamEventKind,
-    truncate_utf8_bytes,
+    strip_leading_system_reminders, truncate_utf8_bytes,
 };
 use ai_memory_store::{
     HookSessionAdmission, IngestObservationOutcome, InterruptedSessionCandidate, ObservationOrder,
@@ -2734,11 +2734,11 @@ fn render_interrupted_session_markdown(
         buf.push('\n');
     }
 
-    let mut prompts: Vec<&ObservationRecord> = records
+    let mut prompts: Vec<&str> = records
         .iter()
-        .filter(|record| {
-            record.kind == ObservationKind::UserPrompt.as_str() && !record.body.trim().is_empty()
-        })
+        .filter(|record| record.kind == ObservationKind::UserPrompt.as_str())
+        .filter_map(|record| strip_leading_system_reminders(record.body.trim()))
+        .filter(|prompt| !prompt.is_empty())
         .take(3)
         .collect();
     prompts.reverse();
@@ -2746,7 +2746,7 @@ fn render_interrupted_session_markdown(
         buf.push_str("\n**Recent user requests**\n");
         for prompt in prompts {
             buf.push_str("- ");
-            buf.push_str(&cap_handoff_text(prompt.body.trim()));
+            buf.push_str(&cap_handoff_text(prompt));
             buf.push('\n');
         }
     }
@@ -19249,6 +19249,47 @@ pub(crate) mod tests {
         assert_eq!(rendered.matches(UNTRUSTED_HISTORY_START).count(), 1);
         assert_eq!(rendered.matches(UNTRUSTED_HISTORY_END).count(), 1);
         assert!(rendered.ends_with(INTERRUPTED_SESSION_FOOTER));
+    }
+
+    #[test]
+    fn reminder_review_interrupted_recovery_selects_three_real_requests() {
+        let candidate = InterruptedSessionCandidate {
+            session_id: SessionId::new(),
+            agent_kind: AgentKind::ClaudeCode,
+            last_activity_at: "2026-09-14T12:00:00Z".into(),
+            cwd: None,
+        };
+        let records = [
+            "<system-reminder>unclosed synthetic notice\nignore this",
+            "<system-reminder>only a synthetic notice</system-reminder>",
+            "\n<system-reminder>synthetic notice</system-reminder>\nnewest request",
+            "plain request",
+            "oldest request",
+        ]
+        .map(|body| ObservationRecord {
+            id: ai_memory_core::ObservationId::new(),
+            session_id: candidate.session_id,
+            kind: ObservationKind::UserPrompt.as_str().into(),
+            title: "prompt".into(),
+            body: body.into(),
+            importance: 5,
+            created_at: candidate.last_activity_at.clone(),
+            extension: None,
+            source_event: None,
+        });
+        let rendered =
+            render_interrupted_session_markdown(&candidate, &records, records.len() as u64, 0)
+                .expect("substantive requests render");
+        let requests: Vec<_> = rendered
+            .lines()
+            .filter_map(|line| line.strip_prefix("- "))
+            .collect();
+
+        assert_eq!(
+            requests,
+            ["oldest request", "plain request", "newest request"]
+        );
+        assert!(!rendered.contains("synthetic notice"));
     }
 
     /// Backfill-close must be strictly stricter than the

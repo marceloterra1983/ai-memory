@@ -1706,8 +1706,10 @@ fn parse_claude(
         }
         return;
     }
-    if role == "user" && claude_task_notification(value, message) {
-        losses.push("Claude task notifications were intentionally excluded".into());
+    if role == "user"
+        && let Some(reason) = claude_user_record_exclusion(value, message)
+    {
+        losses.push(reason.into());
         return;
     }
     parse_content_blocks(
@@ -1722,14 +1724,10 @@ fn parse_claude(
     );
 }
 
-/// A user turn Claude Code writes itself to report a background task: a
-/// monitored command's streamed output, a finished background command or
-/// agent and its result. No prompt hook fires for it, so live capture never
-/// stores it as a prompt. Recognized by an `origin.kind` of
-/// `task-notification` in any case, or by a first text block that opens with
-/// a `<task-notification>` tag in any case, attributes allowed, after any
-/// byte-order mark, zero-width character or whitespace.
-fn claude_task_notification(record: &Value, message: &Value) -> bool {
+/// Exclude background task reports and incomplete notices before any block
+/// reaches the ledger. An incomplete notice can extend into another block.
+fn claude_user_record_exclusion(record: &Value, message: &Value) -> Option<&'static str> {
+    const TASK_NOTIFICATION: &str = "Claude task notifications were intentionally excluded";
     let origin = |value: &Value| {
         value
             .pointer("/origin/kind")
@@ -1737,37 +1735,63 @@ fn claude_task_notification(record: &Value, message: &Value) -> bool {
             .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("task-notification"))
     };
     if origin(record) || origin(message) {
-        return true;
+        return Some(TASK_NOTIFICATION);
     }
-    let first_text = match message.get("content") {
-        Some(Value::String(text)) => Some(text.as_str()),
-        Some(Value::Array(blocks)) => blocks.iter().find_map(|block| {
-            block.as_str().or_else(|| {
-                (block.get("type").and_then(Value::as_str) == Some("text"))
-                    .then(|| first_string(block, &["text"]))
-                    .flatten()
-            })
-        }),
-        _ => None,
+    let content = message.get("content");
+    let legacy_shape = matches!(content, Some(Value::String(_) | Value::Array(_)));
+    let mut legacy_first_text = None;
+    let mut first_visible_text = None;
+    let mut removed_leading_reminders = false;
+    for block in content_blocks(content) {
+        let Some(raw) = content_block_text(block) else {
+            continue;
+        };
+        let Some(text) = strip_leading_system_reminders(raw) else {
+            return Some(
+                "Claude user records with unclosed system reminders were intentionally excluded",
+            );
+        };
+        if first_visible_text.is_none() {
+            removed_leading_reminders |= text.len() < raw.len();
+            first_visible_text = Some(text).filter(|text| !text.trim().is_empty());
+        }
+        // Bare records retain the historical notification check, which only
+        // recognized strings and array blocks with an explicit text field.
+        if legacy_shape
+            && legacy_first_text.is_none()
+            && (block.is_string()
+                || (block.get("type").and_then(Value::as_str) == Some("text")
+                    && block.get("text").is_some_and(Value::is_string)))
+        {
+            legacy_first_text = Some(raw);
+        }
+    }
+    let first_text = if removed_leading_reminders {
+        first_visible_text
+    } else {
+        legacy_first_text
     };
     first_text
-        .and_then(strip_leading_system_reminders)
-        .is_some_and(|text| {
-            const TAG: &str = "<task-notification";
-            let text = text.trim_start_matches(|c: char| {
-                c.is_whitespace()
-                    || matches!(
-                        c,
-                        '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}'
-                    )
-            });
-            text.get(..TAG.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(TAG))
-                && text[TAG.len()..]
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c == '>' || c == '/' || c.is_whitespace())
-        })
+        .is_some_and(opens_with_claude_task_notification)
+        .then_some(TASK_NOTIFICATION)
+}
+
+/// Claude can precede the tag with a byte-order mark or zero-width spacing.
+fn opens_with_claude_task_notification(text: &str) -> bool {
+    const TAG: &str = "<task-notification";
+    let text = text.trim_start_matches(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}'
+            )
+    });
+    text.get(..TAG.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(TAG))
+        && text[TAG.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == '>' || c == '/' || c.is_whitespace())
 }
 
 /// A record flag Claude Code writes as `true`, and that a rewritten
@@ -3101,6 +3125,25 @@ fn parse_copilot(
     }
 }
 
+fn content_blocks(content: Option<&Value>) -> &[Value] {
+    match content {
+        Some(Value::Array(blocks)) => blocks,
+        Some(block) => std::slice::from_ref(block),
+        None => &[],
+    }
+}
+
+fn content_block_text(block: &Value) -> Option<&str> {
+    block
+        .as_str()
+        .or_else(|| match block.get("type").and_then(Value::as_str) {
+            Some("text" | "input_text" | "output_text") => {
+                first_string(block, &["text", "content"])
+            }
+            _ => None,
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_content_blocks(
     agent: AgentKind,
@@ -3112,12 +3155,8 @@ fn parse_content_blocks(
     events: &mut Vec<NewWorkstreamEvent>,
     losses: &mut Vec<String>,
 ) {
-    let Some(content) = content else { return };
-    let blocks: Vec<&Value> = content
-        .as_array()
-        .map_or_else(|| vec![content], |items| items.iter().collect());
-    for (index, block) in blocks.into_iter().enumerate() {
-        if let Some(text) = block.as_str() {
+    for (index, block) in content_blocks(content).iter().enumerate() {
+        if let Some(text) = content_block_text(block) {
             let Some(text) = visible_message_text(agent, role, text) else {
                 continue;
             };
@@ -3140,24 +3179,6 @@ fn parse_content_blocks(
             .and_then(Value::as_str)
             .unwrap_or_default();
         match block_type {
-            "text" | "input_text" | "output_text" => {
-                if let Some(text) = first_string(block, &["text", "content"])
-                    .and_then(|text| visible_message_text(agent, role, text))
-                {
-                    push_event(
-                        events,
-                        agent,
-                        session,
-                        record_id,
-                        index,
-                        WorkstreamEventKind::Message,
-                        Some(role),
-                        text,
-                        occurred_at.clone(),
-                        json!({}),
-                    );
-                }
-            }
             "tool_use" | "toolCall" | "tool_call" => {
                 let name = first_string(block, &["name", "toolName", "tool"]).unwrap_or("tool");
                 let input = block
@@ -8813,6 +8834,95 @@ mod tests {
 
         let contents: Vec<_> = events.iter().map(|event| event.content.as_str()).collect();
         assert_eq!(contents, ["faça X", "faça X"]);
+    }
+
+    #[test]
+    fn reminder_review_claude_classifies_record_before_emitting_content_blocks() {
+        let notice = "<system-reminder>synthetic notice</system-reminder>";
+        let notification = "<task-notification>synthetic task result</task-notification>";
+        let reminded_notification = format!("{notice}\n{notification}");
+        let cases: &[(&str, Value, &[&str])] = &[
+            (
+                "string",
+                json!(format!("{notice}\nreview the diff")),
+                &["review the diff"],
+            ),
+            ("string notification", json!(reminded_notification), &[]),
+            (
+                "text object",
+                json!({"type":"text","text":format!("{notice}\nreview the diff")}),
+                &["review the diff"],
+            ),
+            (
+                "text object notification",
+                json!({"type":"text","text":reminded_notification}),
+                &[],
+            ),
+            (
+                "text content field",
+                json!({"type":"input_text","content":reminded_notification}),
+                &[],
+            ),
+            (
+                "notice-only array block",
+                json!([{"type":"text","text":notice}, {"type":"text","text":"review the diff"}]),
+                &["review the diff"],
+            ),
+            (
+                "notice-only array blocks before a notification",
+                json!([notice, {"type":"text","text":notice}, {"type":"text","text":notification}]),
+                &[],
+            ),
+            (
+                "unclosed string",
+                json!("<system-reminder>unclosed notice"),
+                &[],
+            ),
+            (
+                "unclosed array block",
+                json!([{"type":"tool_result","content":"preceding tool result"}, {"type":"text","text":notice}, {"type":"text","text":"<system-reminder>unclosed notice"}, "do not emit this"]),
+                &[],
+            ),
+            (
+                "bare array notification",
+                json!([{"type":"text","text":notification}]),
+                &[],
+            ),
+            (
+                "bare object legacy control",
+                json!({"type":"text","text":notification}),
+                &[notification],
+            ),
+        ];
+
+        let actual: Vec<_> = cases
+            .iter()
+            .map(|(name, content, _)| {
+                let record = json!({"type":"user","message":{"role":"user","content":content}});
+                let mut events = Vec::new();
+                parse_claude(&record, "session", name, &mut events, &mut Vec::new());
+                (
+                    *name,
+                    events
+                        .into_iter()
+                        .map(|event| event.content)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let expected: Vec<_> = cases
+            .iter()
+            .map(|(name, _, wanted)| {
+                (
+                    *name,
+                    wanted
+                        .iter()
+                        .map(|text| (*text).to_owned())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]

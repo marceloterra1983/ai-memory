@@ -129,17 +129,27 @@ fn derive_title(observations: &[Observation], session_id: SessionId) -> String {
         if obs.kind != ObservationKind::UserPrompt {
             continue;
         }
-        let preamble = obs.title.trim() == SUBAGENT_PROMPT_PREAMBLE;
-        if preamble || obs.title.trim_start().starts_with(SYSTEM_REMINDER_OPEN) {
+        let trimmed_title = obs.title.trim();
+        let preamble = trimmed_title == SUBAGENT_PROMPT_PREAMBLE;
+        if preamble
+            || trimmed_title.starts_with(SYSTEM_REMINDER_OPEN)
+            || trimmed_title.is_empty()
+            || trimmed_title == ObservationKind::UserPrompt.as_str()
+        {
             rejected_subagent_preamble |= preamble;
-            if let Some(body) = strip_leading_system_reminders(&obs.body)
-                && !looks_like_markup_block(body)
-                && let Some(title) = body.lines().map(str::trim)
-                    .find(|line| !looks_like_title_scaffolding(line))
-            {
-                return truncate_for_title(title);
+            let Some(body) = strip_leading_system_reminders(&obs.body) else {
+                continue;
+            };
+            let removed_reminders = body.len() < obs.body.len();
+            if preamble || removed_reminders {
+                if (!removed_reminders || !looks_like_markup_block(body))
+                    && let Some(title) = body.lines().map(str::trim)
+                        .find(|line| !looks_like_title_scaffolding(line))
+                {
+                    return truncate_for_title(title);
+                }
+                continue;
             }
-            continue;
         }
         if !obs.title.is_empty() && !looks_like_scaffolding(&obs.title) {
             return obs.title.clone();
@@ -1343,6 +1353,121 @@ async fn leading_system_reminders_render_equivalently() {
     assert_eq!(
         handoff.open_questions,
         ["Unresolved question: Como faço X?"]
+    );
+}
+
+#[tokio::test]
+async fn reminder_review_subagent_title_is_preserved_in_both_paths() {
+    let fx = fixture().await;
+    let sid = fx
+        .seed(&subagent_preamble(
+            "<ide_opened_file>fixture</ide_opened_file>\nReview the diff",
+        ))
+        .await;
+    let reader = &fx.store.reader;
+    let rows = reader.observations_for_session(sid).await.unwrap();
+    let digest = SessionDigest::load(reader, fx.ws, fx.proj, sid)
+        .await
+        .unwrap();
+    let old = full_load::synthesize_session_page(fx.ws, fx.proj, sid, AgentKind::ClaudeCode, &rows);
+    let new = super::synthesize_session_page(fx.ws, fx.proj, sid, AgentKind::ClaudeCode, &digest);
+
+    assert_eq!(
+        [old.title, new.title],
+        ["Review the diff"; 2],
+        "oracle, store"
+    );
+}
+
+#[tokio::test]
+async fn reminder_review_blank_first_line_names_the_session_in_both_paths() {
+    let fx = fixture().await;
+    let sid = fx
+        .seed(&[
+            start(0),
+            row(
+                ObservationKind::UserPrompt,
+                "user-prompt",
+                "\n<system-reminder>fixture</system-reminder>\nfaça X",
+                1,
+            ),
+            end(2),
+        ])
+        .await;
+    let reader = &fx.store.reader;
+    let rows = reader.observations_for_session(sid).await.unwrap();
+    let (digest, stats) = SessionDigest::load_with_stats(reader, fx.ws, fx.proj, sid)
+        .await
+        .unwrap();
+    let old = full_load::synthesize_session_page(fx.ws, fx.proj, sid, AgentKind::ClaudeCode, &rows);
+    let new = super::synthesize_session_page(fx.ws, fx.proj, sid, AgentKind::ClaudeCode, &digest);
+
+    assert_eq!([old.title, new.title], ["faça X"; 2], "oracle, store");
+    assert_eq!(stats.prompt_bodies_read, 1);
+}
+
+#[tokio::test]
+async fn reminder_review_sql_only_returns_bodies_for_title_candidates() {
+    let fx = fixture().await;
+    let cases = [
+        ("Please explain <system-reminder>", "ordinary prompt", None),
+        (
+            "Please explain You are a subagent spawned by another session.",
+            "ordinary prompt",
+            None,
+        ),
+        (SUBAGENT_PREAMBLE, "subagent task", Some("subagent task")),
+        (
+            "\t\u{2003}You are a subagent spawned by another session.\u{a0}\r\n",
+            "spaced preamble task",
+            Some("spaced preamble task"),
+        ),
+        (
+            "<system-reminder>fixture",
+            "reminder body",
+            Some("reminder body"),
+        ),
+        (
+            "\t\u{2003}<system-reminder>",
+            "spaced title body",
+            Some("spaced title body"),
+        ),
+        (
+            "user-prompt",
+            "\n<system-reminder>fixture</system-reminder>\nfaça X",
+            Some("\n<system-reminder>fixture</system-reminder>\nfaça X"),
+        ),
+        (
+            "\u{a0}\n",
+            "\u{2003}<system-reminder>fixture</system-reminder>\nfaça Y",
+            Some("\u{2003}<system-reminder>fixture</system-reminder>\nfaça Y"),
+        ),
+        ("user-prompt", "plain control", None),
+        ("", "text before <system-reminder>", None),
+    ];
+    let rows: Vec<_> = cases
+        .iter()
+        .enumerate()
+        .map(|(idx, (title, body, _))| row(ObservationKind::UserPrompt, title, body, idx as i64))
+        .collect();
+    let sid = fx.seed(&rows).await;
+    let actual = fx
+        .store
+        .reader
+        .read_session_observations(fx.ws, fx.proj, sid, |snapshot| {
+            let mut rows = Vec::new();
+            snapshot.scan_prompts([SUBAGENT_PREAMBLE, "<system-reminder>"], |title, body| {
+                rows.push((title.to_owned(), body.map(str::to_owned)));
+                true
+            })?;
+            Ok(rows)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        actual,
+        cases.map(|(title, _, body)| (title.to_owned(), body.map(str::to_owned)))
     );
 }
 
